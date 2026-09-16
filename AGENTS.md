@@ -46,6 +46,12 @@ bash -n run_priority.sh
 git diff --check
 ```
 
+## Dependency security
+
+Pin every direct and transitive Python dependency to an exact version in a
+tracked requirements file. Do not use version ranges or unpinned dependencies.
+Review and test each dependency update before you commit it.
+
 Run a dry run only with operator-provided case queues and temporary paths. Do
 not start a bulk download solely to validate a code change.
 

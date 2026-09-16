@@ -1,2 +1,5 @@
+# Pin every package for reproducible and reviewable security updates.
 # Signed provenance records require Ed25519 support.
-cryptography>=42,<47
+cryptography==46.0.7
+cffi==2.1.1
+pycparser==3.0
