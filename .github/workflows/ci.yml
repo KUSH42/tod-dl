@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests and syntax checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: >-
+          python3 -m pip install --disable-pip-version-check
+          -r requirements-downloader.txt -r requirements-monitor.txt
+
+      - name: Run tests
+        run: python3 -m unittest -v test_download_priority.py test_monitor_priority.py
+
+      - name: Check Python syntax
+        run: >-
+          python3 -m py_compile download_priority.py download_telemetry.py
+          monitor_priority.py controller_control.py provenance.py
+          verify_provenance.py
+
+      - name: Check Bash syntax
+        run: bash -n run_priority.sh
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Scan for secrets
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
