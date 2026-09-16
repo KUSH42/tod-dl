@@ -157,6 +157,11 @@ git diff --check
 Read [open development work](OPEN-WORK.md) for the current implementation
 state and the planned work that remains.
 
+The acquisition-engine evaluation is local-only. It needs no onion target and
+does not permit a source pilot. Read the
+[acquisition-tool evaluation specification](SPEC-acquisition-tool-evaluation.md)
+before you implement or run the evaluation.
+
 ## License
 
 The [TOD-DL Non-Commercial License](LICENSE) permits personal, educational,
