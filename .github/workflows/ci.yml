@@ -36,7 +36,7 @@ jobs:
           src/verify_provenance.py src/acquisition_evaluation.py
 
       - name: Check Bash syntax
-        run: bash -n src/run_priority.sh
+        run: bash -n ./run.sh
 
   secrets:
     name: Secret scan
