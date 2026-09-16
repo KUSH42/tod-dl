@@ -142,6 +142,12 @@ bash -n run_priority.sh
 git diff --check
 ```
 
+## License
+
+The [TOD-DL Non-Commercial License](LICENSE) permits personal, educational,
+and portfolio-review use. Commercial use and redistribution need prior written
+permission from the copyright holder.
+
 ## Next steps
 
 Create case-specific queues outside the repository. Run a dry run and review
