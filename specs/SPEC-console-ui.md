@@ -151,9 +151,9 @@ The header must not use **Updated**. Snapshot publication shows controller
 telemetry freshness. It does not show source reachability or transfer progress.
 Render the static **Session**, **Last complete**, **Last payload progress**, and
 **ago** labels dim. Render each duration or time value with the default style.
-Render the **live** label green without bold text. Render a **Retry eligible
-now** status dim. Render **Disk** bold with the same color as **Files**. Render
-the **free**, **reserve**, and **headroom** labels dim.
+Render the **live** label green without bold text. Render every retry status
+message dim. Render **Disk** bold with the same color as **Files**. Render the
+**free**, **reserve**, and **headroom** labels dim.
 Render the **complete**, **busy**, **retry**, **review**, **queued**,
 **retained**, and **remaining** labels dim.
 

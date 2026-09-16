@@ -608,7 +608,7 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                                                        ("retained", "remaining"))
                         else:
                             rendered.append(value)
-                    elif line.startswith("Retry eligible now"):
+                    elif line == retry_summary(current):
                         rendered.append(line, style="dim")
                     else:
                         rendered.append(line)
