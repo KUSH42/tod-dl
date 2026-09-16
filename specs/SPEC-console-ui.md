@@ -24,8 +24,8 @@ The [engine evaluation](SPEC-acquisition-tool-evaluation.md) owns the engine
 decision. This UI does not require per-URL processes or long-lived RPC workers.
 Synthetic telemetry can drive UI development before that decision is made. The
 first release supports the synthetic fixture and demo path, plus read-only
-version-1 controller snapshots. It never reads the live SQLite database or
-changes controller state.
+version-1 and version-2 controller snapshots. It never reads the live SQLite
+database or changes controller state.
 
 The [controller command channel specification](SPEC-controller-control-ui.md)
 defines the later interactive mode. That mode reuses this application's layout,
@@ -38,7 +38,8 @@ The version-1 synthetic fixture is a JSON object with `schema_version` set to
 `created_at`,
 `selected_count`, `counts`, and `metrics`; `counts` names every selected-item
 bucket and must sum to `selected_count`. `metrics` includes the nullable fields
-displayed in the main-screen summary. Worker records include `worker_id`, `item_id`,
+displayed in the main-screen summary. Worker records include `worker_id`,
+`item_id`,
 `basename`, `phase`, `received_bytes`, `total_bytes`, `speed_bps`, and
 `eta_seconds`. Fixture data is untrusted display input: all strings are
 rendered literally and all numeric values are validated as nonnegative.
@@ -89,8 +90,9 @@ python3 src/monitor.py --demo
 ```
 
 Use `python3 src/monitor.py --fixture PATH` to validate and display a
-different version-1 synthetic fixture. In a noninteractive environment, either
-command prints a concise literal-text status and exits. `--state` and
+different version-1 or version-2 synthetic fixture. In a noninteractive
+environment, either command prints a concise literal-text status and exits.
+`--state` and
 `--run-id` read only the controller's published snapshot; they never open the
 acquisition database or send a command to the controller.
 
@@ -112,7 +114,7 @@ ETA    —  2 items require review
 3  bundle.zip      Hashing        73%              —           —
 4  document.pdf    Connecting     18s elapsed      —           —
 
-Disk destination/state: 84.2 GiB free | 10 GiB reserve | 74.2 GiB headroom
+Disk: 84.2 GiB free | 10 GiB reserve | 74.2 GiB headroom
 Tor preflight passed at 12:16 UTC | Last complete 42s ago
 
 [Activity] [Queue] [Errors / review]
@@ -126,7 +128,7 @@ Tor preflight passed at 12:16 UTC | Last complete 42s ago
 The summary must show run ID, lifecycle state, controller session start,
 session elapsed time, run creation time, and remaining configured run time.
 Show mutually exclusive item counts that sum to selected items. The summary
-lists a nonzero count for every bucket, including complete, busy, retry,
+lists every nonzero bucket, including complete, busy, retry,
 queued, exhausted, unavailable, existing-unverified, review-required, and
 unknown state. Busy includes connection setup, transfer, validation, and
 finalization; expose its breakdown.
@@ -148,17 +150,23 @@ record must show the recorded final session duration.
 The header must not use **Updated**. Snapshot publication shows controller
 telemetry freshness. It does not show source reachability or transfer progress.
 
-When the controller records payload progress, show **Last payload progress**
-followed by its age. Payload progress means that the engine reports an increase
-in received payload bytes. It does not prove that a particular host is
-reachable, that a host will respond again, or that every active transfer is
-healthy.
+For a finished or stopped run, show the required final time instead of progress
+or completion age. An active download worker has phase `downloading`. When one
+or more download workers are active, show **Last complete** followed by its
+age. If every active download worker has no payload progress for 60 seconds,
+mark every affected worker as stalled. If no download worker is active and
+payload progress exists, show **Last payload progress** followed by its age.
+If the preferred value is absent, show the other recorded value. If neither
+value exists, show **No payload progress recorded**.
 
-If no fresh payload-progress observation exists and a completion time exists,
-show **Last complete** followed by its age. If neither value exists, show
-**No payload progress recorded**. A finished run must show **Completed at**
-with the recorded UTC time. A stopped run must show **Stopped at** with the
-recorded UTC time and stop reason, when known.
+Payload progress means that the engine reports an increase in received payload
+bytes.
+
+Payload progress does not prove that a particular host is reachable, that a
+host will respond again, or that every active transfer is healthy. The monitor
+must not label it as a packet, response, or host-reachability check. A finished
+run must show **Completed at** with the recorded UTC time. A stopped run must
+show **Stopped at** with the recorded UTC time and stop reason, when known.
 
 The monitor must calculate displayed ages from monotonic local time after a
 valid snapshot. It must not advance an age after stale or disconnected status.
@@ -187,12 +195,15 @@ stale interval. The trend is display-only. It must not affect retry, admission,
 timeout, or Tor-renewal behavior.
 
 The health panel must show one disk line for each distinct filesystem that can
-block acquisition. Identify each line by safe role labels, such as
-`destination/state`, not by a private path. Each line must show free bytes,
-configured reserve bytes, and headroom bytes. Headroom equals free bytes minus
-reserve bytes. A negative headroom must show as a storage-risk error. Zero
-headroom must show as a storage-stop condition. Positive headroom does not
-guarantee that a future item fits.
+block acquisition. Each line must start with **Disk:** and must not expose a
+private path. Each line must show free bytes, configured reserve bytes, and
+headroom bytes. Show filesystem role labels only in details. Headroom equals
+free bytes minus reserve bytes. A negative headroom must show as a storage-risk
+error. Zero headroom must show as a storage-stop condition. Positive headroom
+does not guarantee that a future item fits.
+
+Place disk lines below the worker table and above the activity log. Preserve
+this order in compact layouts by placing disk lines before activity-log content.
 
 The monitor must deduplicate filesystems by the controller-provided filesystem
 identity. If the controller reports destination and state on different
@@ -267,10 +278,11 @@ phase, progress, speed, and ETA, moving secondary fields into details. At
 space permits. Below that size, provide a compact summary and scrollable
 details rather than failing. Resizing must preserve selection and filters.
 
-Read a published snapshot at most twice per second from one-second telemetry.
+Read a published snapshot at most twice per second from telemetry published at
+most twice per second.
 The Textual application renders from its in-memory view model at 30 frames per
-second by default. A future `--fps` option accepts whole values from 10 through
-60 and defaults to `30`; it controls rendering only, not controller, network,
+second by default. The `--fps` option accepts whole values from 10 through 60
+and defaults to `30`; it controls rendering only, not controller, network,
 database, snapshot, or command polling.
 
 At every render tick, sample monotonic time, advance local-only countdowns and
@@ -302,8 +314,9 @@ Deliver the monitor in stages with synthetic fixtures and recorded results.
 
 1. Build the demo, layouts, navigation, state labels, and deterministic metric
    rendering against versioned telemetry fixtures.
-2. Add read-only snapshot and paginated database adapters, then connect the
-   controller telemetry after its engine integration passes the required gate.
+2. Add read-only snapshot and paginated controller detail adapters, then
+   connect controller telemetry after its engine integration passes the
+   required gate.
 3. Verify resumed and unknown-size transfers, retries, hashing, finalization,
    storage stops, and every unresolved outcome without live acquisition.
 4. Verify stale controller and engine samples, reconnect, session replacement,
@@ -314,12 +327,14 @@ Deliver the monitor in stages with synthetic fixtures and recorded results.
 6. Kill or close the monitor during a synthetic transfer and prove the worker
    continues. Compare fixture hashes and durable state before and after
    monitoring; the monitor must cause no acquisition mutations.
-7. Verify the session timer, payload-progress age, completion and stop labels,
-   stale-time freeze, and session replacement with monotonic-clock fixtures.
+7. Verify the session timer, active and all-stalled payload-progress labels,
+   idle completion, final stop labels, stale-time freeze, and session
+   replacement with monotonic-clock fixtures.
 8. Verify rising, steady, falling, collecting, missing, partial, stale, and
    disconnected speed trends. Prove that invalid samples render as gaps.
 9. Verify one, duplicate, missing, stale, zero-headroom, and negative-headroom
-   filesystem records. Prove that the compact layout preserves storage risk.
+   filesystem records. Prove that disk lines remain above activity content in
+   the compact layout.
 
 Use Textual's headless test facilities for interaction tests and manual SSH
 checks for terminal behavior. Document optional dependency installation and

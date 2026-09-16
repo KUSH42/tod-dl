@@ -194,7 +194,10 @@ def format_elapsed_duration(value: Any) -> str:
 def format_countdown(value: Any) -> str:
     """Format an exact short countdown without ETA's approximate marker."""
     seconds = max(0, int(value or 0))
+    hours, seconds = divmod(seconds, 3600)
     minutes, seconds = divmod(seconds, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
     return f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
 
 
@@ -266,12 +269,18 @@ def progress_status(snapshot: dict[str, Any]) -> str:
         reason = literal_text(run.get("reason")) if run.get("reason") else "unknown reason"
         when = literal_text(run.get("stopped_at")) if run.get("stopped_at") else "?"
         return f"Stopped at {when}: {reason}"
+    active_downloads = [worker for worker in snapshot["workers"]
+                        if worker.get("phase") == "downloading"]
     payload_age = recorded_age(run.get("last_payload_progress_at"), snapshot)
-    if payload_age != "?":
-        return "Last payload progress " + payload_age
     completion_age = recorded_age(run.get("last_completion_at"), snapshot)
+    if active_downloads and completion_age != "?":
+        return "Last complete " + completion_age
+    if not active_downloads and payload_age != "?":
+        return "Last payload progress " + payload_age
     if completion_age != "?":
         return "Last complete " + completion_age
+    if payload_age != "?":
+        return "Last payload progress " + payload_age
     return "No payload progress recorded"
 
 
@@ -386,7 +395,7 @@ def worker_phase_label(worker: dict[str, Any], snapshot: dict[str, Any]) -> str:
     if phase == "downloading":
         progress_age = worker.get("last_progress_age_s")
         if (isinstance(progress_age, (int, float)) and not isinstance(progress_age, bool)
-                and progress_age > 5):
+                and progress_age >= 60):
             return f"stalled {format_countdown(progress_age)}"
     if phase == "cooldown":
         remaining = snapshot["health"].get("cooldown_remaining_s")

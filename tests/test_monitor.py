@@ -170,13 +170,14 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(worker_phase_label({"phase": "cooldown"}, value),
                          "cooldown 12s")
         self.assertEqual(format_countdown(72), "1m 12s")
+        self.assertEqual(format_countdown(3660), "1h 1m")
 
-    def test_downloading_worker_becomes_stalled_after_five_seconds_without_progress(self):
+    def test_downloading_worker_becomes_stalled_after_sixty_seconds_without_progress(self):
         value = snapshot()
         self.assertEqual(worker_phase_label(
-            {"phase": "downloading", "last_progress_age_s": 5}, value), "downloading")
+            {"phase": "downloading", "last_progress_age_s": 59}, value), "downloading")
         self.assertEqual(worker_phase_label(
-            {"phase": "downloading", "last_progress_age_s": 6.2}, value), "stalled 6s")
+            {"phase": "downloading", "last_progress_age_s": 60}, value), "stalled 1m 0s")
 
     def test_finished_run_without_retries_has_a_final_summary(self):
         value = snapshot("finished")
@@ -188,18 +189,31 @@ class MonitorTests(unittest.TestCase):
         value["run"].update({
             "last_payload_progress_at": (dt.datetime.now(dt.timezone.utc)
                                         - dt.timedelta(seconds=8)).isoformat(),
+            "last_completion_at": (dt.datetime.now(dt.timezone.utc)
+                                   - dt.timedelta(seconds=4)).isoformat(),
             "completed_at": None,
             "stopped_at": None,
             "metrics": {"speed_bps": {"value": 100, "quality": "exact"}},
         })
+        value["workers"] = [{"worker_id": 1, "phase": "downloading"}]
         value["health"] = {"filesystems": [{
             "filesystem_id": "100", "roles": ["destination", "state"],
             "free_bytes": 1000, "reserve_bytes": 500, "headroom_bytes": 500,
         }]}
         validate_snapshot(value)
-        self.assertIn("Last payload progress", progress_status(value))
+        self.assertIn("Last complete", progress_status(value))
         self.assertIn("Disk:", disk_status(value))
         self.assertIn("Session 00:00:01", screen_summary(value, "Collecting"))
+
+    def test_idle_run_prefers_last_payload_progress_over_last_complete(self):
+        value = snapshot()
+        value["run"].update({
+            "last_payload_progress_at": (dt.datetime.now(dt.timezone.utc)
+                                        - dt.timedelta(seconds=30)).isoformat(),
+            "last_completion_at": (dt.datetime.now(dt.timezone.utc)
+                                   - dt.timedelta(seconds=10)).isoformat(),
+        })
+        self.assertIn("Last payload progress", progress_status(value))
 
     def test_speed_trend_labels_a_rising_exact_series(self):
         trend = SpeedTrend()
