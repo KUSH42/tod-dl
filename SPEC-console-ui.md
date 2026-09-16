@@ -1,9 +1,9 @@
 # Specification: acquisition console UI
 
-Status: proposed behavior, September 15, 2026. This document specifies a
-Textual dashboard for acquisition runs. The checkout contains a partial
-read-only implementation; this document also defines planned behavior. It does
-not authorize source requests.
+Status: partially implemented, September 16, 2026. The checkout contains a
+read-only monitor and confirmed retry and Tor-renewal controls. This document
+also defines planned dashboard behavior. It does not authorize source
+requests.
 
 ## Outcome and dependencies
 
@@ -258,9 +258,10 @@ launching alongside the existing controller in separate terminals or tmux.
 
 ## Deferred controls and next steps
 
-The first release is an observer. The interactive extension is defined in the
-[controller command channel specification](SPEC-controller-control-ui.md).
-Pause admission, drain, checkpoint-stop, retry-now, and circuit renewal require
-controller acknowledgement, audit records, and defined shutdown behavior.
-Do not implement these actions as direct database edits or PID signaling from
-the UI. Start implementation with synthetic telemetry and the demo screen.
+The monitor supports observer mode and confirmed retry and Tor-renewal actions.
+The [controller command channel specification](SPEC-controller-control-ui.md)
+defines the interactive extension. Pause admission, resume, drain, and
+checkpoint stop require controller acknowledgement, audit records, and defined
+shutdown behavior. Do not implement these actions as direct database edits or
+PID signaling from the UI. Start each new control with synthetic telemetry and
+the demo screen.

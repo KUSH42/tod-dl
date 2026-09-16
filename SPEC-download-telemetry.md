@@ -1,7 +1,9 @@
 # Specification: download telemetry and progress accounting
 
-Status: proposed behavior, September 15, 2026. This document defines the data
-contract behind the [console UI](SPEC-console-ui.md). It supplements the
+Status: partially implemented, September 16, 2026. The controller publishes
+version-1 snapshots, and the monitor reads them. This document defines the
+remaining telemetry contract behind the [console UI](SPEC-console-ui.md). It
+supplements the
 [reliable acquisition specification](SPEC-reliable-acquisition.md); durable
 acquisition rules take precedence over display calculations.
 

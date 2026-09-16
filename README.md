@@ -152,6 +152,11 @@ bash -n run_priority.sh
 git diff --check
 ```
 
+## Development status
+
+Read [open development work](OPEN-WORK.md) for the current implementation
+state and the planned work that remains.
+
 ## License
 
 The [TOD-DL Non-Commercial License](LICENSE) permits personal, educational,

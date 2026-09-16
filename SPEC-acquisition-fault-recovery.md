@@ -1,7 +1,8 @@
 # Specification: acquisition fault-recovery tests
 
-Status: proposed behavior, September 16, 2026. This specification defines
-fault tests for controller recovery. It supplements the
+Status: partially implemented, September 16, 2026. The current test suite
+covers controller recovery cases. This specification defines the remaining
+fault-test contract. It supplements the
 [reliable acquisition specification](SPEC-reliable-acquisition.md). Tests must
 protect acquired data and must not make source requests.
 

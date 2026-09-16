@@ -11,7 +11,8 @@ download state, derived content, secrets, private correspondence, or indexes.
 
 The project root contains the downloader, monitor, control server, provenance
 writer, and verifier. `fixtures/` contains non-sensitive test inputs. The
-`SPEC-*.md` files define expected behavior.
+`SPEC-*.md` files define expected behavior. `OPEN-WORK.md` lists incomplete
+development work and does not change a specification requirement.
 
 Use a separate case directory for these runtime paths:
 

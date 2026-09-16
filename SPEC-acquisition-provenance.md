@@ -1,7 +1,8 @@
 # Specification: acquisition provenance manifest
 
-Status: proposed behavior, September 16, 2026. This specification adds a
-portable provenance record for each acquired item. It supplements the
+Status: partially implemented, September 16, 2026. The controller writes
+signed provenance records, and the verifier checks them. This specification
+defines the remaining provenance contract. It supplements the
 [reliable acquisition specification](SPEC-reliable-acquisition.md). The
 SQLite database remains the controller's recovery authority.
 

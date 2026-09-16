@@ -1,11 +1,11 @@
 # Specification: reliable evidence acquisition
 
-Status: proposed behavior, September 15, 2026. This specification defines the
-minimum operational contract for large downloads from an intermittent source.
-Implement it only after the [tool evaluation](SPEC-acquisition-tool-evaluation.md)
-selects a configuration. Until then, changes to the current downloader are
-limited to local safety, state, and fixture-harness work; they don't authorize
-a source pilot or continued unattended acquisition.
+Status: partially implemented, September 16, 2026. The downloader implements
+selected safety, state, finalization, and recovery behavior. This specification
+defines the remaining contract for large downloads from an intermittent source.
+Complete the [tool evaluation](SPEC-acquisition-tool-evaluation.md) before you
+enable source-pilot or unattended-acquisition behavior that depends on an
+engine selection.
 
 ## Architecture and boundaries
 

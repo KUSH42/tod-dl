@@ -1,10 +1,9 @@
 # Specification: controller command channel and interactive UI
 
-Status: `get_control_state` and `retry_now` implemented September 15, 2026. This
-specification extends the read-only [acquisition console UI](SPEC-console-ui.md)
-with a local, controller-owned command channel. The initial implementation
-supports `get_control_state` and confirmed `retry_now`; all other mutating
-actions remain proposed.
+Status: `get_control_state`, `retry_now`, and `renew_tor_circuits` implemented
+September 16, 2026. This specification extends the read-only
+[acquisition console UI](SPEC-console-ui.md) with a local, controller-owned
+command channel. The remaining mutating actions are proposed.
 
 ## Outcome and authority boundary
 
@@ -66,9 +65,9 @@ replayed request returns the original result and cannot repeat a mutation.
 ## Command set and confirmation
 
 The implemented command set contains `get_control_state`,
-`prepare_confirmation`, and `retry_now`. The remaining actions below are
-deliberately deferred. The controller must validate every precondition at
-execution time; the UI state is advisory and can be stale.
+`prepare_confirmation`, `retry_now`, and `renew_tor_circuits`. The remaining
+actions below are deliberately deferred. The controller must validate every
+precondition at execution time; the UI state is advisory and can be stale.
 
 | Action | Controller behavior | UI confirmation |
 | --- | --- | --- |
