@@ -60,6 +60,11 @@ copy of runtime state; perform serialization and disk I/O outside controller
 locks. Engine polling has a one-second timeout and bounded concurrency. A slow
 poll must not delay scheduling, shutdown, or other engine samples.
 
+The live snapshot builder must not query SQLite. The controller must hydrate
+and update its in-memory durable summary after committed state changes. The
+[controller telemetry state projection specification](SPEC-telemetry-state-projection.md)
+defines this required boundary, ordering, and test contract.
+
 The envelope contains these required fields; unknown values are JSON `null`.
 Byte counters are nonnegative integer bytes, rates are bytes per second,
 durations are seconds, and timestamps are UTC RFC 3339 strings.

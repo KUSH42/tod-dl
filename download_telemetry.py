@@ -28,6 +28,11 @@ def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
 
 
+def sanitize_message(message: str) -> str:
+    """Return one bounded string that is safe for a telemetry snapshot."""
+    return " ".join(message.replace("\x1b", "?").split())[:MAX_MESSAGE]
+
+
 def metric(value: Any, quality: str) -> dict[str, Any]:
     return {"value": value, "quality": quality}
 
@@ -98,6 +103,58 @@ def reduce_metrics(items: list[dict[str, Any]], active: list[dict[str, Any]],
     }
 
 
+def reduce_projected_metrics(selected_count: int, counts: dict[str, int],
+                             complete_bytes: int, active: list[dict[str, Any]],
+                             started_monotonic: float,
+                             sampled_monotonic: float) -> dict[str, Any]:
+    """Reduce projection summaries and active samples without item-row scans."""
+    complete_count = counts.get("complete", 0)
+    active_urls = {row["url"] for row in active}
+    retained = complete_bytes
+    known_total = complete_bytes
+    known_remaining = 0
+    speed = 0
+    speed_quality = "exact"
+    known_active = 0
+    for sample in active:
+        total = sample.get("total_bytes")
+        received = sample.get("received_bytes")
+        if total is not None:
+            known_active += 1
+            known_total += total
+            known_remaining += max(0, total - (received or 0))
+        if received is not None:
+            retained += received
+        if sample.get("speed_bps") is not None:
+            speed += sample["speed_bps"]
+        else:
+            speed_quality = "partial"
+    unknown = max(0, selected_count - complete_count - known_active)
+    elapsed = max(0.0, sampled_monotonic - started_monotonic)
+    eta = (known_remaining / speed if active_urls and unknown == 0 and speed > 0
+           and speed_quality == "exact" else None)
+    finish_at = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=eta)).isoformat(
+        timespec="seconds") if eta is not None else None
+    return {
+        "retained_bytes": metric(retained, "exact" if not active else "partial"),
+        "complete_bytes": metric(complete_bytes, "exact"),
+        "session_received_bytes": metric(None, "unavailable"),
+        "known_total_bytes": metric(known_total, "partial" if unknown else "exact"),
+        "known_remaining_bytes": metric(known_remaining,
+                                         "partial" if unknown else "exact"),
+        "unknown_size_items": metric(unknown, "exact"),
+        "speed_bps": metric(speed if active else None,
+                            speed_quality if active else "unavailable"),
+        "average_speed_bps": metric(None, "unavailable"),
+        "eta_seconds": metric(eta, "exact" if eta is not None else "unavailable"),
+        "eta_reason": ("based on current aria2 RPC speed" if eta is not None
+                       else "engine counters unavailable" if active else "no active transfer"),
+        "estimated_finish_at": metric(finish_at,
+                                       "exact" if finish_at is not None else "unavailable"),
+        "session_elapsed_s": metric(elapsed, "exact"),
+    }
+
+
 class TelemetryPublisher:
     """Publish atomic snapshots without turning them into controller state."""
 
@@ -140,7 +197,7 @@ class TelemetryPublisher:
 
     def event(self, severity: str, category: str, message: str,
               url: str | None = None, worker_id: int | None = None) -> None:
-        clean = " ".join(message.replace("\x1b", "?").split())[:MAX_MESSAGE]
+        clean = sanitize_message(message)
         with self._lock:
             self.events.append({"id": uuid.uuid4().hex, "at": utc_now(),
                                 "severity": severity, "category": category,

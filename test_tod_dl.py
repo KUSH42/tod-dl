@@ -28,6 +28,7 @@ sys.modules["tod_dl"] = tod_dl
 module_spec.loader.exec_module(tod_dl)
 
 from tod_dl import (ADMISSION_POLL_SECONDS, Downloader, RETRY_DELAYS,
+                    TelemetryStateProjection,
                     aria2_log_terminal_status, aria2_rpc_job_status, sha256sum,
                     storage_relative)
 from download_telemetry import (PUBLISH_INTERVAL_SECONDS, TelemetryPublisher,
@@ -1018,6 +1019,30 @@ class ProvenanceTests(unittest.TestCase):
 
 
 class TelemetryTests(unittest.TestCase):
+    def test_projection_hydrates_and_updates_without_snapshot_sql(self):
+        url = "https://fixture.test/first/data/item.bin"
+        with tempfile.TemporaryDirectory() as temporary:
+            downloader, db = RunSelectionTests().prepare(Path(temporary), [url])
+            downloader.scope_run(db)
+            downloader.update(db, "UPDATE downloads SET status='retry_wait', bytes=3, "
+                              "next_retry_at=123, last_error=? WHERE url=?",
+                              ("bad\x1b  retry", url))
+
+            projection = TelemetryStateProjection.hydrate(db, downloader.run_id, 0)
+            before = projection.copy()
+            self.assertEqual(before["counts"]["retry"], 1)
+            self.assertEqual(before["retry_error"], "bad? retry")
+            self.assertEqual(before["retry_count"], 1)
+
+            downloader.projection = projection
+            downloader.transition(db, url, "complete", bytes=7)
+            after = projection.copy()
+            self.assertEqual(after["counts"]["retry"], 0)
+            self.assertEqual(after["counts"]["complete"], 1)
+            self.assertEqual(after["complete_bytes"], 7)
+            self.assertGreater(after["revision"], before["revision"])
+            db.close()
+
     def test_reducer_does_not_count_resume_baseline_as_session_progress(self):
         metrics = reduce_metrics(
             [{"url": "one", "status": "complete", "bytes": 10},

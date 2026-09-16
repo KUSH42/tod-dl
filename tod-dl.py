@@ -25,7 +25,8 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlsplit
 
 from controller import ControlServer
-from download_telemetry import TelemetryPublisher, estimate_eta_seconds, reduce_metrics
+from download_telemetry import (TelemetryPublisher, estimate_eta_seconds,
+                                reduce_projected_metrics, sanitize_message)
 from provenance import ProvenanceError, ProvenanceWriter, utc_now
 
 SCHEMA = """CREATE TABLE IF NOT EXISTS downloads (
@@ -65,14 +66,35 @@ CREATE TABLE IF NOT EXISTS tor_renewals (
     previous_success_at REAL, outcome TEXT NOT NULL, failure_reason TEXT,
     successful_at REAL, next_eligible_at REAL
 );
+CREATE TABLE IF NOT EXISTS telemetry_revisions (
+    run_id TEXT PRIMARY KEY, revision INTEGER NOT NULL
+);
 """
 RETRY_DELAYS = (60, 120, 240, 300, 300, 300)
 ADMISSION_POLL_SECONDS = 0.25
 SAFE_PATH_MAPPING_VERSION = "v1"
+DISPLAY_BUCKETS = ("queued", "busy", "retry", "exhausted", "complete",
+                   "existing_unverified", "review_required", "unavailable",
+                   "unknown")
 
 
 def now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+
+
+def display_bucket(status: str, attempts: int, max_attempts: int) -> str:
+    """Map durable state to one mutually exclusive telemetry bucket."""
+    if status == "complete":
+        return "complete"
+    if status in {"active", "admitted", "promoting"}:
+        return "busy"
+    if status in {"retry_wait", "failed"}:
+        return "exhausted" if max_attempts and attempts >= max_attempts else "retry"
+    if status in {"existing_unverified", "review_required"}:
+        return status
+    if status in {"pending", "queued"}:
+        return "queued"
+    return "unknown"
 
 
 def allocate_loopback_port() -> int:
@@ -331,6 +353,121 @@ def send_tor_newnym(address: str, cookie: Path) -> None:
         raise RuntimeError(f"Tor circuit renewal failed: {exc}") from exc
 
 
+class TelemetryStateProjection:
+    """Lock-protected, disposable summaries for one selected run."""
+
+    def __init__(self, selected_count: int, skipped_existing: int, revision: int,
+                 max_attempts: int) -> None:
+        self._lock = threading.Lock()
+        self.selected_count = selected_count
+        self.skipped_existing = skipped_existing
+        self.revision = revision
+        self.max_attempts = max_attempts
+        self.counts = {bucket: 0 for bucket in DISPLAY_BUCKETS}
+        self.complete_bytes = 0
+        self.last_completion_at: str | None = None
+        self._retries: dict[str, tuple[float, str]] = {}
+
+    @classmethod
+    def hydrate(cls, db: sqlite3.Connection, run_id: str,
+                max_attempts: int) -> "TelemetryStateProjection":
+        """Build a projection in bounded row batches before publication starts."""
+        selected_count = db.execute("SELECT COUNT(*) FROM run_items WHERE run_id=?",
+                                    (run_id,)).fetchone()[0]
+        skipped_existing = db.execute(
+            "SELECT COUNT(DISTINCT url) FROM download_transitions "
+            "WHERE run_id=? AND to_status='existing_unverified' AND url NOT IN "
+            "(SELECT url FROM run_items WHERE run_id=?)", (run_id, run_id)
+        ).fetchone()[0]
+        row = db.execute("SELECT revision FROM telemetry_revisions WHERE run_id=?",
+                         (run_id,)).fetchone()
+        projection = cls(selected_count, skipped_existing, row[0] if row else 0,
+                         max_attempts)
+        rank = -1
+        while True:
+            rows = db.execute(
+                "SELECT run_items.queue_rank, downloads.url, downloads.status, "
+                "downloads.attempts, downloads.bytes, downloads.next_retry_at, "
+                "downloads.last_error, downloads.updated_at FROM downloads JOIN run_items "
+                "ON run_items.url=downloads.url WHERE run_items.run_id=? "
+                "AND run_items.queue_rank>? ORDER BY run_items.queue_rank LIMIT 1000",
+                (run_id, rank),
+            ).fetchall()
+            if not rows:
+                break
+            for rank, url, status, attempts, byte_count, retry_at, error, updated_at in rows:
+                projection._add_row({"url": url, "status": status, "attempts": attempts,
+                                     "bytes": byte_count, "next_retry_at": retry_at,
+                                     "last_error": error, "updated_at": updated_at})
+        completion_row = db.execute(
+            "SELECT MAX(recorded_at) FROM download_transitions WHERE run_id=? "
+            "AND to_status='complete' AND (from_status IS NULL OR from_status != 'complete')",
+            (run_id,),
+        ).fetchone()
+        projection.last_completion_at = completion_row[0] if completion_row else None
+        return projection
+
+    def _retry_key(self, url: str) -> str:
+        return hashlib.sha256(url.encode("utf-8")).hexdigest()
+
+    def _add_row(self, row: dict) -> None:
+        bucket = display_bucket(row["status"], row["attempts"], self.max_attempts)
+        self.counts[bucket] += 1
+        if bucket == "complete":
+            self.complete_bytes += row["bytes"] or 0
+            completion_at = row.get("updated_at")
+            if completion_at and (self.last_completion_at is None
+                                  or completion_at > self.last_completion_at):
+                self.last_completion_at = completion_at
+        if bucket == "retry":
+            self._retries[self._retry_key(row["url"])] = (
+                row["next_retry_at"], sanitize_message(row.get("last_error") or ""),
+            )
+
+    def apply(self, old: dict, new: dict, revision: int,
+              completion_at: str | None = None) -> None:
+        """Apply one committed item preimage and postimage."""
+        with self._lock:
+            old_bucket = display_bucket(old["status"], old["attempts"], self.max_attempts)
+            new_bucket = display_bucket(new["status"], new["attempts"], self.max_attempts)
+            self.counts[old_bucket] -= 1
+            self.counts[new_bucket] += 1
+            if old_bucket == "complete":
+                self.complete_bytes -= old["bytes"] or 0
+            if new_bucket == "complete":
+                self.complete_bytes += new["bytes"] or 0
+            key = self._retry_key(new["url"])
+            self._retries.pop(key, None)
+            if new_bucket == "retry":
+                self._retries[key] = (new["next_retry_at"],
+                                      sanitize_message(new.get("last_error") or ""))
+            if old_bucket != "complete" and new_bucket == "complete" and completion_at:
+                self.last_completion_at = completion_at
+            self.revision = revision
+
+    def set_revision(self, revision: int) -> None:
+        """Apply a committed non-item audit revision."""
+        with self._lock:
+            self.revision = revision
+
+    def copy(self) -> dict:
+        """Copy only durable summary data for one snapshot build."""
+        with self._lock:
+            first_retry = min(((deadline, key, error) for key, (deadline, error)
+                               in self._retries.items()), default=None)
+            return {
+                "selected_count": self.selected_count,
+                "skipped_existing": self.skipped_existing,
+                "counts": dict(self.counts),
+                "complete_bytes": self.complete_bytes,
+                "last_completion_at": self.last_completion_at,
+                "revision": self.revision,
+                "retry_at": first_retry[0] if first_retry else None,
+                "retry_error": first_retry[2] if first_retry else None,
+                "retry_count": len(self._retries),
+            }
+
+
 class Downloader:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -350,6 +487,7 @@ class Downloader:
         self.worker_ids: dict[str, int] = {}
         self.active_attempts: dict[str, int] = {}
         self.telemetry: TelemetryPublisher | None = None
+        self.projection: TelemetryStateProjection | None = None
         self.cooldown_lock = threading.Lock()
         self.cooldown_until = 0.0
         self.newnym_lock = threading.Lock()
@@ -419,7 +557,8 @@ class Downloader:
         renewal_available = (self.args.tor_newnym_interval > 0
                              and not self.stop_requested.is_set())
         return {
-            "state_revision": self.telemetry.sequence if self.telemetry else 0,
+            "state_revision": (self.projection.copy()["revision"]
+                               if self.projection else 0),
             "lifecycle": "stopping" if self.stop_requested.is_set() else "running",
             "active_workers": active_workers,
             "actions": {
@@ -451,6 +590,13 @@ class Downloader:
             if existing:
                 outcome, reason, revision = existing
                 return {"outcome": outcome, "reason": reason, "state_revision": revision}
+            changed_rows = db.execute(
+                "SELECT downloads.url, downloads.status, downloads.attempts, downloads.bytes, "
+                "downloads.next_retry_at, downloads.last_error FROM downloads JOIN run_items "
+                "ON run_items.url=downloads.url WHERE run_items.run_id=? AND "
+                "downloads.status IN ('queued', 'retry_wait', 'pending', 'failed')",
+                (self.run_id,),
+            ).fetchall()
             changed = db.execute("UPDATE downloads SET next_retry_at=0, updated_at=? "
                                  "WHERE status IN ('queued', 'retry_wait', 'pending', 'failed') "
                                  "AND url IN "
@@ -461,14 +607,20 @@ class Downloader:
                        "(url, run_id, from_status, to_status, detail, recorded_at) "
                        "VALUES (?, ?, ?, ?, ?, ?)",
                        ("__control__", self.run_id, "control", "control", reason, now()))
-            revision = db.execute("SELECT COALESCE(MAX(id), 0) FROM download_transitions "
-                                  "WHERE run_id=?", (self.run_id,)).fetchone()[0]
+            revision = self.advance_telemetry_revision(db)
             db.execute("INSERT INTO control_requests "
                        "(request_id, run_id, session_id, action, outcome, reason, "
                        "state_revision, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                        (request_id, self.run_id, session_id, "retry_now", "completed",
                         reason, revision, now()))
             db.commit()
+        for url, status, attempts, byte_count, retry_at, error in changed_rows:
+            old = {"url": url, "status": status, "attempts": attempts,
+                   "bytes": byte_count, "next_retry_at": retry_at, "last_error": error}
+            new = dict(old, next_retry_at=0)
+            self.apply_projection_change(old, new, revision)
+        if self.projection and not changed_rows:
+            self.projection.set_revision(revision)
         if self.telemetry:
             self.telemetry.event("info", "control", "retry now accepted")
         self.control_wake.set()
@@ -491,17 +643,26 @@ class Downloader:
         session_id = request.get("session_id")
         if not isinstance(request_id, str) or not isinstance(session_id, str):
             return {"outcome": "rejected", "reason": "invalid control request"}
+        with self.db_lock:
+            existing = db.execute("SELECT outcome, reason, state_revision FROM control_requests "
+                                  "WHERE request_id=?", (request_id,)).fetchone()
+            if existing:
+                outcome, reason, revision = existing
+                return {"outcome": outcome, "reason": reason, "state_revision": revision}
         result = self.request_newnym(db, request_id, session_id)
         assert isinstance(result, dict)
         with self.db_lock:
-            revision = db.execute("SELECT COALESCE(MAX(id), 0) FROM download_transitions "
-                                  "WHERE run_id=?", (self.run_id,)).fetchone()[0]
+            revision = self.advance_telemetry_revision(db)
             db.execute("INSERT OR IGNORE INTO control_requests "
                        "(request_id, run_id, session_id, action, outcome, reason, "
                        "state_revision, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                        (request_id, self.run_id, session_id, "renew_tor_circuits",
-                        result["outcome"], result["reason"], revision, now()))
+                       result["outcome"], result["reason"], revision, now()))
             db.commit()
+        if self.projection:
+            self.projection.set_revision(revision)
+        if self.telemetry:
+            self.telemetry.request_publish()
         return result
 
     def request_newnym(self, db: sqlite3.Connection | None = None,
@@ -585,6 +746,8 @@ class Downloader:
         return db
 
     def update(self, db: sqlite3.Connection, query: str, values: tuple) -> None:
+        if self.projection:
+            raise RuntimeError("snapshot-relevant SQL must use transition")
         try:
             with self.db_lock:
                 db.execute(query, values)
@@ -595,14 +758,43 @@ class Downloader:
             self.stop_requested.set()
             raise RuntimeError(f"local SQLite failure: {exc}") from exc
 
+    def advance_telemetry_revision(self, db: sqlite3.Connection) -> int:
+        """Increment the durable revision in the active transaction."""
+        db.execute("INSERT INTO telemetry_revisions (run_id, revision) VALUES (?, 1) "
+                   "ON CONFLICT(run_id) DO UPDATE SET revision=revision+1",
+                   (self.run_id,))
+        return db.execute("SELECT revision FROM telemetry_revisions WHERE run_id=?",
+                          (self.run_id,)).fetchone()[0]
+
+    def apply_projection_change(self, old: dict, new: dict, revision: int,
+                                completion_at: str | None = None) -> None:
+        """Apply a committed durable change or stop future admission."""
+        if not self.projection:
+            return
+        try:
+            self.projection.apply(old, new, revision, completion_at)
+        except Exception as exc:
+            self.stop_requested.set()
+            print(f"[telemetry] projection update failed: {exc}", file=sys.stderr,
+                  flush=True)
+            raise RuntimeError("telemetry projection update failed") from exc
+        if self.telemetry:
+            self.telemetry.request_publish()
+
     def transition(self, db: sqlite3.Connection, url: str, to_status: str,
                    detail: str | None = None, **fields) -> None:
         """Persist a state change and its audit record in one transaction."""
         try:
             with self.db_lock:
-                row = db.execute("SELECT status FROM downloads WHERE url=?", (url,)).fetchone()
+                row = db.execute("SELECT status, attempts, bytes, next_retry_at, last_error "
+                                 "FROM downloads WHERE url=?", (url,)).fetchone()
+                if not row:
+                    raise RuntimeError(f"missing download row: {url}")
+                old = {"url": url, "status": row[0], "attempts": row[1],
+                       "bytes": row[2], "next_retry_at": row[3], "last_error": row[4]}
+                recorded_at = now()
                 assignments = ["status=?", "updated_at=?"]
-                values: list[object] = [to_status, now()]
+                values: list[object] = [to_status, recorded_at]
                 for name, value in fields.items():
                     assignments.append(f"{name}=?")
                     values.append(value)
@@ -611,9 +803,18 @@ class Downloader:
                 db.execute("INSERT INTO download_transitions "
                            "(url, run_id, from_status, to_status, detail, recorded_at) "
                            "VALUES (?, ?, ?, ?, ?, ?)",
-                           (url, self.run_id, row[0] if row else None, to_status,
-                            detail, now()))
+                           (url, self.run_id, row[0], to_status,
+                            detail, recorded_at))
+                revision = self.advance_telemetry_revision(db)
+                new_row = db.execute("SELECT status, attempts, bytes, next_retry_at, last_error "
+                                     "FROM downloads WHERE url=?", (url,)).fetchone()
                 db.commit()
+            new = {"url": url, "status": new_row[0], "attempts": new_row[1],
+                   "bytes": new_row[2], "next_retry_at": new_row[3],
+                   "last_error": new_row[4]}
+            self.apply_projection_change(old, new, revision,
+                                         recorded_at if old["status"] != "complete"
+                                         and new["status"] == "complete" else None)
         except sqlite3.Error as exc:
             self.stop_requested.set()
             raise RuntimeError(f"local SQLite failure: {exc}") from exc
@@ -677,9 +878,12 @@ class Downloader:
         Retried rows therefore cannot cause a later queue item to enter a
         --max-files run.
         """
+        db.execute("INSERT OR IGNORE INTO telemetry_revisions (run_id, revision) VALUES (?, 0)",
+                   (self.run_id,))
         previous = db.execute("SELECT COUNT(*) FROM run_items WHERE run_id=?",
                               (self.run_id,)).fetchone()[0]
         if previous:
+            db.commit()
             return previous, 0
         selected = existing = 0
         for url, rel in read_queues(self.args.queue):
@@ -695,6 +899,7 @@ class Downloader:
             db.execute("INSERT INTO run_items (run_id, url, queue_rank) "
                        "VALUES (?, ?, ?)", (self.run_id, url, selected))
             selected += 1
+        self.advance_telemetry_revision(db)
         db.commit()
         return selected, existing
 
@@ -864,60 +1069,13 @@ class Downloader:
                 return worker_id
         raise RuntimeError("no worker slot available for admitted transfer")
 
-    def telemetry_snapshot(self, db: sqlite3.Connection, lifecycle: str,
+    def telemetry_snapshot(self, lifecycle: str,
                            reason: str | None, active: list[dict], validation: list[dict],
                            events: list[dict]) -> dict:
-        """Build a bounded read-only view of durable and runtime state."""
-        with self.db_lock:
-            rows = db.execute("SELECT downloads.url, status, bytes, attempts FROM downloads "
-                              "JOIN run_items ON run_items.url=downloads.url "
-                              "WHERE run_items.run_id=?", (self.run_id,)).fetchall()
-            revision = db.execute("SELECT COALESCE(MAX(id), 0) FROM download_transitions "
-                                  "WHERE run_id=?", (self.run_id,)).fetchone()[0]
-            skipped_existing = db.execute(
-                "SELECT COUNT(DISTINCT download_transitions.url) FROM download_transitions "
-                "WHERE run_id=? AND to_status='existing_unverified' AND url NOT IN "
-                "(SELECT url FROM run_items WHERE run_id=?)", (self.run_id, self.run_id)
-            ).fetchone()[0]
-            last_complete = db.execute(
-                "SELECT MAX(updated_at) FROM downloads JOIN run_items "
-                "ON run_items.url=downloads.url WHERE run_items.run_id=? "
-                "AND status='complete'", (self.run_id,)
-            ).fetchone()[0]
-            retry_at, retry_error = db.execute(
-                "SELECT next_retry_at, last_error FROM downloads JOIN run_items "
-                "ON run_items.url=downloads.url WHERE run_items.run_id=? "
-                "AND status IN ('retry_wait', 'failed') ORDER BY next_retry_at LIMIT 1",
-                (self.run_id,)
-            ).fetchone() or (None, None)
-            retry_count = db.execute(
-                "SELECT COUNT(*) FROM downloads JOIN run_items ON run_items.url=downloads.url "
-                "WHERE run_items.run_id=? AND status IN ('retry_wait', 'failed')",
-                (self.run_id,)
-            ).fetchone()[0]
-        items = [{"url": url, "status": status, "bytes": size, "attempts": attempts}
-                 for url, status, size, attempts in rows]
-        statuses = {"queued": 0, "busy": 0, "retry": 0, "exhausted": 0,
-                    "complete": 0, "existing_unverified": 0, "review_required": 0,
-                    "unavailable": 0, "unknown": 0}
-        for item in items:
-            status = item["status"]
-            if status == "complete":
-                bucket = "complete"
-            elif status in {"active", "admitted", "promoting"}:
-                bucket = "busy"
-            elif status in {"retry_wait", "failed"}:
-                bucket = ("exhausted" if self.args.max_attempts
-                          and item["attempts"] >= self.args.max_attempts else "retry")
-            elif status == "existing_unverified":
-                bucket = status
-            elif status == "review_required":
-                bucket = status
-            elif status in {"pending", "queued"}:
-                bucket = "queued"
-            else:
-                bucket = "unknown"
-            statuses[bucket] += 1
+        """Build a bounded view from copied projection and runtime state."""
+        if not self.projection:
+            raise RuntimeError("telemetry projection is unavailable")
+        durable = self.projection.copy()
         active_urls = {row["url"] for row in active}
         workers = []
         current = time.monotonic()
@@ -951,21 +1109,23 @@ class Downloader:
         workers.sort(key=lambda row: row["worker_id"])
         free = shutil.disk_usage(self.destination).free
         return {
-            "state_revision": revision,
+            "state_revision": durable["revision"],
             "run": {"lifecycle": lifecycle, "reason": reason,
                     "created_at": self.manifest.get("started_at"),
                     "session_started_at": self.manifest.get("resumed_at",
                                                             self.manifest.get("started_at")),
-                    "selected_count": len(items), "counts": statuses,
-                    "skipped_existing_count": skipped_existing,
-                    "last_completion_at": last_complete,
+                    "selected_count": durable["selected_count"], "counts": durable["counts"],
+                    "skipped_existing_count": durable["skipped_existing"],
+                    "last_completion_at": durable["last_completion_at"],
                     "engine_selection_status": (
                         "aria2 loopback RPC counters enabled"
                         if getattr(self.args, "aria2_rpc", False)
                         else "aria2 counters unavailable"
                     ),
-                    "metrics": reduce_metrics(items, active, self.telemetry.started_monotonic,
-                                              current),
+                    "metrics": reduce_projected_metrics(
+                        durable["selected_count"], durable["counts"],
+                        durable["complete_bytes"], active,
+                        self.telemetry.started_monotonic, current),
                     "remaining_run_time_s": (max(0.0, self.deadline - current)
                                              if self.deadline is not None else None)},
             "workers": workers,
@@ -976,12 +1136,13 @@ class Downloader:
                        "tor_preflight": self.manifest.get("tor_isolation_preflight"),
                        "cooldown_remaining_s": max(0.0, self.cooldown_until - time.time()),
                        "retry_eligible_at": (dt.datetime.fromtimestamp(
-                           retry_at, dt.timezone.utc).isoformat(timespec="seconds")
-                                             if retry_at and retry_at > time.time() else None),
-                       "retry_remaining_s": max(0.0, retry_at - time.time())
-                       if retry_at is not None else None,
-                       "retry_pending_count": retry_count,
-                       "retry_error": retry_error[:512] if retry_error else None,
+                           durable["retry_at"], dt.timezone.utc).isoformat(timespec="seconds")
+                                             if durable["retry_at"]
+                                             and durable["retry_at"] > time.time() else None),
+                       "retry_remaining_s": max(0.0, durable["retry_at"] - time.time())
+                       if durable["retry_at"] is not None else None,
+                       "retry_pending_count": durable["retry_count"],
+                       "retry_error": durable["retry_error"],
                        "telemetry_errors": self.telemetry.errors_copy(),
                        "active_without_counters": len(active_urls)},
             "recent_events": events,
@@ -1211,13 +1372,13 @@ class Downloader:
             return "review"
         self.flush_directory(target.parent)
         self.finalized_event(url, rel.as_posix(), stored_text, target.stat().st_size, digest)
+        self.clear_transfer_telemetry(url)
         self.transition(db, url, "complete", bytes=target.stat().st_size, sha256=digest)
         os.unlink(staging)
         self.transition(db, url, "complete", "staging cleanup complete",
                         cleanup_completed_at=now())
         if self.telemetry:
             self.telemetry.event("info", "complete", "transfer complete", url, worker_id)
-        self.clear_transfer_telemetry(url)
         print(f"[complete] {rel} ({target.stat().st_size:,} bytes)", flush=True)
         return "complete"
 
@@ -1392,12 +1553,15 @@ class Downloader:
             if self.args.retry_now:
                 self.reset_retry_now(db)
             db.commit()
+            self.projection = TelemetryStateProjection.hydrate(
+                db, self.run_id, self.args.max_attempts
+            )
             self.deadline = (time.monotonic() + self.args.time_limit
                              if self.args.time_limit else None)
             self.telemetry = TelemetryPublisher(self.state, self.run_id, self.args.workers)
             self.telemetry.start(
                 lambda lifecycle, reason, active, validation, events: self.telemetry_snapshot(
-                    db, lifecycle, reason, active, validation, events)
+                    lifecycle, reason, active, validation, events)
             )
             control = ControlServer(self.state, self.run_id, self.telemetry.session_id,
                                     self.control_state,
@@ -1431,8 +1595,7 @@ class Downloader:
                             row = self.next_pending(db)
                             if row is None:
                                 break
-                            self.update(db, "UPDATE downloads SET status='admitted', "
-                                        "updated_at=? WHERE url=?", (now(), row[0]))
+                            self.transition(db, row[0], "admitted", "transfer admitted")
                             futures.add(pool.submit(self.transfer, row, db))
                         if futures:
                             done, futures = concurrent.futures.wait(
