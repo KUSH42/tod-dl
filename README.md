@@ -48,11 +48,21 @@ paths, URLs with credentials, and URLs with query values are ignored or
 rejected.
 
 Store queue files outside this source repository when they contain case data.
-The `run_priority.sh` wrapper expects these files beside the script:
+The `run_priority.sh` wrapper expects these untracked files beside the script:
 
 - `urls_1_priority.txt`
 - `urls_2_priority.txt`
 - `urls_3_priority.txt`
+
+Copy the three example files before you use the wrapper. Replace every
+`example.invalid` URL with an authorized source URL. The example URLs are safe
+placeholders and do not identify a source.
+
+```bash
+cp urls_1_priority.txt.example urls_1_priority.txt
+cp urls_2_priority.txt.example urls_2_priority.txt
+cp urls_3_priority.txt.example urls_3_priority.txt
+```
 
 ## Run an acquisition
 

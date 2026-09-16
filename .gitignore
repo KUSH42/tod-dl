@@ -6,6 +6,10 @@
 /output/
 /download-state/
 /iped-working/
+# Case-specific queues used by run_priority.sh; never store them in Git.
+/urls_1_priority.txt
+/urls_2_priority.txt
+/urls_3_priority.txt
 /.venv/
 /.venv-monitor/
 /__pycache__/
