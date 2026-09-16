@@ -198,7 +198,7 @@ class MonitorTests(unittest.TestCase):
         }]}
         validate_snapshot(value)
         self.assertIn("Last payload progress", progress_status(value))
-        self.assertIn("Disk destination/state", disk_status(value))
+        self.assertIn("Disk:", disk_status(value))
         self.assertIn("Session 00:00:01", screen_summary(value, "Collecting"))
 
     def test_speed_trend_labels_a_rising_exact_series(self):

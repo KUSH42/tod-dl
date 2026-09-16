@@ -295,8 +295,8 @@ def disk_status(snapshot: dict[str, Any]) -> str:
                 for value in (free, reserve, headroom))):
             return "Disk status unavailable"
         status = " storage risk" if headroom < 0 else " storage stop" if headroom == 0 else ""
-        rendered.append(f"Disk {'/'.join(literal_text(role) for role in roles)}: "
-                        f"{format_bytes(free)} free | {format_bytes(reserve)} reserve | "
+        rendered.append(f"Disk: {format_bytes(free)} free | "
+                        f"{format_bytes(reserve)} reserve | "
                         f"{format_bytes(abs(headroom))} headroom{status}")
     return "\n".join(rendered)
 
@@ -572,6 +572,8 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                                        self.session_elapsed(current)).split("\n", 1)
             if len(remainder) == 2:
                 for line in remainder[1].splitlines():
+                    if line.startswith("Disk:"):
+                        continue
                     rendered.append("\n")
                     label, separator, value = line.partition("  ")
                     if label in {"Files", "Data", "Speed"} and separator:
@@ -603,6 +605,7 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
         def compose(self) -> ComposeResult:
             yield Static("", id="summary")
             yield DataTable(id="workers")
+            yield Static("", id="disk")
             with VerticalScroll(id="activity-pane", classes="event-log"):
                 yield Static(self.activity_text(snapshot["recent_events"]), id="activity")
             yield Footer()
@@ -623,6 +626,7 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             self.snapshot_observed_monotonic = time.monotonic()
             self.observe_snapshot(snapshot)
             self.last_summary_signature: str | None = None
+            self.last_disk_signature: str | None = None
             self.last_event_signature: str | None = None
             self.rendered_rows: dict[str, tuple[str, ...]] = {}
             self.last_control_poll = 0.0
@@ -640,6 +644,10 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             if force or summary_signature != self.last_summary_signature:
                 self.query_one("#summary", Static).update(self.summary_text(current))
                 self.last_summary_signature = summary_signature
+            disk = disk_status(current)
+            if force or disk != self.last_disk_signature:
+                self.query_one("#disk", Static).update(disk)
+                self.last_disk_signature = disk
             activity_pane = self.query_one("#activity-pane", VerticalScroll)
             follow_events = activity_pane.scroll_y >= activity_pane.max_scroll_y
             event_signature = json.dumps(current["recent_events"], sort_keys=True,
