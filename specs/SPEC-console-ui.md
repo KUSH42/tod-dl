@@ -114,7 +114,7 @@ ETA    —  2 items require review
 3  bundle.zip      Hashing        73%              —           —
 4  document.pdf    Connecting     18s elapsed      —           —
 
-Disk: 84.2 GiB free | 10 GiB reserve | 74.2 GiB headroom
+Disk  84.2 GiB free | 10 GiB reserve | 74.2 GiB headroom
 Tor preflight passed at 12:16 UTC | Last complete 42s ago
 
 [Activity] [Queue] [Errors / review]
@@ -149,6 +149,13 @@ record must show the recorded final session duration.
 
 The header must not use **Updated**. Snapshot publication shows controller
 telemetry freshness. It does not show source reachability or transfer progress.
+Render the static **Session**, **Last complete**, **Last payload progress**, and
+**ago** labels dim. Render each duration or time value with the default style.
+Render the **live** label green without bold text. Render a **Retry eligible
+now** status dim. Render **Disk** bold with the same color as **Files**. Render
+the **free**, **reserve**, and **headroom** labels dim.
+Render the **complete**, **busy**, **retry**, **review**, **queued**,
+**retained**, and **remaining** labels dim.
 
 For a finished or stopped run, show the required final time instead of progress
 or completion age. An active download worker has phase `downloading`. When one
@@ -157,9 +164,9 @@ age. If every active download worker has no payload progress for 60 seconds,
 mark every affected worker as stalled. If no download worker is active and
 payload progress exists, show **Last payload progress** followed by its age.
 If a global or worker cooldown is active, or every worker row shows `? / ?`,
-show **Last payload progress** instead. If the preferred value is absent, show
-the other recorded value. If neither value exists, show **No payload progress
-recorded**.
+show **Last payload progress** when it is recorded. If no payload progress is
+recorded, show **Last complete** when it is recorded. If neither preferred value
+exists, show **No payload progress recorded**.
 
 Payload progress means that the engine reports an increase in received payload
 bytes. It does not prove that a particular host is reachable, that a host will
@@ -195,12 +202,12 @@ stale interval. The trend is display-only. It must not affect retry, admission,
 timeout, or Tor-renewal behavior.
 
 The health panel must show one disk line for each distinct filesystem that can
-block acquisition. Each line must start with **Disk:** and must not expose a
-private path. Each line must show free bytes, configured reserve bytes, and
-headroom bytes. Show filesystem role labels only in details. Headroom equals
-free bytes minus reserve bytes. A negative headroom must show as a storage-risk
-error. Zero headroom must show as a storage-stop condition. Positive headroom
-does not guarantee that a future item fits.
+block acquisition. Each line must start with **Disk** and two spaces. It must
+not expose a private path. Each line must show free bytes, configured reserve
+bytes, and headroom bytes. Show filesystem role labels only in details.
+Headroom equals free bytes minus reserve bytes. A negative headroom must show
+as a storage-risk error. Zero headroom must show as a storage-stop condition.
+Positive headroom does not guarantee that a future item fits.
 
 Place disk lines below the worker table and above the activity log. Preserve
 this order in compact layouts by placing disk lines before activity-log content.

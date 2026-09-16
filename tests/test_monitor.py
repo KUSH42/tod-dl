@@ -203,7 +203,7 @@ class MonitorTests(unittest.TestCase):
         }]}
         validate_snapshot(value)
         self.assertIn("Last complete", progress_status(value))
-        self.assertIn("Disk:", disk_status(value))
+        self.assertIn("Disk  ", disk_status(value))
         self.assertIn("Session 00:00:01", screen_summary(value, "Collecting"))
 
     def test_idle_run_prefers_last_payload_progress_over_last_complete(self):
@@ -231,6 +231,8 @@ class MonitorTests(unittest.TestCase):
         value["health"] = {}
         value["workers"][0].update({"received_bytes": None, "total_bytes": None})
         self.assertIn("Last payload progress", progress_status(value))
+        value["run"]["last_payload_progress_at"] = None
+        self.assertIn("Last complete", progress_status(value))
 
     def test_speed_trend_labels_a_rising_exact_series(self):
         trend = SpeedTrend()
@@ -253,7 +255,7 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(lifecycle_style("running"), "bold green")
         self.assertEqual(lifecycle_style("stopped"), "bold yellow")
         self.assertEqual(lifecycle_style("unexpected"), "bold red")
-        self.assertEqual(freshness_style("live"), "bold green")
+        self.assertEqual(freshness_style("live"), "green")
         self.assertEqual(freshness_style("disconnected"), "bold red")
 
     def test_event_worker_label_includes_valid_worker_id_only(self):
@@ -263,7 +265,7 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(event_worker_label({"worker_id": True}), "")
 
     def test_completion_event_message_is_green(self):
-        self.assertEqual(event_message_style({"category": "complete"}), "bold green")
+        self.assertEqual(event_message_style({"category": "complete"}), "green")
         self.assertEqual(event_message_style({"category": "retry"}), "")
 
     def test_transfer_events_show_only_the_decoded_item_path(self):

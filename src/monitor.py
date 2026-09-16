@@ -34,7 +34,7 @@ LIFECYCLE_STYLES = {
     "stopped": "bold yellow",
 }
 FRESHNESS_STYLES = {
-    "live": "bold green",
+    "live": "green",
     "stale": "bold yellow",
     "disconnected": "bold red",
     "recorded": "dim",
@@ -283,7 +283,9 @@ def progress_status(snapshot: dict[str, Any]) -> str:
                             and all(worker.get("received_bytes") is None
                                     and worker.get("total_bytes") is None
                                     for worker in snapshot["workers"]))
-    if (cooldown_active or all_counters_unknown or not active_downloads) and payload_age != "?":
+    if (cooldown_active or all_counters_unknown) and payload_age != "?":
+        return "Last payload progress " + payload_age
+    if not active_downloads and payload_age != "?":
         return "Last payload progress " + payload_age
     if completion_age != "?":
         return "Last complete " + completion_age
@@ -312,7 +314,7 @@ def disk_status(snapshot: dict[str, Any]) -> str:
                 for value in (free, reserve, headroom))):
             return "Disk status unavailable"
         status = " storage risk" if headroom < 0 else " storage stop" if headroom == 0 else ""
-        rendered.append(f"Disk: {format_bytes(free)} free | "
+        rendered.append(f"Disk  {format_bytes(free)} free | "
                         f"{format_bytes(reserve)} reserve | "
                         f"{format_bytes(abs(headroom))} headroom{status}")
     return "\n".join(rendered)
@@ -423,8 +425,8 @@ def event_worker_label(event: dict[str, Any]) -> str:
 
 
 def event_message_style(event: dict[str, Any]) -> str:
-    """Emphasize a successful completed transfer without recoloring its level."""
-    return "bold green" if event.get("category") == "complete" else ""
+    """Color a successful completed transfer without recoloring its level."""
+    return "green" if event.get("category") == "complete" else ""
 
 
 def event_item_path(event: dict[str, Any]) -> str:
@@ -580,24 +582,87 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             rendered.append(state.upper(), style=lifecycle_style(state))
             rendered.append("  ")
             rendered.append(connection, style=freshness_style(connection))
-            rendered.append("  Session ")
+            rendered.append("  Session ", style="dim")
             rendered.append(format_elapsed_duration(self.session_elapsed(current)))
             rendered.append("  ")
-            rendered.append(progress_status(current))
+            self.append_progress_status(rendered, progress_status(current))
             trend_label = self.trend.label() if connection == "live" else "No data"
             remainder = screen_summary(current, trend_label,
                                        self.session_elapsed(current)).split("\n", 1)
             if len(remainder) == 2:
                 for line in remainder[1].splitlines():
-                    if line.startswith("Disk:"):
+                    if line.startswith("Disk  "):
                         continue
                     rendered.append("\n")
                     label, separator, value = line.partition("  ")
                     if label in {"Files", "Data", "Speed"} and separator:
                         rendered.append(label, style="bold")
-                        rendered.append(separator + value)
+                        rendered.append(separator)
+                        if label == "Files":
+                            self.append_summary_labels(
+                                rendered, value,
+                                ("complete", "busy", "retry", "review", "queued"),
+                            )
+                        elif label == "Data":
+                            self.append_summary_labels(rendered, value,
+                                                       ("retained", "remaining"))
+                        else:
+                            rendered.append(value)
+                    elif line.startswith("Retry eligible now"):
+                        rendered.append(line, style="dim")
                     else:
                         rendered.append(line)
+            return rendered
+
+        @staticmethod
+        def append_progress_status(rendered: Text, status: str) -> None:
+            for label in ("Last complete ", "Last payload progress "):
+                if not status.startswith(label):
+                    continue
+                rendered.append(label, style="dim")
+                value = status[len(label):]
+                if value.endswith(" ago"):
+                    rendered.append(value[:-4])
+                    rendered.append(" ago", style="dim")
+                else:
+                    rendered.append(value)
+                return
+            rendered.append(status)
+
+        @staticmethod
+        def append_summary_labels(rendered: Text, value: str,
+                                  labels: tuple[str, ...]) -> None:
+            for index, segment in enumerate(value.split(" | ")):
+                if index:
+                    rendered.append(" | ")
+                matched = next((label for label in labels
+                                if segment.endswith(" " + label)), None)
+                if matched is None:
+                    rendered.append(segment)
+                    continue
+                rendered.append(segment[:-(len(matched) + 1)])
+                rendered.append(" " + matched, style="dim")
+
+        @staticmethod
+        def disk_text(value: str) -> Text:
+            rendered = Text()
+            lines = value.splitlines()
+            for index, line in enumerate(lines):
+                if line.startswith("Disk  "):
+                    rendered.append("Disk", style="bold")
+                    for segment_index, segment in enumerate(line[4:].split(" | ")):
+                        if segment_index:
+                            rendered.append(" | ")
+                        label = ("free", "reserve", "headroom")[segment_index]
+                        prefix, separator, suffix = segment.partition(" " + label)
+                        rendered.append(prefix)
+                        if separator:
+                            rendered.append(separator, style="dim")
+                            rendered.append(suffix)
+                else:
+                    rendered.append(line)
+                if index < len(lines) - 1:
+                    rendered.append("\n")
             return rendered
 
         @staticmethod
@@ -663,7 +728,7 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                 self.last_summary_signature = summary_signature
             disk = disk_status(current)
             if force or disk != self.last_disk_signature:
-                self.query_one("#disk", Static).update(disk)
+                self.query_one("#disk", Static).update(self.disk_text(disk))
                 self.last_disk_signature = disk
             activity_pane = self.query_one("#activity-pane", VerticalScroll)
             follow_events = activity_pane.scroll_y >= activity_pane.max_scroll_y
