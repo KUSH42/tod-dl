@@ -7,6 +7,8 @@ records for completed files.
 > **Warning:** Use TOD-DL only for material that you are authorized to acquire
 > and retain. Treat completed files as forensic evidence.
 
+![TOR-DL Monitor and controller visual demo](monitor-controller-demo.gif)
+
 ## Repository contents
 
 The repository contains downloader source code and test fixtures. It does not
@@ -99,8 +101,6 @@ the legacy `tor-dl-subdir*.sh` wrappers for continued acquisition.
 
 The monitor reads a published telemetry snapshot. It does not open the
 acquisition database or write final evidence.
-
-![Monitor and controller visual demo](monitor-controller-demo.gif)
 
 ```bash
 python3 src/monitor.py --state /case/download-state \
