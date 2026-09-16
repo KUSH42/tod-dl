@@ -1,8 +1,9 @@
 # TOD-DL
 
-TOD-DL is a resumable forensic download-manager for defined `.onion`-URL lists.
-The Tor-Onion-Dump-Downloader protects existing final files, records durable
-state in SQLite, and creates signed provenance records for completed files.
+TOD-DL is a resumable forensic download-manager for a defined `.onion`-URL
+queue. The Tor-Onion-Dump-Downloader protects existing final files, records
+durable state in SQLite, and creates signed provenance records for completed
+files.
 
 > **Warning:** Use TOD-DL only for material that you are authorized to acquire
 > and retain.
