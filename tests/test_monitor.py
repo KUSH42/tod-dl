@@ -195,7 +195,8 @@ class MonitorTests(unittest.TestCase):
             "stopped_at": None,
             "metrics": {"speed_bps": {"value": 100, "quality": "exact"}},
         })
-        value["workers"] = [{"worker_id": 1, "phase": "downloading"}]
+        value["workers"] = [{"worker_id": 1, "phase": "downloading",
+                             "received_bytes": 1, "total_bytes": 2}]
         value["health"] = {"filesystems": [{
             "filesystem_id": "100", "roles": ["destination", "state"],
             "free_bytes": 1000, "reserve_bytes": 500, "headroom_bytes": 500,
@@ -213,6 +214,22 @@ class MonitorTests(unittest.TestCase):
             "last_completion_at": (dt.datetime.now(dt.timezone.utc)
                                    - dt.timedelta(seconds=10)).isoformat(),
         })
+        self.assertIn("Last payload progress", progress_status(value))
+
+    def test_cooldown_and_unknown_worker_counters_prefer_last_payload_progress(self):
+        value = snapshot()
+        value["run"].update({
+            "last_payload_progress_at": (dt.datetime.now(dt.timezone.utc)
+                                        - dt.timedelta(seconds=30)).isoformat(),
+            "last_completion_at": (dt.datetime.now(dt.timezone.utc)
+                                   - dt.timedelta(seconds=10)).isoformat(),
+        })
+        value["workers"] = [{"worker_id": 1, "phase": "downloading",
+                             "received_bytes": 1, "total_bytes": 2}]
+        value["health"] = {"cooldown_remaining_s": 1}
+        self.assertIn("Last payload progress", progress_status(value))
+        value["health"] = {}
+        value["workers"][0].update({"received_bytes": None, "total_bytes": None})
         self.assertIn("Last payload progress", progress_status(value))
 
     def test_speed_trend_labels_a_rising_exact_series(self):

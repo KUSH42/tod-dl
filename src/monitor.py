@@ -273,9 +273,17 @@ def progress_status(snapshot: dict[str, Any]) -> str:
                         if worker.get("phase") == "downloading"]
     payload_age = recorded_age(run.get("last_payload_progress_at"), snapshot)
     completion_age = recorded_age(run.get("last_completion_at"), snapshot)
-    if active_downloads and completion_age != "?":
-        return "Last complete " + completion_age
-    if not active_downloads and payload_age != "?":
+    cooldown_remaining = snapshot["health"].get("cooldown_remaining_s")
+    cooldown_active = ((isinstance(cooldown_remaining, (int, float))
+                        and not isinstance(cooldown_remaining, bool)
+                        and cooldown_remaining > 0)
+                       or any(worker.get("phase") == "cooldown"
+                              for worker in snapshot["workers"]))
+    all_counters_unknown = (bool(snapshot["workers"])
+                            and all(worker.get("received_bytes") is None
+                                    and worker.get("total_bytes") is None
+                                    for worker in snapshot["workers"]))
+    if (cooldown_active or all_counters_unknown or not active_downloads) and payload_age != "?":
         return "Last payload progress " + payload_age
     if completion_age != "?":
         return "Last complete " + completion_age

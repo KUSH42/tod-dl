@@ -156,17 +156,17 @@ or more download workers are active, show **Last complete** followed by its
 age. If every active download worker has no payload progress for 60 seconds,
 mark every affected worker as stalled. If no download worker is active and
 payload progress exists, show **Last payload progress** followed by its age.
-If the preferred value is absent, show the other recorded value. If neither
-value exists, show **No payload progress recorded**.
+If a global or worker cooldown is active, or every worker row shows `? / ?`,
+show **Last payload progress** instead. If the preferred value is absent, show
+the other recorded value. If neither value exists, show **No payload progress
+recorded**.
 
 Payload progress means that the engine reports an increase in received payload
-bytes.
-
-Payload progress does not prove that a particular host is reachable, that a
-host will respond again, or that every active transfer is healthy. The monitor
-must not label it as a packet, response, or host-reachability check. A finished
-run must show **Completed at** with the recorded UTC time. A stopped run must
-show **Stopped at** with the recorded UTC time and stop reason, when known.
+bytes. It does not prove that a particular host is reachable, that a host will
+respond again, or that every active transfer is healthy. The monitor must not
+label it as a packet, response, or host-reachability check. A finished run must
+show **Completed at** with the recorded UTC time. A stopped run must show
+**Stopped at** with the recorded UTC time and stop reason, when known.
 
 The monitor must calculate displayed ages from monotonic local time after a
 valid snapshot. It must not advance an age after stale or disconnected status.
