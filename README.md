@@ -16,7 +16,7 @@ contain acquired evidence, queue files, download state, or derived content.
 - `run_priority.sh` runs the downloader with three local priority queues.
 - `monitor.py` displays the read-only telemetry snapshot.
 - `verify_provenance.py` verifies a signed provenance record set.
-- `test_tod-dl.py` and `test_monitor.py` contain tests.
+- `test_tod_dl.py` and `test_monitor.py` contain tests.
 - `acquisition_evaluation.py` provides local acquisition-engine fixtures.
 
 ## Requirements
@@ -147,7 +147,7 @@ python3 verify_provenance.py \
 Run the complete test set before you change downloader behavior:
 
 ```bash
-python3 -m unittest -v test_tod-dl.py test_monitor.py
+python3 -m unittest -v test_tod_dl.py test_monitor.py
 python3 -m unittest -v test_acquisition_evaluation.py
 python3 -m py_compile tod-dl.py acquisition_evaluation.py
 bash -n run_priority.sh

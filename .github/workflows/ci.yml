@@ -27,7 +27,7 @@ jobs:
           -r requirements-downloader.txt -r requirements-monitor.txt
 
       - name: Run tests
-        run: python3 -m unittest -v test_tod-dl.py test_monitor.py
+        run: python3 -m unittest -v test_tod_dl.py test_monitor.py
 
       - name: Check Python syntax
         run: >-

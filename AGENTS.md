@@ -39,7 +39,7 @@ and verifies those records without changing final files.
 Run these commands before you hand off downloader changes:
 
 ```bash
-python3 -m unittest -v test_tod-dl.py test_monitor.py
+python3 -m unittest -v test_tod_dl.py test_monitor.py
 python3 -m py_compile tod-dl.py download_telemetry.py \
     monitor.py controller.py provenance.py verify_provenance.py
 bash -n run_priority.sh
