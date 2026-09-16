@@ -344,7 +344,7 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                     ("escape", "dismiss", "Cancel")]
 
         CSS = """
-        RetryConfirmation {
+        ActionConfirmation {
             align: center middle;
         }
         #retry-confirmation {
