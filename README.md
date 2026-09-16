@@ -100,6 +100,8 @@ the legacy `tor-dl-subdir*.sh` wrappers for continued acquisition.
 The monitor reads a published telemetry snapshot. It does not open the
 acquisition database or write final evidence.
 
+![Monitor and controller visual demo](monitor-controller-demo.gif)
+
 ```bash
 python3 src/monitor.py --state /case/download-state \
     --run-id RUN_ID --control
