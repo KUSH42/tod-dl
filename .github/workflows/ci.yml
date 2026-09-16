@@ -27,16 +27,16 @@ jobs:
           -r requirements-downloader.txt -r requirements-monitor.txt
 
       - name: Run tests
-        run: python3 -m unittest -v test_tod_dl.py test_monitor.py
+        run: python3 -m unittest -v tests/test_tod_dl.py tests/test_monitor.py
 
       - name: Check Python syntax
         run: >-
-          python3 -m py_compile tod-dl.py download_telemetry.py
-          monitor.py controller.py provenance.py
-          verify_provenance.py
+          python3 -m py_compile src/tod-dl.py src/download_telemetry.py
+          src/monitor.py src/controller.py src/provenance.py
+          src/verify_provenance.py src/acquisition_evaluation.py
 
       - name: Check Bash syntax
-        run: bash -n run_priority.sh
+        run: bash -n src/run_priority.sh
 
   secrets:
     name: Secret scan

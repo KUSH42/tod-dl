@@ -9,7 +9,7 @@ acquisition rules take precedence over display calculations.
 
 ## Current implementation and integration boundary
 
-The current `tod-dl.py` launches one aria2 process per URL through
+The current `src/tod-dl.py` launches one aria2 process per URL through
 `torsocks -i`. Its progress loop sums staging-file lengths every 30 seconds.
 The active dictionary tracks transfers but removes entries before hashing.
 SQLite records durable states and attempt outcomes, not exact live transfer

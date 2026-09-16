@@ -336,7 +336,7 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
         from textual.widgets import Button, DataTable, Footer, Static
     except ImportError:
         print("Textual is optional. Install requirements-monitor.txt, or use "
-              "./run_priority.sh --status.", file=sys.stderr)
+              "./src/run_priority.sh --status.", file=sys.stderr)
         return 2
 
     class ActionConfirmation(ModalScreen[bool]):
@@ -658,7 +658,8 @@ def main() -> int:
     if not 10 <= args.fps <= 60:
         parser.error("--fps must be between 10 and 60")
     if args.demo:
-        path = Path(__file__).with_name("fixtures") / "monitor-v1-demo.json"
+        path = (Path(__file__).resolve().parents[1] / "tests" / "fixtures" /
+                "monitor-v1-demo.json")
         snapshot = read_snapshot(path)
         snapshot_path = None
     elif args.fixture:

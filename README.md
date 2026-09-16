@@ -12,12 +12,12 @@ records for completed files.
 The repository contains downloader source code and test fixtures. It does not
 contain acquired evidence, queue files, download state, or derived content.
 
-- `tod-dl.py` runs the bounded downloader.
-- `run_priority.sh` runs the downloader with three local priority queues.
-- `monitor.py` displays the read-only telemetry snapshot.
-- `verify_provenance.py` verifies a signed provenance record set.
-- `test_tod_dl.py` and `test_monitor.py` contain tests.
-- `acquisition_evaluation.py` provides local acquisition-engine fixtures.
+- `src/tod-dl.py` runs the bounded downloader.
+- `src/run_priority.sh` runs the downloader with three local priority queues.
+- `src/monitor.py` displays the read-only telemetry snapshot.
+- `src/verify_provenance.py` verifies a signed provenance record set.
+- `tests/` contains tests and non-sensitive fixtures.
+- `src/acquisition_evaluation.py` provides local acquisition-engine fixtures.
 
 ## Requirements
 
@@ -49,7 +49,7 @@ paths, URLs with credentials, and URLs with query values are ignored or
 rejected.
 
 Store queue files outside this source repository when they contain case data.
-The `run_priority.sh` wrapper expects these untracked files beside the script:
+The `src/run_priority.sh` wrapper expects these untracked files in the repository root:
 
 - `urls_1_priority.txt`
 - `urls_2_priority.txt`
@@ -71,7 +71,7 @@ Start with a dry run. The dry run reads queues and reports the selected final
 paths. It does not start Tor, `aria2c`, or a source request.
 
 ```bash
-python3 tod-dl.py \
+python3 src/tod-dl.py \
     --queue /case/urls_priority.txt \
     --destination /case/downloaded_files \
     --state /case/download-state \
@@ -81,7 +81,7 @@ python3 tod-dl.py \
 After an operator reviews the paths and storage, start a bounded run:
 
 ```bash
-python3 tod-dl.py \
+python3 src/tod-dl.py \
     --queue /case/urls_priority.txt \
     --destination /case/downloaded_files \
     --state /case/download-state \
@@ -100,7 +100,7 @@ run. The downloader binds the run ID to queue file hashes and the selection
 value. A retry cannot add a later queue item to the selected set.
 
 ```bash
-python3 tod-dl.py \
+python3 src/tod-dl.py \
     --queue /case/urls_priority.txt \
     --destination /case/downloaded_files \
     --state /case/download-state \
@@ -116,7 +116,7 @@ The monitor reads a published telemetry snapshot. It does not open the
 acquisition database or write final evidence.
 
 ```bash
-python3 monitor.py --state /case/download-state \
+python3 src/monitor.py --state /case/download-state \
     --run-id RUN_ID --control
 ```
 
@@ -136,7 +136,7 @@ Run the verifier to check the signature, event chain, final paths, byte counts,
 and SHA-256 digests. The verifier does not modify evidence.
 
 ```bash
-python3 verify_provenance.py \
+python3 src/verify_provenance.py \
     /case/download-state/provenance/RUN_ID/SESSION_ID \
     --destination /case/downloaded_files \
     --public-key /secure/TRUSTED_PUBLIC_KEY.pem
@@ -147,10 +147,10 @@ python3 verify_provenance.py \
 Run the complete test set before you change downloader behavior:
 
 ```bash
-python3 -m unittest -v test_tod_dl.py test_monitor.py
-python3 -m unittest -v test_acquisition_evaluation.py
-python3 -m py_compile tod-dl.py acquisition_evaluation.py
-bash -n run_priority.sh
+python3 -m unittest -v tests/test_tod_dl.py tests/test_monitor.py
+python3 -m unittest -v tests/test_acquisition_evaluation.py
+python3 -m py_compile src/tod-dl.py src/acquisition_evaluation.py
+bash -n src/run_priority.sh
 git diff --check
 ```
 
@@ -161,7 +161,7 @@ self-test starts a loopback HTTP fixture server. It generates only synthetic
 bytes. It does not start `aria2c`, `torsocks`, Tor, or a source request.
 
 ```bash
-python3 acquisition_evaluation.py \
+python3 src/acquisition_evaluation.py \
     --self-test --output /tmp/tod-dl-evaluation
 ```
 
@@ -188,9 +188,8 @@ SQLite state recovery, no-overwrite finalization, SHA-256 validation, signed
 provenance, Tor isolation checks, a read-only monitor, local control actions,
 and deterministic acquisition-engine fixtures.
 
-Use the project as a portfolio example of safety-focused systems work. Do not
-describe TOD-DL as production-ready or fully specification-complete. The open
-work record identifies the remaining engineering and evaluation work.
+This project is a portfolio example of safety-focused systems work.
+TOD-DL is neither production-ready nor fully specification-complete.
 
 ## License
 

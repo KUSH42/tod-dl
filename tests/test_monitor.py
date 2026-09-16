@@ -8,6 +8,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
 from controller import (ControlError, ControlServer, control_request,
                         get_control_state, read_control_session)
 from monitor import (SnapshotError, event_item_path, event_message_style,

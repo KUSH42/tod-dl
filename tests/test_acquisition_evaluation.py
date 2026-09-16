@@ -11,6 +11,10 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
 from acquisition_evaluation import (DeterministicBytes, EvaluationError, Fixture,
                                     FixtureServer, ResponseScript, ScenarioResult,
                                     build_manifest, build_report, manifest_hash,

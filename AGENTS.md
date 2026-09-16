@@ -9,8 +9,8 @@ The repository contains source code, tests, fixtures, dependency files, and
 design specifications. It must not contain acquired files, queue files,
 download state, derived content, secrets, private correspondence, or indexes.
 
-The project root contains the downloader, monitor, control server, provenance
-writer, and verifier. `fixtures/` contains non-sensitive test inputs. The
+The `src/` directory contains the downloader, monitor, control server,
+provenance writer, and verifier. `tests/fixtures/` contains non-sensitive test inputs. The
 `specs/SPEC-*.md` files define expected behavior. `specs/OPEN-WORK.md` lists
 incomplete development work and does not change a specification requirement.
 
@@ -23,15 +23,15 @@ Use a separate case directory for these runtime paths:
 
 ## Main modules
 
-`tod-dl.py` controls resumable acquisition. It invokes one `aria2c`
+`src/tod-dl.py` controls resumable acquisition. It invokes one `aria2c`
 process per selected URL through `torsocks`. It records durable state in SQLite
 and never overwrites a final file.
 
-`monitor.py` reads a published telemetry snapshot. It does not open
-the acquisition database or write evidence. `controller.py` provides
+`src/monitor.py` reads a published telemetry snapshot. It does not open
+the acquisition database or write evidence. `src/controller.py` provides
 the same-user control endpoint for confirmed retry and Tor renewal requests.
 
-`provenance.py` writes signed provenance records. `verify_provenance.py` reads
+`src/provenance.py` writes signed provenance records. `src/verify_provenance.py` reads
 and verifies those records without changing final files.
 
 ## Development commands
@@ -39,10 +39,10 @@ and verifies those records without changing final files.
 Run these commands before you hand off downloader changes:
 
 ```bash
-python3 -m unittest -v test_tod_dl.py test_monitor.py
-python3 -m py_compile tod-dl.py download_telemetry.py \
-    monitor.py controller.py provenance.py verify_provenance.py
-bash -n run_priority.sh
+python3 -m unittest -v tests/test_tod_dl.py tests/test_monitor.py
+python3 -m py_compile src/tod-dl.py src/download_telemetry.py \
+    src/monitor.py src/controller.py src/provenance.py src/verify_provenance.py
+bash -n src/run_priority.sh
 git diff --check
 ```
 

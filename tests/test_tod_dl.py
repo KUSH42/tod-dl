@@ -19,7 +19,8 @@ from types import SimpleNamespace
 
 from cryptography.hazmat.primitives import serialization
 
-module_path = Path(__file__).with_name("tod-dl.py")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+module_path = Path(__file__).resolve().parents[1] / "src" / "tod-dl.py"
 module_spec = importlib.util.spec_from_file_location("tod_dl", module_path)
 if module_spec is None or module_spec.loader is None:
     raise RuntimeError("cannot load tod-dl.py for tests")
