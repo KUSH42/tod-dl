@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_EVENTS = 100
 MAX_MESSAGE = 512
 PUBLISH_INTERVAL_SECONDS = 0.5
@@ -172,6 +172,9 @@ class TelemetryPublisher:
         self.validation: dict[str, dict[str, Any]] = {}
         self.events: deque[dict[str, Any]] = deque(maxlen=MAX_EVENTS)
         self.errors: deque[str] = deque(maxlen=20)
+        self.last_payload_progress_at: str | None = None
+        self.completed_at: str | None = None
+        self.stopped_at: str | None = None
         self._lock = threading.Lock()
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -208,6 +211,10 @@ class TelemetryPublisher:
     def set_lifecycle(self, lifecycle: str, reason: str | None = None) -> None:
         with self._lock:
             self.lifecycle, self.reason = lifecycle, reason
+            if lifecycle == "finished" and self.completed_at is None:
+                self.completed_at = utc_now()
+            if lifecycle == "stopped" and self.stopped_at is None:
+                self.stopped_at = utc_now()
         self.request_publish()
 
     def set_active(self, url: str, worker_id: int, attempt: int, phase: str,
@@ -243,6 +250,7 @@ class TelemetryPublisher:
             if (received_bytes is not None
                     and (previous is None or received_bytes > previous)):
                 sample["last_progress_monotonic"] = time.monotonic()
+                self.last_payload_progress_at = utc_now()
             sample.update({"received_bytes": received_bytes, "total_bytes": total_bytes,
                            "speed_bps": speed_bps, "connections": connections,
                            "total_source": "aria2_rpc", "sample_age_s": 0,
@@ -264,6 +272,11 @@ class TelemetryPublisher:
     def errors_copy(self) -> list[str]:
         with self._lock:
             return list(self.errors)
+
+    def time_status_copy(self) -> tuple[str | None, str | None, str | None]:
+        """Return observed payload and final lifecycle times for one snapshot."""
+        with self._lock:
+            return self.last_payload_progress_at, self.completed_at, self.stopped_at
 
     def clear_active(self, url: str) -> None:
         with self._lock:

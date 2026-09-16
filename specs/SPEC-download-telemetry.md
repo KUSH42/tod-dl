@@ -75,6 +75,12 @@ stable controller-session slot identifier. A consumer that accepts a fixture
 with legacy `run.id` or `slot` must normalize it before validation; a
 controller must publish only the canonical names.
 
+Version 2 adds time, trend, and filesystem fields for the console UI. A
+controller must not add them to a version-1 snapshot. A version-2 consumer may
+read a version-1 snapshot, but it must label each unavailable version-2 value.
+The monitor must not invent a value from file timestamps, file lengths, or a
+wall-clock estimate.
+
 | Field | Contract |
 | --- | --- |
 | `schema_version` | Integer major version, initially 1. Unknown major versions produce an explicit compatibility error. |
@@ -87,12 +93,36 @@ controller must publish only the canonical names.
 | `health` | Filesystem identities/free/reserve/headroom, Tor preflight result/time, cooldowns, retry/probe/stagger countdowns, and telemetry errors. |
 | `recent_events` | At most 100 sanitized events with stable ID, UTC time, severity, item/worker identity, category, and message. |
 
+In version 2, `run.last_payload_progress_at` is either an RFC 3339 UTC time or
+`null`. Set it when any engine adapter reports a strictly positive received-byte
+increase. Do not set it for packet activity, connection setup, log output,
+file-length inspection, hashing, finalization, or a controller heartbeat. The
+field describes observed payload progress, not host reachability. `run` also
+contains `completed_at` and `stopped_at`, each either an RFC 3339 UTC time or
+`null`. A final lifecycle records the applicable final time.
+
+In version 2, `health.filesystems` is an array. Each record contains an opaque
+stable `filesystem_id`, a nonempty `roles` array, `free_bytes`, `reserve_bytes`,
+and `headroom_bytes`. The byte fields are signed integer bytes. The controller
+sets `headroom_bytes` to `free_bytes - reserve_bytes`. `roles` uses safe role
+names and must not contain paths. Publish one record per distinct filesystem.
+Publish `health.filesystem_layout_error` when destination and state do not use
+the same filesystem. A controller must publish `null` for a measurement it
+cannot obtain and include a bounded telemetry error. It must not publish a
+cached value as a current measurement.
+
 Run metrics include `retained_bytes`, `complete_bytes`,
 `session_received_bytes`, `known_total_bytes`, `known_remaining_bytes`,
 `unknown_size_items`, `speed_bps`, `average_speed_bps`, `eta_seconds`,
 `eta_reason`, `estimated_finish_at`, and `quality`. Quality distinguishes exact,
 estimated, partial, stale, and unavailable values. Supply quality per metric
 when aggregate quality alone would be ambiguous.
+
+In version 2, every `speed_bps` metric includes a `quality` value. The values
+are `exact`, `estimated`, `partial`, `stale`, or `unavailable`. A consumer uses
+only `exact` and `estimated` aggregate speed values for a speed trend. It treats
+the other values as gaps. The controller publishes raw current speed only. The
+monitor owns its bounded display history and direction label.
 
 Worker transfer counters include `received_bytes`, `total_bytes`,
 `total_source`, `resume_baseline_bytes`, `speed_bps`, `last_progress_age_s`,

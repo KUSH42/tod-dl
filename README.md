@@ -13,7 +13,7 @@ The repository contains downloader source code and test fixtures. It does not
 contain acquired evidence, queue files, download state, or derived content.
 
 - `src/tod-dl.py` runs the bounded downloader.
-- `src/run_priority.sh` runs the downloader with three local priority queues.
+- `run.sh` runs the downloader with the local queue file.
 - `src/monitor.py` displays the read-only telemetry snapshot.
 - `src/verify_provenance.py` verifies a signed provenance record set.
 - `tests/` contains tests and non-sensitive fixtures.
@@ -135,7 +135,7 @@ Run the complete test set before you change downloader behavior:
 python3 -m unittest -v tests/test_tod_dl.py tests/test_monitor.py
 python3 -m unittest -v tests/test_acquisition_evaluation.py
 python3 -m py_compile src/tod-dl.py src/acquisition_evaluation.py
-bash -n src/run_priority.sh
+bash -n ./run.sh
 git diff --check
 ```
 

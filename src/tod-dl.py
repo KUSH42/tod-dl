@@ -1107,7 +1107,24 @@ class Downloader:
                                 "sample_sequence": None, "connections": None,
                                 "eta_seconds": None})
         workers.sort(key=lambda row: row["worker_id"])
-        free = shutil.disk_usage(self.destination).free
+        destination_usage = shutil.disk_usage(self.destination)
+        state_usage = shutil.disk_usage(self.state)
+        destination_device = self.destination.stat().st_dev
+        state_device = self.state.stat().st_dev
+        last_payload_progress_at, completed_at, stopped_at = self.telemetry.time_status_copy()
+        filesystems = []
+        for device, roles, usage in (
+                (destination_device, ["destination"], destination_usage),
+                (state_device, ["state"], state_usage)):
+            existing = next((row for row in filesystems
+                             if row["filesystem_id"] == str(device)), None)
+            if existing is not None:
+                existing["roles"].extend(roles)
+                continue
+            filesystems.append({"filesystem_id": str(device), "roles": roles,
+                                "free_bytes": usage.free,
+                                "reserve_bytes": self.args.reserve_bytes,
+                                "headroom_bytes": usage.free - self.args.reserve_bytes})
         return {
             "state_revision": durable["revision"],
             "run": {"lifecycle": lifecycle, "reason": reason,
@@ -1117,6 +1134,9 @@ class Downloader:
                     "selected_count": durable["selected_count"], "counts": durable["counts"],
                     "skipped_existing_count": durable["skipped_existing"],
                     "last_completion_at": durable["last_completion_at"],
+                    "last_payload_progress_at": last_payload_progress_at,
+                    "completed_at": completed_at,
+                    "stopped_at": stopped_at,
                     "engine_selection_status": (
                         "aria2 loopback RPC counters enabled"
                         if getattr(self.args, "aria2_rpc", False)
@@ -1130,9 +1150,10 @@ class Downloader:
                                              if self.deadline is not None else None)},
             "workers": workers,
             "validation": validation,
-            "health": {"filesystem_device": self.destination.stat().st_dev,
-                       "free_bytes": free, "reserve_bytes": self.args.reserve_bytes,
-                       "headroom_bytes": free - self.args.reserve_bytes,
+            "health": {"filesystems": filesystems,
+                       "filesystem_layout_error": (
+                           None if destination_device == state_device else
+                           "destination and state use different filesystems"),
                        "tor_preflight": self.manifest.get("tor_isolation_preflight"),
                        "cooldown_remaining_s": max(0.0, self.cooldown_until - time.time()),
                        "retry_eligible_at": (dt.datetime.fromtimestamp(

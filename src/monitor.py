@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import datetime as dt
 import hashlib
 import json
@@ -60,7 +61,7 @@ def validate_snapshot(snapshot: Any) -> dict[str, Any]:
     """Validate untrusted version-1 data before it reaches a terminal UI."""
     if not isinstance(snapshot, dict):
         raise SnapshotError("snapshot must be a JSON object")
-    if snapshot.get("schema_version") != 1:
+    if snapshot.get("schema_version") not in {1, 2}:
         raise SnapshotError("unsupported telemetry schema version")
     for name in ("run_id", "session_id", "published_at"):
         require_string(snapshot.get(name), name)
@@ -94,6 +95,21 @@ def validate_snapshot(snapshot: Any) -> dict[str, Any]:
                 require_nonnegative(worker[name], f"workers[{index}].{name}")
     if not isinstance(snapshot.get("health"), dict):
         raise SnapshotError("health must be an object")
+    if snapshot["schema_version"] == 2:
+        for name in ("last_payload_progress_at", "completed_at", "stopped_at"):
+            if run.get(name) is not None:
+                require_string(run[name], f"run.{name}")
+        filesystems = snapshot["health"].get("filesystems")
+        if not isinstance(filesystems, list):
+            raise SnapshotError("health.filesystems must be an array")
+        for index, filesystem in enumerate(filesystems):
+            if not isinstance(filesystem, dict):
+                raise SnapshotError(f"health.filesystems[{index}] must be an object")
+            require_string(filesystem.get("filesystem_id"),
+                           f"health.filesystems[{index}].filesystem_id")
+            roles = filesystem.get("roles")
+            if not isinstance(roles, list) or not roles:
+                raise SnapshotError(f"health.filesystems[{index}].roles must be nonempty")
     return snapshot
 
 
@@ -165,6 +181,16 @@ def format_duration(value: Any) -> str:
     return f"~{hours}h {minutes}m" if hours else f"~{minutes}m {seconds}s"
 
 
+def format_elapsed_duration(value: Any) -> str:
+    """Format a session duration without an ETA approximation marker."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+        return "?"
+    seconds = int(value)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
 def format_countdown(value: Any) -> str:
     """Format an exact short countdown without ETA's approximate marker."""
     seconds = max(0, int(value or 0))
@@ -205,7 +231,122 @@ def marquee_filename(value: Any, offset: int, width: int = 28) -> str:
 
 def metric_value(snapshot: dict[str, Any], name: str) -> Any:
     value = snapshot["run"].get("metrics", {}).get(name)
-    return value.get("value") if isinstance(value, dict) else None
+    if isinstance(value, dict):
+        return value.get("value")
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def metric_quality(snapshot: dict[str, Any], name: str) -> str:
+    value = snapshot["run"].get("metrics", {}).get(name)
+    return value.get("quality", "unavailable") if isinstance(value, dict) else "unavailable"
+
+
+def recorded_age(value: Any, snapshot: dict[str, Any]) -> str:
+    """Return an age relative to the published snapshot, or an unknown marker."""
+    if not isinstance(value, str):
+        return "?"
+    try:
+        recorded = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        published = dt.datetime.fromisoformat(snapshot["published_at"].replace("Z", "+00:00"))
+    except ValueError:
+        return "?"
+    if recorded.tzinfo is None or published.tzinfo is None or recorded > published:
+        return "?"
+    return format_countdown((published - recorded).total_seconds()) + " ago"
+
+
+def progress_status(snapshot: dict[str, Any]) -> str:
+    """Describe recorded transfer progress without claiming host reachability."""
+    run = snapshot["run"]
+    lifecycle = str(run.get("lifecycle", "")).lower()
+    if lifecycle == "finished":
+        return "Completed at " + (literal_text(run.get("completed_at"))
+                                  if run.get("completed_at") else "?")
+    if lifecycle == "stopped":
+        reason = literal_text(run.get("reason")) if run.get("reason") else "unknown reason"
+        when = literal_text(run.get("stopped_at")) if run.get("stopped_at") else "?"
+        return f"Stopped at {when}: {reason}"
+    payload_age = recorded_age(run.get("last_payload_progress_at"), snapshot)
+    if payload_age != "?":
+        return "Last payload progress " + payload_age
+    completion_age = recorded_age(run.get("last_completion_at"), snapshot)
+    if completion_age != "?":
+        return "Last complete " + completion_age
+    return "No payload progress recorded"
+
+
+def disk_status(snapshot: dict[str, Any]) -> str:
+    """Render safe filesystem capacity fields without exposing local paths."""
+    if freshness(snapshot) != "live":
+        return "Disk status unavailable"
+    filesystems = snapshot["health"].get("filesystems")
+    if not isinstance(filesystems, list) or not filesystems:
+        return "Disk status unavailable"
+    rendered = []
+    for filesystem in filesystems:
+        if not isinstance(filesystem, dict):
+            return "Disk status unavailable"
+        roles = filesystem.get("roles")
+        free = filesystem.get("free_bytes")
+        reserve = filesystem.get("reserve_bytes")
+        headroom = filesystem.get("headroom_bytes")
+        if (not isinstance(roles, list) or not roles or any(not isinstance(role, str)
+                for role in roles) or any(not isinstance(value, int)
+                for value in (free, reserve, headroom))):
+            return "Disk status unavailable"
+        status = " storage risk" if headroom < 0 else " storage stop" if headroom == 0 else ""
+        rendered.append(f"Disk {'/'.join(literal_text(role) for role in roles)}: "
+                        f"{format_bytes(free)} free | {format_bytes(reserve)} reserve | "
+                        f"{format_bytes(abs(headroom))} headroom{status}")
+    return "\n".join(rendered)
+
+
+class SpeedTrend:
+    """Keep bounded display-only aggregate-speed history for one monitor."""
+
+    def __init__(self) -> None:
+        self.samples: deque[tuple[float, float | None]] = deque()
+        self.session_id: str | None = None
+        self.sequence: int | None = None
+
+    def observe(self, snapshot: dict[str, Any], observed_at: float | None = None) -> None:
+        current = time.monotonic() if observed_at is None else observed_at
+        session_id = snapshot["session_id"]
+        sequence = snapshot["sequence"]
+        if self.session_id != session_id or (self.sequence is not None and sequence < self.sequence):
+            self.samples.clear()
+        if self.sequence == sequence and self.session_id == session_id:
+            return
+        if (self.samples and self.session_id == session_id
+                and current - self.samples[-1][0] < 1):
+            self.sequence = sequence
+            return
+        quality = metric_quality(snapshot, "speed_bps")
+        value = metric_value(snapshot, "speed_bps")
+        sample = float(value) if quality in {"exact", "estimated"} and value is not None else None
+        self.samples.append((current, sample))
+        self.session_id, self.sequence = session_id, sequence
+        while self.samples and current - self.samples[0][0] > 300:
+            self.samples.popleft()
+
+    def label(self) -> str:
+        valid = [(at, value) for at, value in self.samples if value is not None]
+        if not valid:
+            return "No data"
+        latest_at = valid[-1][0]
+        window = [(at, value) for at, value in valid if latest_at - at <= 60]
+        if len(window) < 10 or window[-1][0] - window[0][0] < 30:
+            return "Collecting"
+        third = max(1, len(window) // 3)
+        early = sum(value for _, value in window[:third]) / third
+        late = sum(value for _, value in window[-third:]) / third
+        if early <= 0:
+            return "Rising" if late > 0 else "Steady"
+        if late >= early * 1.1:
+            return "Rising"
+        if late <= early * 0.9:
+            return "Falling"
+        return "Steady"
 
 
 def concise_status(snapshot: dict[str, Any]) -> str:
@@ -302,9 +443,11 @@ def freshness_style(value: Any) -> str:
     return FRESHNESS_STYLES.get(str(value).lower(), "dim")
 
 
-def screen_summary(snapshot: dict[str, Any]) -> str:
+def screen_summary(snapshot: dict[str, Any], trend_label: str = "No data",
+                   session_elapsed_s: float | None = None) -> str:
     run = snapshot["run"]
     counts = run["counts"]
+    elapsed = snapshot["session_elapsed_s"] if session_elapsed_s is None else session_elapsed_s
     unknown_size_items = metric_value(snapshot, "unknown_size_items")
     eta = format_duration(metric_value(snapshot, "eta_seconds"))
     if eta == "—" and unknown_size_items:
@@ -312,7 +455,8 @@ def screen_summary(snapshot: dict[str, Any]) -> str:
         eta += f" ({unknown_size_items} {item_label} unknown)"
     return "\n".join((
         f"TOD-DL  {literal_text(snapshot['run_id'])}  "
-        f"{literal_text(run['lifecycle']).upper()}  {freshness(snapshot)}",
+        f"{literal_text(run['lifecycle']).upper()}  Session "
+        f"{format_elapsed_duration(elapsed)}  {progress_status(snapshot)}",
         "Files  " + " | ".join((
             f"{counts['complete']}/{run['selected_count']} complete",
             f"{counts['busy']} busy", f"{counts['retry']} retry",
@@ -320,8 +464,9 @@ def screen_summary(snapshot: dict[str, Any]) -> str:
         )),
         f"Data   {format_bytes(metric_value(snapshot, 'retained_bytes'))} retained | "
         f"{format_bytes(metric_value(snapshot, 'known_remaining_bytes'))} remaining",
-        f"Speed  {format_bytes(metric_value(snapshot, 'speed_bps'))}/s | ETA "
-        f"{eta}",
+        f"Speed  {format_bytes(metric_value(snapshot, 'speed_bps'))}/s | "
+        f"{trend_label} | ETA {eta}",
+        disk_status(snapshot),
         retry_summary(snapshot),
     ))
 
@@ -336,7 +481,7 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
         from textual.widgets import Button, DataTable, Footer, Static
     except ImportError:
         print("Textual is optional. Install requirements-monitor.txt, or use "
-              "./src/run_priority.sh --status.", file=sys.stderr)
+              "./run.sh --status.", file=sys.stderr)
         return 2
 
     class ActionConfirmation(ModalScreen[bool]):
@@ -406,8 +551,7 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
         }
         """
 
-        @staticmethod
-        def summary_text(current: dict[str, Any]) -> Text:
+        def summary_text(self, current: dict[str, Any]) -> Text:
             run = current["run"]
             state = literal_text(run["lifecycle"])
             connection = freshness(current)
@@ -419,7 +563,13 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             rendered.append(state.upper(), style=lifecycle_style(state))
             rendered.append("  ")
             rendered.append(connection, style=freshness_style(connection))
-            remainder = screen_summary(current).split("\n", 1)
+            rendered.append("  Session ")
+            rendered.append(format_elapsed_duration(self.session_elapsed(current)))
+            rendered.append("  ")
+            rendered.append(progress_status(current))
+            trend_label = self.trend.label() if connection == "live" else "No data"
+            remainder = screen_summary(current, trend_label,
+                                       self.session_elapsed(current)).split("\n", 1)
             if len(remainder) == 2:
                 for line in remainder[1].splitlines():
                     rendered.append("\n")
@@ -451,7 +601,7 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             return rendered
 
         def compose(self) -> ComposeResult:
-            yield Static(self.summary_text(snapshot), id="summary")
+            yield Static("", id="summary")
             yield DataTable(id="workers")
             with VerticalScroll(id="activity-pane", classes="event-log"):
                 yield Static(self.activity_text(snapshot["recent_events"]), id="activity")
@@ -467,6 +617,11 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             table.add_column("ETA", key="eta", width=9)
             self.query_one("#activity-pane", VerticalScroll).border_title = "Event log"
             self.current = snapshot
+            self.trend = SpeedTrend()
+            self.snapshot_sequence = None
+            self.snapshot_elapsed_s = 0.0
+            self.snapshot_observed_monotonic = time.monotonic()
+            self.observe_snapshot(snapshot)
             self.last_summary_signature: str | None = None
             self.last_event_signature: str | None = None
             self.rendered_rows: dict[str, tuple[str, ...]] = {}
@@ -481,8 +636,7 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                 self.set_interval(1 / 2, self.refresh_snapshot)
 
         def populate(self, current: dict[str, Any], force: bool = False) -> None:
-            summary_signature = json.dumps(current["run"], sort_keys=True,
-                                           separators=(",", ":"))
+            summary_signature = self.summary_text(current).plain
             if force or summary_signature != self.last_summary_signature:
                 self.query_one("#summary", Static).update(self.summary_text(current))
                 self.last_summary_signature = summary_signature
@@ -549,6 +703,19 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                 lambda: get_control_state(state, self.current["run_id"]),
                 self.apply_control_state,
             )
+
+        def observe_snapshot(self, current: dict[str, Any]) -> None:
+            if current["sequence"] != self.snapshot_sequence:
+                self.snapshot_sequence = current["sequence"]
+                self.snapshot_elapsed_s = float(current["session_elapsed_s"])
+                self.snapshot_observed_monotonic = time.monotonic()
+                self.trend.observe(current, self.snapshot_observed_monotonic)
+
+        def session_elapsed(self, current: dict[str, Any]) -> float:
+            if freshness(current) != "live":
+                return self.snapshot_elapsed_s
+            return self.snapshot_elapsed_s + max(
+                0.0, time.monotonic() - self.snapshot_observed_monotonic)
 
         def submit_control_request(self, operation, completed) -> None:
             """Run bounded socket I/O away from Textual's render and input loop."""
@@ -632,6 +799,7 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             try:
                 was_retryable = self.retry_now_eligible()
                 self.current = read_snapshot(snapshot_path)
+                self.observe_snapshot(self.current)
                 if was_retryable != self.retry_now_eligible():
                     self.refresh_bindings()
                 self.populate(self.current)

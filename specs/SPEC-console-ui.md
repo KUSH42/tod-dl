@@ -100,10 +100,10 @@ The default screen prioritizes the selected run. All numbers in this wireframe
 are synthetic; the layout illustrates a wide terminal.
 
 ```text
-TOR-DL  RUN_ID  RUNNING  Elapsed 02:14:38  Updated 1s ago
+TOR-DL  RUN_ID  RUNNING  Session 02:14:38  Last payload progress 1s ago
 Files  126/500 complete | 4 busy | 8 retry | 2 review | 360 queued
 Data   18.4/~72.0 GiB retained | ~53.6 GiB remaining
-Speed  700 KiB/s | 5m average 740 KiB/s | trend: ▁▂▅▆▄▃▅▇▅▃
+Speed  700 KiB/s | 5m average 740 KiB/s | Rising ▁▂▅▆▄▃▅▇▅▃
 ETA    —  2 items require review
 
 #  File            Phase          Received/total   Speed       ETA
@@ -112,7 +112,7 @@ ETA    —  2 items require review
 3  bundle.zip      Hashing        73%              —           —
 4  document.pdf    Connecting     18s elapsed      —           —
 
-Disk 84.2 GiB free | 10 GiB reserve | 74.2 GiB headroom
+Disk destination/state: 84.2 GiB free | 10 GiB reserve | 74.2 GiB headroom
 Tor preflight passed at 12:16 UTC | Last complete 42s ago
 
 [Activity] [Queue] [Errors / review]
@@ -136,6 +136,69 @@ Show retained progress, committed completion bytes, session transfer bytes,
 known total and remaining bytes, unknown-size count, current speed, five-minute
 average speed, transfer ETA, and estimated transfer finish time when available.
 Use the definitions and suppression rules in the telemetry contract.
+
+## Time, trend, and storage status
+
+The header must show **Session** followed by `session_elapsed_s`. Format the
+value as an exact elapsed duration. The timer continues locally between valid
+snapshots. Reset the timer when `session_id` changes. Freeze the displayed
+value when telemetry becomes stale or disconnected. A completed or stopped
+record must show the recorded final session duration.
+
+The header must not use **Updated**. Snapshot publication shows controller
+telemetry freshness. It does not show source reachability or transfer progress.
+
+When the controller records payload progress, show **Last payload progress**
+followed by its age. Payload progress means that the engine reports an increase
+in received payload bytes. It does not prove that a particular host is
+reachable, that a host will respond again, or that every active transfer is
+healthy.
+
+If no fresh payload-progress observation exists and a completion time exists,
+show **Last complete** followed by its age. If neither value exists, show
+**No payload progress recorded**. A finished run must show **Completed at**
+with the recorded UTC time. A stopped run must show **Stopped at** with the
+recorded UTC time and stop reason, when known.
+
+The monitor must calculate displayed ages from monotonic local time after a
+valid snapshot. It must not advance an age after stale or disconnected status.
+The monitor must show `?` and explain an absent, invalid, or clock-ambiguous
+time. The monitor must not call a payload-progress observation a packet, a
+response, or a host-reachability check.
+
+The speed row must include a bounded aggregate-speed trend. The trend contains
+one value for each advancing telemetry sequence, at most one value per second,
+over the latest 300 seconds. It uses aggregate speed only when the metric
+quality is exact or estimated. A partial, stale, unavailable, or missing value
+creates a visible gap. It must not create a zero-speed value.
+
+Render a sparkline when at least ten valid samples span 30 seconds. Also show
+one literal direction label: **Rising**, **Steady**, **Falling**, **No data**,
+or **Collecting**. Compare the mean of the earliest and latest valid thirds of
+the latest 60-second window. Use **Rising** when the later mean is at least 10
+percent higher. Use **Falling** when the later mean is at least 10 percent
+lower. Otherwise use **Steady**. Use **Collecting** before the sample
+requirement is met. Use **No data** after an unavailable or stale gap that
+leaves no valid 60-second comparison.
+
+Reset trend history when `session_id` changes, a valid sequence moves backward,
+or the monitor reconnects after disconnected status. Preserve a gap for a
+stale interval. The trend is display-only. It must not affect retry, admission,
+timeout, or Tor-renewal behavior.
+
+The health panel must show one disk line for each distinct filesystem that can
+block acquisition. Identify each line by safe role labels, such as
+`destination/state`, not by a private path. Each line must show free bytes,
+configured reserve bytes, and headroom bytes. Headroom equals free bytes minus
+reserve bytes. A negative headroom must show as a storage-risk error. Zero
+headroom must show as a storage-stop condition. Positive headroom does not
+guarantee that a future item fits.
+
+The monitor must deduplicate filesystems by the controller-provided filesystem
+identity. If the controller reports destination and state on different
+filesystems, show a persistent configuration error. If disk telemetry is
+missing, stale, or invalid, show **Disk status unavailable**. Do not reuse an
+old free-space value as current capacity.
 
 Worker numbers identify stable slots within a controller session. Keep rows in
 slot order during refresh. Show basename by default, with middle truncation
@@ -251,6 +314,12 @@ Deliver the monitor in stages with synthetic fixtures and recorded results.
 6. Kill or close the monitor during a synthetic transfer and prove the worker
    continues. Compare fixture hashes and durable state before and after
    monitoring; the monitor must cause no acquisition mutations.
+7. Verify the session timer, payload-progress age, completion and stop labels,
+   stale-time freeze, and session replacement with monotonic-clock fixtures.
+8. Verify rising, steady, falling, collecting, missing, partial, stale, and
+   disconnected speed trends. Prove that invalid samples render as gaps.
+9. Verify one, duplicate, missing, stale, zero-headroom, and negative-headroom
+   filesystem records. Prove that the compact layout preserves storage risk.
 
 Use Textual's headless test facilities for interaction tests and manual SSH
 checks for terminal behavior. Document optional dependency installation and

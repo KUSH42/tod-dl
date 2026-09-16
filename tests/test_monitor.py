@@ -19,7 +19,8 @@ from monitor import (SnapshotError, event_item_path, event_message_style,
                      marquee_filename, retry_summary, event_severity_style,
                      event_worker_label, format_countdown, freshness_style,
                      lifecycle_style, select_snapshot, worker_phase_label,
-                     truncate_filename)
+                     truncate_filename, SpeedTrend, disk_status, progress_status,
+                     screen_summary, validate_snapshot)
 
 
 def snapshot(lifecycle: str = "running") -> dict:
@@ -180,6 +181,36 @@ class MonitorTests(unittest.TestCase):
     def test_finished_run_without_retries_has_a_final_summary(self):
         value = snapshot("finished")
         self.assertEqual(retry_summary(value), "No retries pending")
+
+    def test_version_two_payload_progress_and_disk_status_are_displayed(self):
+        value = snapshot()
+        value["schema_version"] = 2
+        value["run"].update({
+            "last_payload_progress_at": (dt.datetime.now(dt.timezone.utc)
+                                        - dt.timedelta(seconds=8)).isoformat(),
+            "completed_at": None,
+            "stopped_at": None,
+            "metrics": {"speed_bps": {"value": 100, "quality": "exact"}},
+        })
+        value["health"] = {"filesystems": [{
+            "filesystem_id": "100", "roles": ["destination", "state"],
+            "free_bytes": 1000, "reserve_bytes": 500, "headroom_bytes": 500,
+        }]}
+        validate_snapshot(value)
+        self.assertIn("Last payload progress", progress_status(value))
+        self.assertIn("Disk destination/state", disk_status(value))
+        self.assertIn("Session 00:00:01", screen_summary(value, "Collecting"))
+
+    def test_speed_trend_labels_a_rising_exact_series(self):
+        trend = SpeedTrend()
+        for sequence in range(1, 11):
+            value = snapshot()
+            value["sequence"] = sequence
+            value["run"]["metrics"] = {
+                "speed_bps": {"value": sequence * 100, "quality": "exact"},
+            }
+            trend.observe(value, observed_at=float(sequence * 4))
+        self.assertEqual(trend.label(), "Rising")
 
     def test_event_severity_styles_distinguish_log_levels(self):
         self.assertEqual(event_severity_style("info"), "cyan")

@@ -42,7 +42,7 @@ Run these commands before you hand off downloader changes:
 python3 -m unittest -v tests/test_tod_dl.py tests/test_monitor.py
 python3 -m py_compile src/tod-dl.py src/download_telemetry.py \
     src/monitor.py src/controller.py src/provenance.py src/verify_provenance.py
-bash -n src/run_priority.sh
+bash -n ./run.sh
 git diff --check
 ```
 

@@ -1077,7 +1077,7 @@ class TelemetryTests(unittest.TestCase):
             publisher.stop()
             publisher.publish()
             snapshot = json.loads(publisher.path.read_text(encoding="utf-8"))
-            self.assertEqual(snapshot["schema_version"], 1)
+            self.assertEqual(snapshot["schema_version"], 2)
             self.assertEqual(snapshot["run_id"], "test-run")
             self.assertEqual(snapshot["run"]["lifecycle"], "finished")
             self.assertNotIn("\x1b", snapshot["recent_events"][0]["message"])
@@ -1094,6 +1094,18 @@ class TelemetryTests(unittest.TestCase):
             publisher.stop()
             snapshot = json.loads(publisher.path.read_text(encoding="utf-8"))
             self.assertGreaterEqual(snapshot["sequence"], 3)
+
+    def test_publisher_records_only_received_byte_growth_as_payload_progress(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            publisher = TelemetryPublisher(Path(temporary), "test-run", 1)
+            publisher.set_active("https://fixture.test/item", 1, 1, "downloading")
+            publisher.update_sample("https://fixture.test/item", 10, 20, 1, 1)
+            recorded, completed, stopped = publisher.time_status_copy()
+            self.assertIsNotNone(recorded)
+            self.assertIsNone(completed)
+            self.assertIsNone(stopped)
+            publisher.update_sample("https://fixture.test/item", 10, 20, 1, 1)
+            self.assertEqual(publisher.time_status_copy()[0], recorded)
 
 
 if __name__ == "__main__":
