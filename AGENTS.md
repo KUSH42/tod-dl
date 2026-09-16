@@ -11,8 +11,8 @@ download state, derived content, secrets, private correspondence, or indexes.
 
 The project root contains the downloader, monitor, control server, provenance
 writer, and verifier. `fixtures/` contains non-sensitive test inputs. The
-`SPEC-*.md` files define expected behavior. `OPEN-WORK.md` lists incomplete
-development work and does not change a specification requirement.
+`specs/SPEC-*.md` files define expected behavior. `specs/OPEN-WORK.md` lists
+incomplete development work and does not change a specification requirement.
 
 Use a separate case directory for these runtime paths:
 
@@ -94,8 +94,9 @@ not start `aria2c`, `torsocks`, or a source request.
 
 ## Documentation and commits
 
-Update the relevant `SPEC-*.md` file and `README.md` when a public behavior
-change needs user instructions. Keep Markdown lines at 80 characters or fewer.
+Update the relevant `specs/SPEC-*.md` file and `README.md` when a public
+behavior change needs user instructions. Keep Markdown lines at 80 characters
+or fewer.
 
 Use the Conventional Commits format: `type(scope): summary`. Write the summary
 in past tense. For example: `fix(ci): fixed issue where duplicate GitHub runs

@@ -172,13 +172,25 @@ E14 pass and meet all evaluation targets.
 
 ## Development status
 
-Read [open development work](OPEN-WORK.md) for the current implementation
+Read [open development work](specs/OPEN-WORK.md) for the current implementation
 state and the planned work that remains.
 
 The acquisition-engine evaluation is local-only. It needs no onion target and
 does not permit a source pilot. Read the
-[acquisition-tool evaluation specification](SPEC-acquisition-tool-evaluation.md)
-before you implement or run the evaluation.
+[acquisition-tool evaluation specification]
+(specs/SPEC-acquisition-tool-evaluation.md) before you implement or run the
+evaluation.
+
+## Portfolio project
+
+TOD-DL demonstrates durable acquisition design for forensic work. It includes
+SQLite state recovery, no-overwrite finalization, SHA-256 validation, signed
+provenance, Tor isolation checks, a read-only monitor, local control actions,
+and deterministic acquisition-engine fixtures.
+
+Use the project as a portfolio example of safety-focused systems work. Do not
+describe TOD-DL as production-ready or fully specification-complete. The open
+work record identifies the remaining engineering and evaluation work.
 
 ## License
 
