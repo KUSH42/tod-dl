@@ -1,18 +1,18 @@
 # TOD-DL
 
-TOD-DL is a resumable downloader for a defined URL queue. It protects existing
-final files, records durable state in SQLite, and creates signed provenance
-records for completed files.
+TOD-DL is a resumable downloader for a defined `.onion`-URL queue. The Tor-
+Onion-Dump-Downloader protects existing final files, records durable state
+in SQLite, and creates signed provenance records for completed files.
 
 > **Warning:** Use TOD-DL only for material that you are authorized to acquire
-> and retain. Treat completed files as forensic evidence.
+> and retain.
 
 ![TOR-DL Monitor and controller visual demo](monitor-controller-demo.gif)
 
 ## Repository contents
 
 The repository contains downloader source code and test fixtures. It does not
-contain acquired evidence, queue files, download state, or derived content.
+contain downloaded data, queue files, download state, or derived content.
 
 - `src/tod-dl.py` runs the bounded downloader.
 - `run.sh` runs the downloader with the local queue file.
@@ -94,13 +94,12 @@ python3 src/tod-dl.py \
     --run-id RUN_ID --max-files 5 --retry-now
 ```
 
-Use `--status` to read persisted state without starting transfers. Do not use
-the legacy `tor-dl-subdir*.sh` wrappers for continued acquisition.
+Use `--status` to read persisted state without starting transfers.
 
 ## Monitor and renew Tor circuits
 
 The monitor reads a published telemetry snapshot. It does not open the
-acquisition database or write final evidence.
+acquisition database or write final provenance.
 
 ```bash
 python3 src/monitor.py --state /case/download-state \
@@ -120,7 +119,7 @@ The controller writes signed record sets below
 public key or its fingerprint outside the record directory.
 
 Run the verifier to check the signature, event chain, final paths, byte counts,
-and SHA-256 digests. The verifier does not modify evidence.
+and SHA-256 digests. The verifier does not modify downloaded files.
 
 ```bash
 python3 src/verify_provenance.py \
@@ -186,5 +185,5 @@ permission from the copyright holder.
 
 ## Next steps
 
-Create case-specific queues outside the repository. Run a dry run and review
+Create download queues outside the repository. Run a dry run and review
 the selected paths before you start an acquisition.
