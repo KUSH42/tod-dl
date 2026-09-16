@@ -17,6 +17,7 @@ contain acquired evidence, queue files, download state, or derived content.
 - `monitor_priority.py` displays the read-only telemetry snapshot.
 - `verify_provenance.py` verifies a signed provenance record set.
 - `test_download_priority.py` and `test_monitor_priority.py` contain tests.
+- `acquisition_evaluation.py` provides local acquisition-engine fixtures.
 
 ## Requirements
 
@@ -147,10 +148,27 @@ Run the complete test set before you change downloader behavior:
 
 ```bash
 python3 -m unittest -v test_download_priority.py test_monitor_priority.py
-python3 -m py_compile download_priority.py
+python3 -m unittest -v test_acquisition_evaluation.py
+python3 -m py_compile download_priority.py acquisition_evaluation.py
 bash -n run_priority.sh
 git diff --check
 ```
+
+## Test the acquisition fixture harness
+
+Run the local self-test before you create a transfer-engine adapter. The
+self-test starts a loopback HTTP fixture server. It generates only synthetic
+bytes. It does not start `aria2c`, `torsocks`, Tor, or a source request.
+
+```bash
+python3 acquisition_evaluation.py \
+    --self-test --output /tmp/tod-dl-evaluation
+```
+
+The output directory must be empty. The self-test writes an immutable fixture
+manifest, a machine-readable fixture event log, and a structured report. It
+does not select an engine. An engine becomes selected only after E01 through
+E14 pass and meet all evaluation targets.
 
 ## Development status
 

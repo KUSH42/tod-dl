@@ -14,9 +14,11 @@ requirement in the related specifications.
 
 ## Remaining work
 
-Complete the acquisition tool evaluation first. Build the deterministic local
-fixture harness, run E01 through E14 for aria2, and write a sanitized selection
-report. Do not run a source pilot until the evaluation selects a configuration.
+Complete the acquisition tool evaluation first. The deterministic local fixture
+harness is available. Run E01 through E14 against the current per-URL aria2
+process configuration, then write a sanitized selection report. Add a
+long-lived RPC worker only when those results show a mandatory gap. Do not run
+a source pilot until the evaluation selects a configuration.
 
 Complete the reliable-acquisition contract after tool selection. The remaining
 work includes full engine lifecycle checks, bounded large-queue admission,
@@ -43,9 +45,10 @@ directory discovery only after the basic acquisition workflow is reliable.
 The current specification status is grouped below.
 
 - Implemented: `SPEC-tor-circuit-recovery.md`.
-- Partially implemented: acquisition fault recovery, provenance, console UI,
-  controller controls, download telemetry, and reliable acquisition.
-- Planned: acquisition tool evaluation and inventory discovery.
+- Partially implemented: acquisition tool evaluation, acquisition fault
+  recovery, provenance, console UI, controller controls, download telemetry,
+  and reliable acquisition.
+- Planned: inventory discovery.
 
 ## Next steps
 

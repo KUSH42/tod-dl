@@ -1,8 +1,10 @@
 # Specification: acquisition tool evaluation
 
-Status: proposed implementation plan, September 15, 2026. This specification
-defines how you select an existing transfer tool before expanding custom code.
-It does not authorize a production download or claim that the tests have run.
+Status: partially implemented, September 16, 2026. The local fixture harness
+implements deterministic content, immutable manifests, scripted HTTP behavior,
+event logs, and structured reports. No candidate has run E01 through E14.
+This specification defines how you select an existing transfer tool before
+expanding custom code. It does not authorize a production download.
 
 ## Outcome and scope
 
@@ -12,12 +14,15 @@ code for manifest conversion, evidence validation, and durable bookkeeping.
 Use the [discovery specification](SPEC-inventory-discovery.md) for crawling.
 
 The current downloader launches one aria2 process per URL through Tor. It
-protects final files, but loads eligible work in batches and has incomplete
-shutdown and validation behavior. Its `--max-files` setting limits a batch,
-not the entire run. Do not use that setting to bound an evaluation against the
-source. Use an explicit, immutable fixture queue and isolated state instead.
+protects final files and persists `--max-files` selection for the whole run.
+It still has incomplete shutdown and validation behavior. Use an explicit,
+immutable fixture queue and isolated state for every evaluation.
 
 ## Evaluation protocol
+
+The evaluation subject is TOD-DL with one configured transfer engine. E01
+through E14 test the controller, adapter, durable state, finalization, and
+engine as one acquisition configuration. The tests do not certify aria2 alone.
 
 Run every candidate through the same controller-facing adapter contract. The
 adapter accepts an immutable fixture manifest, an isolated destination and
@@ -38,12 +43,13 @@ reproduce it.
 Evaluate these configurations in order. Stop expanding the comparison once a
 candidate meets the requirements with a small, understandable adapter.
 
-1. Evaluate aria2 native input queues with saved sessions and small, durable
-   batches. A batch must not create a barrier that leaves available transfer
-   slots idle behind one large file.
-2. If file batches cannot satisfy scheduling requirements, evaluate long-lived
-   aria2 workers with a bounded RPC feed. SQLite owns the complete queue;
-   aria2 owns only the admitted jobs. Avoid developing a general RPC framework.
+1. Evaluate the current configuration: one aria2 process per URL through Tor.
+   Do not add a long-lived RPC worker unless the evaluation identifies a
+   mandatory scheduling, recovery, or resource failure.
+2. If the initial configuration fails a mandatory requirement, evaluate
+   long-lived aria2 workers with a bounded RPC feed. SQLite owns the complete
+   queue; aria2 owns only the admitted jobs. Avoid developing a general RPC
+   framework.
 3. Evaluate lftp only if aria2 fails a mandatory requirement, or if lftp can
    demonstrably combine directory discovery and transfer with less code.
    Confirm that it understands the source's actual listing format.
@@ -56,9 +62,10 @@ The [aria2 manual](https://aria2.github.io/manual/en/html/aria2c.html) documents
 input files, saved sessions, and RPC. It also states that `--save-session`
 disables `--deferred-input`. Do not assume that those options jointly provide
 bounded memory and durable queues. Test the installed version and record its
-effective configuration. The [lftp feature list](https://lftp.yar.ru/features.html)
-documents mirroring, parallel downloads, and automatic reconnect; those
-features alone do not establish compatibility with this source or Tor setup.
+effective configuration. The
+[lftp feature list](https://lftp.yar.ru/features.html) documents mirroring,
+parallel downloads, and automatic reconnect. Those features alone do not
+establish compatibility with this source or Tor setup.
 
 ## Tor and process model
 
@@ -73,12 +80,13 @@ listener returned by the ControlPort. Record effective settings and sanitized
 connection evidence. Distinct credentials separate isolation groups; process
 IDs alone do not prove routing, circuit allocation, or independent capacity.
 Use the [Tor SOCKS specification](https://spec.torproject.org/socks-extensions.html)
-when designing these checks.
+when you design these checks.
 
-If RPC is selected, bind it to loopback, require a local secret, restrict its
-file permissions, and test local control access through the chosen torsocks
-configuration. Source connections and DNS must still go through Tor. Do not
-substitute aria2's HTTP proxy option for a SOCKS implementation.
+If a future evaluation selects RPC, bind it to loopback, require a local
+secret, restrict its file permissions, and test local control access through
+the chosen torsocks configuration. Source connections and DNS must still go
+through Tor. Do not substitute aria2's HTTP proxy option for a SOCKS
+implementation.
 
 The local fixture is exempt from source-routing checks only when its resolved
 address is loopback and the scenario explicitly declares `local_fixture`.
@@ -106,9 +114,9 @@ The fixture server must support scripted per-request responses, including
 Range handling, validators, delays, short bodies, redirects, and connection
 termination. It must write a machine-readable event log. Test-only controller
 failpoints must stop immediately after durable validation intent, exclusive
-final creation, and completion-record commit, so E06 has unambiguous process
-boundaries. Disk-full tests may use a controlled filesystem quota or a test
-write shim; the report must identify which method was used.
+final-file creation, and completion-record commit. E06 then has unambiguous
+process boundaries. Disk-full tests may use a controlled filesystem quota or
+a test write shim; the report must identify which method was used.
 
 | ID | Scenario | Required result |
 | --- | --- | --- |
@@ -164,20 +172,23 @@ The report must include commands, configurations, per-scenario results,
 remaining gaps, estimated adapter complexity, and a selected configuration.
 Store generated bodies and runtime logs outside tracked source files.
 
-Select a candidate only when all evidence-preservation and recovery tests
-pass, all engineering targets are met, and its adapter remains within the
-bounded responsibilities in the reliable-acquisition specification. If no
-candidate passes, report the exact missing capability before
-adding custom behavior. Do not replace the transfer engine with handwritten
-HTTP or resume code.
+Select a candidate only when E01 through E14 pass, all engineering targets are
+met, and its adapter remains within the bounded responsibilities in the
+reliable-acquisition specification. If no candidate passes, report the exact
+missing capability before adding custom behavior. Do not replace the transfer
+engine with handwritten HTTP or resume code.
 
 After local success, a separately scheduled source pilot must use an explicit
-queue of at most five URLs, a time limit, and separate state. Record actual Tor
-routing and source Range behavior. If the source is unavailable, report the
-pilot as blocked; local test success remains valid but is not source success.
+queue of at most five URLs, a time limit, and separate state. Record verified
+SOCKS routing settings, sanitized connection evidence, and source Range
+behavior. Do not claim that the pilot proves a Tor circuit route. If the source
+is unavailable, report the pilot as blocked; local test success remains valid
+but is not source success.
 
 ## Next steps
 
-Implement the fixture harness and test aria2 native sessions first. Use the
-selected result to implement the acquisition specification, then add discovery
-without making crawling a prerequisite for downloading known URLs.
+Run E01 through E14 against the current per-URL aria2 process configuration.
+Add a long-lived RPC worker only when the evaluation identifies a mandatory
+gap. Use the selected result to implement the acquisition specification, then
+add discovery without making crawling a prerequisite for downloading known
+URLs.
