@@ -21,7 +21,7 @@ and continues to provide read-only monitoring.
 The implemented monitor command is:
 
 ```bash
-python3 monitor_priority.py --state download-state --run-id RUN_ID \
+python3 monitor.py --state download-state --run-id RUN_ID \
     --control
 ```
 
@@ -99,7 +99,7 @@ or bypass the remediation eligibility checks.
 
 ## Textual application modes and update loop
 
-The existing `monitor_priority.py` UI becomes the shared Textual application
+The existing `monitor.py` UI becomes the shared Textual application
 base. It retains snapshot validation, filename safety, worker and event
 rendering, event scroll behavior, and noninteractive status output. The
 application uses an in-memory view model with separate read-only telemetry and

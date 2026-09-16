@@ -12,11 +12,11 @@ records for completed files.
 The repository contains downloader source code and test fixtures. It does not
 contain acquired evidence, queue files, download state, or derived content.
 
-- `download_priority.py` runs the bounded downloader.
+- `tod-dl.py` runs the bounded downloader.
 - `run_priority.sh` runs the downloader with three local priority queues.
-- `monitor_priority.py` displays the read-only telemetry snapshot.
+- `monitor.py` displays the read-only telemetry snapshot.
 - `verify_provenance.py` verifies a signed provenance record set.
-- `test_download_priority.py` and `test_monitor_priority.py` contain tests.
+- `test_tod-dl.py` and `test_monitor.py` contain tests.
 - `acquisition_evaluation.py` provides local acquisition-engine fixtures.
 
 ## Requirements
@@ -71,7 +71,7 @@ Start with a dry run. The dry run reads queues and reports the selected final
 paths. It does not start Tor, `aria2c`, or a source request.
 
 ```bash
-python3 download_priority.py \
+python3 tod-dl.py \
     --queue /case/urls_priority.txt \
     --destination /case/downloaded_files \
     --state /case/download-state \
@@ -81,7 +81,7 @@ python3 download_priority.py \
 After an operator reviews the paths and storage, start a bounded run:
 
 ```bash
-python3 download_priority.py \
+python3 tod-dl.py \
     --queue /case/urls_priority.txt \
     --destination /case/downloaded_files \
     --state /case/download-state \
@@ -100,7 +100,7 @@ run. The downloader binds the run ID to queue file hashes and the selection
 value. A retry cannot add a later queue item to the selected set.
 
 ```bash
-python3 download_priority.py \
+python3 tod-dl.py \
     --queue /case/urls_priority.txt \
     --destination /case/downloaded_files \
     --state /case/download-state \
@@ -116,7 +116,7 @@ The monitor reads a published telemetry snapshot. It does not open the
 acquisition database or write final evidence.
 
 ```bash
-python3 monitor_priority.py --state /case/download-state \
+python3 monitor.py --state /case/download-state \
     --run-id RUN_ID --control
 ```
 
@@ -147,9 +147,9 @@ python3 verify_provenance.py \
 Run the complete test set before you change downloader behavior:
 
 ```bash
-python3 -m unittest -v test_download_priority.py test_monitor_priority.py
+python3 -m unittest -v test_tod-dl.py test_monitor.py
 python3 -m unittest -v test_acquisition_evaluation.py
-python3 -m py_compile download_priority.py acquisition_evaluation.py
+python3 -m py_compile tod-dl.py acquisition_evaluation.py
 bash -n run_priority.sh
 git diff --check
 ```

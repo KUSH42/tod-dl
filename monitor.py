@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
-from controller_control import ControlError, control_request, get_control_state
+from controller import ControlError, control_request, get_control_state
 
 
 FINAL_LIFECYCLES = {"finished", "stopped"}

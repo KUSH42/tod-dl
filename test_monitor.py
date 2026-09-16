@@ -8,13 +8,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from controller_control import (ControlError, ControlServer, control_request,
-                                get_control_state, read_control_session)
-from monitor_priority import (SnapshotError, event_item_path, event_message_style, event_timestamp, freshness, literal_text, read_snapshot,
-                              marquee_filename, retry_summary, event_severity_style,
-                              event_worker_label, format_countdown, freshness_style, lifecycle_style,
-                              select_snapshot, worker_phase_label,
-                              truncate_filename)
+from controller import (ControlError, ControlServer, control_request,
+                        get_control_state, read_control_session)
+from monitor import (SnapshotError, event_item_path, event_message_style,
+                     event_timestamp, freshness, literal_text, read_snapshot,
+                     marquee_filename, retry_summary, event_severity_style,
+                     event_worker_label, format_countdown, freshness_style,
+                     lifecycle_style, select_snapshot, worker_phase_label,
+                     truncate_filename)
 
 
 def snapshot(lifecycle: str = "running") -> dict:

@@ -27,12 +27,12 @@ jobs:
           -r requirements-downloader.txt -r requirements-monitor.txt
 
       - name: Run tests
-        run: python3 -m unittest -v test_download_priority.py test_monitor_priority.py
+        run: python3 -m unittest -v test_tod-dl.py test_monitor.py
 
       - name: Check Python syntax
         run: >-
-          python3 -m py_compile download_priority.py download_telemetry.py
-          monitor_priority.py controller_control.py provenance.py
+          python3 -m py_compile tod-dl.py download_telemetry.py
+          monitor.py controller.py provenance.py
           verify_provenance.py
 
       - name: Check Bash syntax

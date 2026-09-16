@@ -7,8 +7,10 @@ import unittest
 import os
 import hashlib
 import errno
+import importlib.util
 import json
 import shutil
+import sys
 import time
 from contextlib import redirect_stdout
 from io import StringIO
@@ -17,9 +19,17 @@ from types import SimpleNamespace
 
 from cryptography.hazmat.primitives import serialization
 
-from download_priority import (ADMISSION_POLL_SECONDS, Downloader, RETRY_DELAYS,
-                               aria2_log_terminal_status,
-                               aria2_rpc_job_status, sha256sum, storage_relative)
+module_path = Path(__file__).with_name("tod-dl.py")
+module_spec = importlib.util.spec_from_file_location("tod_dl", module_path)
+if module_spec is None or module_spec.loader is None:
+    raise RuntimeError("cannot load tod-dl.py for tests")
+tod_dl = importlib.util.module_from_spec(module_spec)
+sys.modules["tod_dl"] = tod_dl
+module_spec.loader.exec_module(tod_dl)
+
+from tod_dl import (ADMISSION_POLL_SECONDS, Downloader, RETRY_DELAYS,
+                    aria2_log_terminal_status, aria2_rpc_job_status, sha256sum,
+                    storage_relative)
 from download_telemetry import (PUBLISH_INTERVAL_SECONDS, TelemetryPublisher,
                                 estimate_eta_seconds, reduce_metrics)
 from provenance import ProvenanceWriter
@@ -42,32 +52,32 @@ def make_args(root: Path, queue: Path, max_files: int = 0) -> SimpleNamespace:
 
 class RunSelectionTests(unittest.TestCase):
     def test_rpc_terminal_job_status_reads_known_gid(self):
-        import download_priority
+        import tod_dl
 
-        original = download_priority.aria2_rpc_call
+        original = tod_dl.aria2_rpc_call
         calls = []
 
         def rpc_call(port, method, params):
             calls.append((port, method, params))
             return {"result": {"status": "error"}}
 
-        download_priority.aria2_rpc_call = rpc_call
+        tod_dl.aria2_rpc_call = rpc_call
         try:
             self.assertEqual(aria2_rpc_job_status(12345, "secret", "gid-1"), "error")
         finally:
-            download_priority.aria2_rpc_call = original
+            tod_dl.aria2_rpc_call = original
         self.assertEqual(calls, [(12345, "aria2.tellStatus",
                                   ["token:secret", "gid-1", ["status"]])])
 
     def test_rpc_terminal_job_status_uses_stopped_list_without_gid(self):
-        import download_priority
+        import tod_dl
 
-        original = download_priority.aria2_rpc_call
-        download_priority.aria2_rpc_call = lambda *_: {"result": [{"status": "complete"}]}
+        original = tod_dl.aria2_rpc_call
+        tod_dl.aria2_rpc_call = lambda *_: {"result": [{"status": "complete"}]}
         try:
             self.assertEqual(aria2_rpc_job_status(12345, "secret", None), "complete")
         finally:
-            download_priority.aria2_rpc_call = original
+            tod_dl.aria2_rpc_call = original
 
     def test_log_terminal_status_is_a_fallback_for_stalled_rpc(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -129,7 +139,7 @@ class RunSelectionTests(unittest.TestCase):
             self.assertEqual(downloader.reserve_worker_id(), 1)
 
     def test_tor_circuit_renewal_is_rate_limited(self):
-        import download_priority
+        import tod_dl
 
         with tempfile.TemporaryDirectory() as temporary:
             queue = Path(temporary) / "queue.txt"
@@ -138,18 +148,18 @@ class RunSelectionTests(unittest.TestCase):
             downloader.args.tor_newnym_interval = 60
             downloader.args.tor_control_address = "127.0.0.1:9051"
             downloader.args.tor_control_cookie = Path(temporary) / "cookie"
-            original = download_priority.send_tor_newnym
+            original = tod_dl.send_tor_newnym
             requests = []
-            download_priority.send_tor_newnym = lambda *_: requests.append("newnym")
+            tod_dl.send_tor_newnym = lambda *_: requests.append("newnym")
             try:
                 self.assertTrue(downloader.request_newnym())
                 self.assertFalse(downloader.request_newnym())
             finally:
-                download_priority.send_tor_newnym = original
+                tod_dl.send_tor_newnym = original
             self.assertEqual(requests, ["newnym"])
 
     def test_operator_tor_renewal_is_audited_and_keeps_items_unchanged(self):
-        import download_priority
+        import tod_dl
 
         url = "https://fixture.test/first/data/item.bin"
         with tempfile.TemporaryDirectory() as temporary:
@@ -159,19 +169,19 @@ class RunSelectionTests(unittest.TestCase):
             downloader.args.tor_newnym_interval = 60
             downloader.args.tor_control_address = "127.0.0.1:9051"
             downloader.args.tor_control_cookie = root / "cookie"
-            original = download_priority.send_tor_newnym
+            original = tod_dl.send_tor_newnym
             request = {"request_id": "renew-1", "session_id": "session-1"}
             try:
-                download_priority.send_tor_newnym = lambda *_: (_ for _ in ()).throw(
+                tod_dl.send_tor_newnym = lambda *_: (_ for _ in ()).throw(
                     RuntimeError("Tor rejected SIGNAL NEWNYM"))
                 failed = downloader.control_renew_tor_circuits(db, request)
-                download_priority.send_tor_newnym = lambda *_: None
+                tod_dl.send_tor_newnym = lambda *_: None
                 first = downloader.control_renew_tor_circuits(
                     db, {"request_id": "renew-2", "session_id": "session-1"})
                 second = downloader.control_renew_tor_circuits(
                     db, {"request_id": "renew-3", "session_id": "session-1"})
             finally:
-                download_priority.send_tor_newnym = original
+                tod_dl.send_tor_newnym = original
             self.assertEqual(failed["outcome"], "failed")
             self.assertEqual(first["outcome"], "completed")
             self.assertEqual(second["outcome"], "rejected")

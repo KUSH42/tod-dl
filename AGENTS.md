@@ -23,12 +23,12 @@ Use a separate case directory for these runtime paths:
 
 ## Main modules
 
-`download_priority.py` controls resumable acquisition. It invokes one `aria2c`
+`tod-dl.py` controls resumable acquisition. It invokes one `aria2c`
 process per selected URL through `torsocks`. It records durable state in SQLite
 and never overwrites a final file.
 
-`monitor_priority.py` reads a published telemetry snapshot. It does not open
-the acquisition database or write evidence. `controller_control.py` provides
+`monitor.py` reads a published telemetry snapshot. It does not open
+the acquisition database or write evidence. `controller.py` provides
 the same-user control endpoint for confirmed retry and Tor renewal requests.
 
 `provenance.py` writes signed provenance records. `verify_provenance.py` reads
@@ -39,9 +39,9 @@ and verifies those records without changing final files.
 Run these commands before you hand off downloader changes:
 
 ```bash
-python3 -m unittest -v test_download_priority.py test_monitor_priority.py
-python3 -m py_compile download_priority.py download_telemetry.py \
-    monitor_priority.py controller_control.py provenance.py verify_provenance.py
+python3 -m unittest -v test_tod-dl.py test_monitor.py
+python3 -m py_compile tod-dl.py download_telemetry.py \
+    monitor.py controller.py provenance.py verify_provenance.py
 bash -n run_priority.sh
 git diff --check
 ```

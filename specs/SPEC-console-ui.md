@@ -48,9 +48,9 @@ rendered literally and all numeric values are validated as nonnegative.
 Provide a separate monitor process. Use these supported commands:
 
 ```bash
-python3 monitor_priority.py --state download-state --run-id RUN_ID
-python3 monitor_priority.py --state download-state
-python3 monitor_priority.py --demo
+python3 monitor.py --state download-state --run-id RUN_ID
+python3 monitor.py --state download-state
+python3 monitor.py --demo
 ```
 
 With no run ID, open the live controller session when exactly one valid,
@@ -85,10 +85,10 @@ and launch the demo with these commands:
 python3 -m venv .venv-monitor
 . .venv-monitor/bin/activate
 python3 -m pip install -r requirements-monitor.txt
-python3 monitor_priority.py --demo
+python3 monitor.py --demo
 ```
 
-Use `python3 monitor_priority.py --fixture PATH` to validate and display a
+Use `python3 monitor.py --fixture PATH` to validate and display a
 different version-1 synthetic fixture. In a noninteractive environment, either
 command prints a concise literal-text status and exits. `--state` and
 `--run-id` read only the controller's published snapshot; they never open the

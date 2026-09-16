@@ -24,7 +24,7 @@ import uuid
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlsplit
 
-from controller_control import ControlServer
+from controller import ControlServer
 from download_telemetry import TelemetryPublisher, estimate_eta_seconds, reduce_metrics
 from provenance import ProvenanceError, ProvenanceWriter, utc_now
 
