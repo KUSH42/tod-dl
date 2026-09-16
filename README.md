@@ -175,7 +175,7 @@ SQLite state recovery, no-overwrite finalization, SHA-256 validation, signed
 provenance, Tor isolation checks, a read-only monitor, local control actions,
 and deterministic acquisition-engine fixtures.
 
-This project is a portfolio example of safety-focused systems work.
+This portfolio project is an example of auditable safety-focused systems work.
 TOD-DL is neither production-ready nor fully specification-complete.
 
 ## License
