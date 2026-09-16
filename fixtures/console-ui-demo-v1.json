@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "run": {
+    "id": "DEMO_20260915",
+    "lifecycle": "RUNNING",
+    "session_started_at": "2026-09-15T12:16:00Z",
+    "created_at": "2026-09-15T12:15:00Z",
+    "selected_count": 12,
+    "counts": {
+      "complete": 3,
+      "busy": 2,
+      "retry": 1,
+      "queued": 4,
+      "exhausted": 0,
+      "unavailable": 0,
+      "existing_unverified": 0,
+      "review_required": 2,
+      "unknown": 0
+    },
+    "metrics": {
+      "retained_bytes": 1975684956,
+      "known_total_bytes": 7727581184,
+      "known_remaining_bytes": 5751896228,
+      "unknown_size_items": 0,
+      "speed_bps": 716800,
+      "average_speed_bps": 757760,
+      "eta_seconds": null
+    }
+  },
+  "workers": [
+    {
+      "slot": 1,
+      "item_id": "a1b2c3d4",
+      "basename": "archive.zip",
+      "phase": "Downloading",
+      "received_bytes": 1288490188,
+      "total_bytes": 4080218931,
+      "speed_bps": 419840,
+      "eta_seconds": 6660
+    },
+    {
+      "slot": 2,
+      "item_id": "e5f6a7b8",
+      "basename": "mailbox.pst",
+      "phase": "Hashing",
+      "received_bytes": 964689920,
+      "total_bytes": 964689920,
+      "speed_bps": null,
+      "eta_seconds": null
+    }
+  ],
+  "validation": [],
+  "health": {
+    "free_bytes": 90409061580,
+    "reserve_bytes": 10737418240,
+    "tor_preflight": "passed"
+  },
+  "recent_events": [
+    {
+      "time": "2026-09-15T14:31:08Z",
+      "severity": "info",
+      "message": "Worker 2 started SHA-256 calculation"
+    }
+  ]
+}

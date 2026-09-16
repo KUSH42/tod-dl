@@ -1,0 +1,2 @@
+# Signed provenance records require Ed25519 support.
+cryptography>=42,<47

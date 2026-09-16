@@ -1,0 +1,12 @@
+# Canonical acquired evidence; never store it in Git.
+/downloaded_files/
+/archive/
+/pst_extracted/
+/msg_extracted/
+/output/
+/download-state/
+/iped-working/
+/.venv/
+/.venv-monitor/
+/__pycache__/
+*.pyc

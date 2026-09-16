@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "run_id": "DEMO_20260915",
+  "session_id": "demo-session",
+  "sequence": 1,
+  "published_at": "2026-09-15T12:00:00+00:00",
+  "session_elapsed_s": 0,
+  "state_revision": 0,
+  "run": {
+    "lifecycle": "finished",
+    "selected_count": 3,
+    "counts": {
+      "queued": 0,
+      "busy": 0,
+      "retry": 0,
+      "exhausted": 0,
+      "complete": 2,
+      "existing_unverified": 0,
+      "review_required": 1,
+      "unavailable": 0,
+      "unknown": 0
+    },
+    "metrics": {
+      "retained_bytes": {"value": 1572864, "quality": "partial"},
+      "speed_bps": {"value": null, "quality": "unavailable"}
+    }
+  },
+  "workers": [],
+  "validation": [],
+  "health": {},
+  "recent_events": []
+}
