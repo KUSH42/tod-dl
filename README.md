@@ -103,7 +103,7 @@ python3 download_priority.py \
     --queue /case/urls_priority.txt \
     --destination /case/downloaded_files \
     --state /case/download-state \
-    --run-id PILOT_20260915 --max-files 5 --retry-now
+    --run-id RUN_ID --max-files 5 --retry-now
 ```
 
 Use `--status` to read persisted state without starting transfers. Do not use
@@ -116,7 +116,7 @@ acquisition database or write final evidence.
 
 ```bash
 python3 monitor_priority.py --state /case/download-state \
-    --run-id PILOT_20260915 --control
+    --run-id RUN_ID --control
 ```
 
 With `--control`, press `r` to make selected retryable items eligible now.

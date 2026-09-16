@@ -22,7 +22,7 @@ and continues to provide read-only monitoring.
 The implemented monitor command is:
 
 ```bash
-python3 monitor_priority.py --state download-state --run-id PILOT_20260915 \
+python3 monitor_priority.py --state download-state --run-id RUN_ID \
     --control
 ```
 

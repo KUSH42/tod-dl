@@ -12,8 +12,8 @@ Refresh listings without mutating the active baseline or silently extending a
 running acquisition. Use existing HTTP and parsing tools where practical;
 don't build a general browser automation platform.
 
-For the first release, support the existing `ALL_FILES*.txt` format and an
-explicit local snapshot input. Add network refresh of known inventory URLs
+For the first release, support the configured plain-text inventory format and
+an explicit local snapshot input. Add network refresh of known inventory URLs
 next. Add directory-page crawling only if the inventory is absent, incomplete,
 or proven stale. JavaScript rendering and authenticated navigation are outside
 the initial scope.
@@ -28,7 +28,7 @@ Store each response under a unique dated snapshot directory, with exact raw
 body bytes, source URL, UTC request/response times, status, redirect chain,
 available headers, local SHA-256, and tool version. Keep failed responses
 separate from accepted inventories. An HTTP 200 error page must not become the
-active baseline. Don't replace any existing `ALL_FILES_BER_*.txt` snapshot.
+active baseline. Do not replace an existing snapshot.
 
 A snapshot is accepted only after format validation and a parse report.
 Partial or malformed input must not silently replace a previously complete

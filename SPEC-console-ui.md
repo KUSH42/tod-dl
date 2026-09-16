@@ -48,7 +48,7 @@ rendered literally and all numeric values are validated as nonnegative.
 Provide a separate monitor process. Use these supported commands:
 
 ```bash
-python3 monitor_priority.py --state download-state --run-id PILOT_20260915
+python3 monitor_priority.py --state download-state --run-id RUN_ID
 python3 monitor_priority.py --state download-state
 python3 monitor_priority.py --demo
 ```
@@ -100,7 +100,7 @@ The default screen prioritizes the selected run. All numbers in this wireframe
 are synthetic; the layout illustrates a wide terminal.
 
 ```text
-TOR-DL  PILOT_20260915  RUNNING  Elapsed 02:14:38  Updated 1s ago
+TOR-DL  RUN_ID  RUNNING  Elapsed 02:14:38  Updated 1s ago
 Files  126/500 complete | 4 busy | 8 retry | 2 review | 360 queued
 Data   18.4/~72.0 GiB retained | ~53.6 GiB remaining
 Speed  700 KiB/s | 5m average 740 KiB/s | trend: ▁▂▅▆▄▃▅▇▅▃
