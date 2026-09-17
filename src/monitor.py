@@ -8,6 +8,7 @@ from collections import deque
 import datetime as dt
 import hashlib
 import json
+import logging
 import re
 import sys
 import threading
@@ -638,18 +639,26 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                       "Transfer", "Admission", "Worker details", "Item details"}
 
     def detail_visual(output: str) -> Text:
-        """Style trusted labels without parsing untrusted values as Rich markup."""
+        """Style trusted labels without parsing untrusted values as Rich markup.
+
+        Unavailable values ("? (...)") are dimmed so recorded data stands
+        out against the repeated placeholder text.
+        """
         visual = Text()
+
+        def append_value(text: str) -> None:
+            visual.append(text, style="dim" if text.lstrip().startswith("?") else None)
+
         for line_number, line in enumerate(output.splitlines()):
             if line in section_labels:
                 visual.append(line, style="bold white")
             else:
                 position = 0
                 for match in re.finditer(r"(?:^|  )([^:\n]{1,40}:)", line):
-                    visual.append(line[position:match.start(1)])
+                    append_value(line[position:match.start(1)])
                     visual.append(match.group(1), style="dim")
                     position = match.end(1)
-                visual.append(line[position:])
+                append_value(line[position:])
             if line_number < len(output.splitlines()) - 1:
                 visual.append("\n")
         return visual
@@ -1151,9 +1160,15 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                     result, error = operation(), None
                 except InspectionError as exc:
                     result, error = None, str(exc)
+                except Exception:
+                    logging.getLogger(__name__).exception("inspection request raised an unexpected error")
+                    result, error = None, "inspection request raised an unexpected error"
                 def finish() -> None:
                     self.inspection_request_active = False
-                    completed(result, error)
+                    try:
+                        completed(result, error)
+                    except Exception:
+                        logging.getLogger(__name__).exception("inspection callback raised an unexpected error")
                 self.call_from_thread(finish)
             threading.Thread(target=worker, name="monitor-inspection", daemon=True).start()
 
