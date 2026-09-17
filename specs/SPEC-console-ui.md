@@ -1,6 +1,6 @@
 # Specification: acquisition console UI
 
-Status: partially implemented, September 16, 2026. The checkout contains a
+Status: partially implemented, September 17, 2026. The checkout contains a
 read-only monitor and confirmed retry and Tor-renewal controls. This document
 also defines planned dashboard behavior. It does not authorize source
 requests.
@@ -31,6 +31,22 @@ The [controller command channel specification](SPEC-controller-control-ui.md)
 defines the later interactive mode. That mode reuses this application's layout,
 snapshot reader, literal-safe rendering, and navigation; it does not add a
 second controller or grant the UI direct database access.
+
+The planned inspection views have separate specifications:
+
+- [Read-only inspection](SPEC-console-inspection.md) defines data access,
+  identity, pagination, privacy, and compatibility.
+- [Item details](SPEC-console-item-details.md) defines item state, paths,
+  attempts, source reveal, and validation results.
+- [Worker details](SPEC-console-worker-details.md) defines slot activity,
+  assignment changes, metrics, and admission reasons.
+- [Queue view](SPEC-console-queue.md) defines selected-item browsing,
+  literal search, filters, and stable pagination.
+
+These specifications define planned behavior, not implemented features.
+They refine the view summaries below. Acquisition safety and telemetry metric
+definitions retain authority. The monitor must use the controller-owned
+inspection service for detail records; it must never open SQLite.
 
 The version-1 synthetic fixture is a JSON object with `schema_version` set to
 `1`, top-level `run_id` and `session_id`, plus `run`, `workers`, `validation`,
@@ -93,8 +109,10 @@ Use `python3 src/monitor.py --fixture PATH` to validate and display a
 different version-1 or version-2 synthetic fixture. In a noninteractive
 environment, either command prints a concise literal-text status and exits.
 `--state` and
-`--run-id` read only the controller's published snapshot; they never open the
-acquisition database or send a command to the controller.
+`--run-id` currently read only the controller's published snapshot. The planned
+inspection service adds read-only detail requests in observer mode. The
+monitor never opens the acquisition database. Acquisition commands require
+explicit control mode and confirmation.
 
 ## Main screen
 
@@ -230,6 +248,12 @@ Keep idle slots visible and explain deliberate staggering or cooldown.
 ## Detail, queue, and activity views
 
 You can inspect additional information without crowding the worker table.
+
+**Enter** on a worker row opens worker details. **Enter** on a queue or review
+item opens item details. Worker details provide an explicit item-detail action.
+Item details stay bound to an item; worker details follow a session slot.
+The queue includes the complete selected set, with manifest order only.
+Inspection service failure must leave the dashboard available.
 
 | View | Required information |
 | --- | --- |

@@ -162,6 +162,13 @@ E14 pass and meet all evaluation targets.
 Read [open development work](specs/OPEN-WORK.md) for the current implementation
 state and the planned work that remains.
 
+The [console UI specification](specs/SPEC-console-ui.md) defines planned
+[item details](specs/SPEC-console-item-details.md),
+[worker details](specs/SPEC-console-worker-details.md), and the
+[queue view](specs/SPEC-console-queue.md). These views require the planned
+[read-only inspection service](specs/SPEC-console-inspection.md).
+The current monitor does not implement these views.
+
 The acquisition-engine evaluation is local-only. It needs no onion target and
 does not permit a source pilot. Read the
 [acquisition-tool evaluation specification]

@@ -314,7 +314,7 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(lifecycle_style("stopped"), "bold yellow")
         self.assertEqual(lifecycle_style("unexpected"), "bold red")
         self.assertEqual(freshness_style("live"), "green")
-        self.assertEqual(freshness_style("disconnected"), "bold red")
+        self.assertEqual(freshness_style("disconnected"), "red")
 
     def test_event_worker_label_includes_valid_worker_id_only(self):
         self.assertEqual(event_worker_label({"worker_id": 3}), "W3")

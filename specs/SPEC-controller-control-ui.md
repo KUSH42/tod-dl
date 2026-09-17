@@ -120,12 +120,17 @@ queuing work. It preserves keyboard responsiveness, selection, and manual
 scroll position, and it follows the activity log only when the user is already
 at its bottom.
 
-The UI exposes four views. **Dashboard** remains the default read-only view.
-**Activity** and **Review** provide details and literal-safe paths without
-mutation. **Control** is visible only with `--control`, displays the controller
-session and action availability, and opens a confirmation modal for a supported
-action. A disconnected or stale controller disables action widgets immediately;
-it never infers that an action succeeded from a local button press.
+The planned UI provides **Dashboard**, **Queue**, **Activity**, **Review**,
+and optional **Control** views. **Dashboard** remains the default read-only
+view. The [queue specification](SPEC-console-queue.md) defines queue browsing.
+The [item](SPEC-console-item-details.md) and
+[worker](SPEC-console-worker-details.md) specifications define nested details.
+These observer views use the separate
+[inspection service](SPEC-console-inspection.md) without control credentials.
+**Control** is visible only with `--control`, displays the controller session
+and action availability, and opens a confirmation modal for a supported
+action. A disconnected or stale controller disables action widgets
+immediately. The UI never infers success from a local button press.
 
 ## Failure handling and recovery
 

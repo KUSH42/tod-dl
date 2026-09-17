@@ -130,10 +130,13 @@ and `sample_sequence`. Inventory token, estimate, and engine total remain
 separate fields when both exist. Use stable item IDs; never key UI state only
 by basename, URL abbreviation, or PID.
 
-Keep queue rows and complete attempt history out of the snapshot. Read them
-through indexed, paginated, read-only SQLite access with short transactions
-and bounded lock waits. Include read revision/time in details; if a detail
-query is newer than the snapshot, label it rather than mixing its values into
+Keep queue rows and complete attempt history out of the snapshot. The planned
+[read-only inspection service](SPEC-console-inspection.md) owns their access.
+Only that controller-owned service may use indexed, paginated SQLite reads
+for console details, with short transactions and bounded lock waits.
+The monitor must never open SQLite. The snapshot publisher must retain its
+zero-query boundary. Include read revision/time in details; if a detail query
+differs from the snapshot revision, label it instead of mixing values into
 snapshot counts. Never enable SQLite immutable mode on a live database.
 
 ## Freshness, failure, and lifecycle

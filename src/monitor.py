@@ -35,8 +35,8 @@ LIFECYCLE_STYLES = {
 }
 FRESHNESS_STYLES = {
     "live": "green",
-    "stale": "bold yellow",
-    "disconnected": "bold red",
+    "stale": "yellow",
+    "disconnected": "red",
     "recorded": "dim",
 }
 

@@ -28,9 +28,13 @@ Complete telemetry integration. Use the read-only aria2 RPC interface for exact
 live transfer counters. Add tests for stale samples, snapshot failures, and all
 required metric-quality states.
 
-Complete the monitor and control UI. Add the planned dashboard, queue, review,
-and detail views. Add pause, resume, drain, and checkpoint-stop controls one at
-a time with confirmation, audit, telemetry, and headless UI tests.
+Complete the monitor and control UI. Add the planned dashboard and review
+views. Implement [read-only inspection](SPEC-console-inspection.md),
+[item details](SPEC-console-item-details.md),
+[worker details](SPEC-console-worker-details.md), and the
+[queue view](SPEC-console-queue.md) with their contract and headless UI tests.
+Add pause, resume, drain, and checkpoint-stop controls one at a time with
+confirmation, audit, telemetry, and headless UI tests.
 
 Complete the provenance and fault-recovery acceptance suites. Compare the
 existing implementation with both specifications. Add each missing fixture
@@ -48,7 +52,8 @@ The current specification status is grouped below.
 - Partially implemented: acquisition tool evaluation, acquisition fault
   recovery, provenance, console UI, controller controls, download telemetry,
   and reliable acquisition.
-- Planned: inventory discovery.
+- Planned: inventory discovery, console inspection, item details, worker
+  details, and queue view.
 
 ## Next steps
 
