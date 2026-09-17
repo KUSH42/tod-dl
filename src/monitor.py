@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 
 from controller import ControlError, control_request, get_control_state
+from inspection import InspectionError, inspection_request
 
 
 FINAL_LIFECYCLES = {"finished", "stopped"}
@@ -490,13 +491,81 @@ def screen_summary(snapshot: dict[str, Any], trend_label: str = "No data",
     ))
 
 
+def detail_value(value: Any, reason: str = "not recorded") -> str:
+    """Render an inspection value without treating an unknown as a zero."""
+    if value is None:
+        return f"? ({literal_text(reason)})"
+    return literal_text(value)
+
+
+def detail_bytes(value: Any, reason: str = "not recorded") -> str:
+    """Show binary units and the exact byte value for one item field."""
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return f"{format_bytes(value)} ({value:,} bytes)"
+    return detail_value(None, reason)
+
+
+def item_details_text(item: dict[str, Any], read_at: Any = None,
+                      revision: Any = None, sample_freshness: str = "?") -> str:
+    """Build a literal-safe, scrollable item-details display from one record."""
+    unavailable = item.get("unavailable", {})
+    reason = unavailable.get("reason", "not recorded") if isinstance(unavailable, dict) else "not recorded"
+    identity = item.get("identity", {})
+    state = item.get("state", {})
+    engine = item.get("engine", {})
+    byte_values = item.get("bytes", {})
+    validation = item.get("validation", {})
+    def field(section: dict[str, Any], name: str, fallback: Any = None) -> Any:
+        return section.get(name, fallback) if isinstance(section, dict) else fallback
+    lines = [
+        "Item details",
+        f"Read: {detail_value(read_at, 'read time unavailable')}  Revision: {detail_value(revision, 'revision unavailable')}  Freshness: {literal_text(sample_freshness)}",
+        "", "Identity and paths",
+        f"Item ID: {detail_value(field(identity, 'item_id', item.get('item_id')), reason)}",
+        f"Run ID: {detail_value(field(identity, 'run_id'), reason)}",
+        f"Original path: {detail_value(field(identity, 'logical_path', item.get('logical_path')), reason)}",
+        f"Mapped storage path: {detail_value(field(identity, 'storage_path', item.get('storage_path')), reason)}",
+        f"Staging path: {detail_value(item.get('staging_path'), reason)}",
+        f"Candidate path: {detail_value(item.get('candidate_path'), reason)}",
+        f"Queue rank: {detail_value(field(identity, 'queue_rank', item.get('queue_rank')), reason)}",
+        f"Generation: {detail_value(field(identity, 'generation'), reason)}  Attempt ID: {detail_value(field(identity, 'attempt_id'), reason)}",
+        "", "State",
+        f"Durable state: {detail_value(field(state, 'durable_state', item.get('durable_state')), reason)}  Bucket: {detail_value(field(state, 'bucket', item.get('bucket')), reason)}",
+        f"Phase: {detail_value(field(state, 'phase'), reason)}  Reason: {detail_value(field(state, 'phase_reason'), reason)}",
+        f"Worker: {detail_value(field(state, 'worker_id'), reason)}  Last transition: {detail_value(field(state, 'last_transition_at', item.get('updated_at')), reason)}",
+        f"Attempts: {detail_value(field(state, 'attempt_count', item.get('attempt_count')), reason)} / {detail_value(field(state, 'attempt_ceiling', item.get('attempt_ceiling')), reason)}",
+        f"Retry deadline: {detail_value(field(state, 'retry_at', item.get('retry_at')), reason)}",
+        "", "Engine",
+        f"Engine: {detail_value(field(engine, 'name'), reason)} {detail_value(field(engine, 'version'), reason)}",
+        f"Instance: {detail_value(field(engine, 'instance_id'), reason)}  Job: {detail_value(field(engine, 'job_id'), reason)}  PID: {detail_value(field(engine, 'pid'), reason)}",
+        f"Runtime sample: {detail_value(field(engine, 'sample_at'), reason)}",
+        "", "Bytes",
+        f"Received: {detail_bytes(field(byte_values, 'received', item.get('received_bytes')), reason)}",
+        f"Resume baseline: {detail_bytes(field(byte_values, 'resume_baseline'), reason)}",
+        f"Transfer total: {detail_bytes(field(byte_values, 'transfer_total'), reason)}  Source: {detail_value(field(byte_values, 'transfer_total_source'), reason)}",
+        f"Inventory size: {detail_value(field(byte_values, 'inventory_size', item.get('inventory_size')), reason)}",
+        f"Retained item bytes: {detail_bytes(field(byte_values, 'retained_item_bytes'), reason)}",
+        f"Committed item completion bytes: {detail_bytes(field(byte_values, 'committed_completion_bytes'), reason)}",
+        "", "Validation",
+        f"Method: {detail_value(field(validation, 'method'), reason)}  Result: {detail_value(field(validation, 'result'), reason)}",
+        f"Expected SHA-256: {detail_value(field(validation, 'expected_sha256'), reason)}",
+        f"Observed SHA-256: {detail_value(field(validation, 'observed_sha256', item.get('sha256')), reason)}",
+        f"Mismatch reason: {detail_value(field(validation, 'mismatch_reason'), reason)}",
+        f"Promotion: {detail_value(field(validation, 'promotion_status'), reason)}  Staging cleanup: {detail_value(field(validation, 'staging_cleanup_at'), reason)}",
+        "", "Source",
+        f"{literal_text(item.get('source_label', 'Source hidden'))}: {detail_value(item.get('source'), 'hidden until you select Reveal source')}",
+        "", "Attempts and errors", "Select Next attempts to load another recorded page.",
+    ]
+    return "\n".join(lines)
+
+
 def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                 state: Path | None = None, control: bool = False, fps: int = 30) -> int:
     try:
         from textual.app import App, ComposeResult
         from textual.containers import Horizontal, Vertical, VerticalScroll
         from rich.text import Text
-        from textual.screen import ModalScreen
+        from textual.screen import ModalScreen, Screen
         from textual.widgets import Button, DataTable, Footer, Static
     except ImportError:
         print("Textual is optional. Install requirements-monitor.txt, or use "
@@ -552,6 +621,102 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
 
         def on_button_pressed(self, event: Button.Pressed) -> None:
             self.dismiss(event.button.id == "confirm")
+
+    class ItemDetails(Screen[None]):
+        """Read-only view bound to one immutable run and item identity."""
+        BINDINGS = [("escape", "dismiss", "Back"), ("r", "reveal_source", "Reveal source"),
+                    ("h", "hide_source", "Hide source"), ("n", "next_attempts", "Next attempts")]
+        CSS = "#item-details { height: 1fr; overflow-y: auto; }"
+
+        def __init__(self, run_id: str, item_id: str) -> None:
+            super().__init__()
+            self.run_id = run_id
+            self.item_id = item_id
+            self.item: dict[str, Any] | None = None
+            self.read_at: Any = None
+            self.revision: Any = None
+            self.cursor: str | None = None
+            self.attempts: list[dict[str, Any]] = []
+            self.revealed = False
+
+        def compose(self) -> ComposeResult:
+            with VerticalScroll(id="item-details"):
+                yield Static("Loading item details…", id="item-details-text")
+            yield Footer()
+
+        def on_mount(self) -> None:
+            self.load_item()
+
+        def render(self, error: str | None = None) -> None:
+            output = ("Details unavailable\n" + literal_text(error)
+                      if error else item_details_text(self.item or {}, self.read_at,
+                                                       self.revision,
+                                                       freshness(self.app.current)))
+            if self.attempts:
+                output += "\n\nRecorded attempts\n" + "\n".join(
+                    f"#{detail_value(row.get('attempt_number'))} {detail_value(row.get('outcome'))} "
+                    f"{detail_value(row.get('attempt_id'))}" for row in self.attempts)
+            self.query_one("#item-details-text", Static).update(output)
+
+        def load_item(self) -> None:
+            self.app.submit_inspection(
+                lambda: inspection_request(state, self.run_id, "get_item",
+                                            {"item_id": self.item_id,
+                                             "reveal_source": self.revealed}),
+                self.apply_item)
+
+        def apply_item(self, response: dict[str, Any] | None, error: str | None) -> None:
+            if error or not response:
+                self.render(error or "inspection returned no record")
+                return
+            data = response.get("data", {})
+            item = data.get("item") if isinstance(data, dict) else None
+            if not isinstance(item, dict):
+                self.render("inspection returned an invalid item")
+                return
+            self.item = item
+            self.read_at = response.get("read_at")
+            self.revision = response.get("state_revision")
+            self.render()
+
+        def action_reveal_source(self) -> None:
+            self.revealed = True
+            self.load_item()
+
+        def action_hide_source(self) -> None:
+            self.revealed = False
+            if self.item:
+                self.item["source"] = None
+                self.item["source_label"] = "Source hidden"
+            self.render()
+
+        def action_next_attempts(self) -> None:
+            parameters: dict[str, Any] = {"item_id": self.item_id, "page_size": 200}
+            if self.cursor:
+                parameters["cursor"] = self.cursor
+            self.app.submit_inspection(
+                lambda: inspection_request(state, self.run_id, "list_attempts", parameters),
+                self.apply_attempts)
+
+        def apply_attempts(self, response: dict[str, Any] | None, error: str | None) -> None:
+            if error or not response:
+                self.app.notify("Results changed: " + literal_text(error or "request failed"), severity="warning")
+                return
+            if self.revision is not None and response.get("state_revision") != self.revision:
+                self.app.notify("Results changed; restart attempts from the first page.", severity="warning")
+                return
+            data = response.get("data", {})
+            rows = data.get("attempts") if isinstance(data, dict) else None
+            if not isinstance(rows, list):
+                self.app.notify("Attempt history is unavailable.", severity="warning")
+                return
+            self.attempts.extend(row for row in rows if isinstance(row, dict))
+            self.cursor = data.get("next_cursor") if isinstance(data.get("next_cursor"), str) else None
+            self.render()
+
+        def action_dismiss(self) -> None:
+            self.revealed = False
+            self.pop_screen()
 
     class Monitor(App):
         BINDINGS = [("q", "quit", "Close"), ("r", "prepare_retry_now", "Retry now"),
@@ -716,10 +881,36 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             self.control_error: str | None = None
             self.action_confirmation: dict[str, Any] | None = None
             self.control_request_active = False
+            self.inspection_request_active = False
             self.populate(snapshot, force=True)
             self.set_interval(1 / fps, self.render_frame)
             if snapshot_path:
                 self.set_interval(1 / 2, self.refresh_snapshot)
+
+        def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+            worker = next((row for row in self.current["workers"]
+                           if str(row.get("worker_id")) == str(event.row_key.value)), None)
+            if not worker or not isinstance(worker.get("item_id"), str):
+                self.notify("Details unavailable: no item assigned", severity="warning")
+                return
+            self.push_screen(ItemDetails(self.current["run_id"], worker["item_id"]))
+
+        def submit_inspection(self, operation, completed) -> None:
+            """Run one inspection request away from the render and input loop."""
+            if self.inspection_request_active or state is None:
+                completed(None, "inspection endpoint unavailable")
+                return
+            self.inspection_request_active = True
+            def worker() -> None:
+                try:
+                    result, error = operation(), None
+                except InspectionError as exc:
+                    result, error = None, str(exc)
+                def finish() -> None:
+                    self.inspection_request_active = False
+                    completed(result, error)
+                self.call_from_thread(finish)
+            threading.Thread(target=worker, name="monitor-inspection", daemon=True).start()
 
         def populate(self, current: dict[str, Any], force: bool = False) -> None:
             summary_signature = self.summary_text(current).plain

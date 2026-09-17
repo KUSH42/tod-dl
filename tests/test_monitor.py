@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import sqlite3
 import tempfile
@@ -23,7 +24,7 @@ from monitor import (SnapshotError, event_item_path, event_message_style,
                      event_worker_label, format_countdown, freshness_style,
                      lifecycle_style, select_snapshot, worker_phase_label,
                      truncate_filename, SpeedTrend, disk_status, progress_status,
-                     screen_summary, validate_snapshot)
+                     screen_summary, validate_snapshot, detail_bytes, item_details_text)
 
 
 def snapshot(lifecycle: str = "running") -> dict:
@@ -348,6 +349,45 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(marquee_filename(name, 0, 12), "long-name-wi")
         self.assertIn("\\x1b", marquee_filename(name, 16, 12))
         self.assertNotEqual(marquee_filename(name, 0, 12), marquee_filename(name, 1, 12))
+
+    def test_inspection_attempt_history_is_ordered_and_paged(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = root / "manifest.sqlite"
+            db = sqlite3.connect(database)
+            db.executescript("""
+                CREATE TABLE downloads (url TEXT PRIMARY KEY, relative_path TEXT NOT NULL, storage_path TEXT, staging_path TEXT, inventory_size TEXT, status TEXT NOT NULL, attempts INTEGER NOT NULL, bytes INTEGER, sha256 TEXT, last_error TEXT, next_retry_at REAL NOT NULL, promotion_target TEXT, updated_at TEXT NOT NULL, review_code TEXT);
+                CREATE TABLE run_items (run_id TEXT, url TEXT, queue_rank INTEGER);
+                CREATE TABLE telemetry_revisions (run_id TEXT PRIMARY KEY, revision INTEGER);
+                CREATE TABLE download_attempts (run_id TEXT, url TEXT, attempt_number INTEGER, attempt_id TEXT, generation TEXT, started_at TEXT, ended_at TEXT, outcome TEXT, error_category TEXT, error_message TEXT, retry_at TEXT);
+            """)
+            url = "http://example.onion/a"
+            db.execute("INSERT INTO downloads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                       (url, "a", None, None, None, "retry_wait", 3, 9, None, None, 0, None, "2026-09-17T00:00:00Z", None))
+            db.execute("INSERT INTO run_items VALUES (?, ?, ?)", ("run-one", url, 1))
+            db.execute("INSERT INTO telemetry_revisions VALUES (?, ?)", ("run-one", 4))
+            for number, identifier in ((3, "b"), (3, "a"), (2, "z")):
+                db.execute("INSERT INTO download_attempts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                           ("run-one", url, number, identifier, None, None, None, "failed", None, None, None))
+            db.commit()
+            db.close()
+            server = InspectionServer(root, "run-one", "session-one", database, 3)
+            server.start()
+            try:
+                item_id = hashlib.sha256(url.encode()).hexdigest()
+                first = inspection_request(root, "run-one", "list_attempts", {"item_id": item_id, "page_size": 2})
+                self.assertEqual([(row["attempt_number"], row["attempt_id"]) for row in first["data"]["attempts"]], [(3, "a"), (3, "b")])
+                second = inspection_request(root, "run-one", "list_attempts", {"item_id": item_id, "page_size": 2, "cursor": first["data"]["next_cursor"]})
+                self.assertEqual(second["data"]["attempts"][0]["attempt_number"], 2)
+            finally:
+                server.stop()
+
+    def test_item_details_render_literal_values_and_exact_bytes(self):
+        item = {"item_id": "a" * 64, "logical_path": "<tag>\x1b[31m", "received_bytes": 0, "source_label": "Source hidden", "source": None}
+        rendered = item_details_text(item, "2026-09-17T00:00:00Z", 2)
+        self.assertIn("<tag>\\x1b[31m", rendered)
+        self.assertIn("0 B (0 bytes)", rendered)
+        self.assertEqual(detail_bytes(None), "? (not recorded)")
 
 
 if __name__ == "__main__":

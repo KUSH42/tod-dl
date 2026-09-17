@@ -55,6 +55,14 @@ CREATE TABLE IF NOT EXISTS download_transitions (
 );
 CREATE INDEX IF NOT EXISTS download_transitions_url
     ON download_transitions (url, recorded_at);
+CREATE TABLE IF NOT EXISTS download_attempts (
+    run_id TEXT NOT NULL, url TEXT NOT NULL, attempt_number INTEGER NOT NULL,
+    attempt_id TEXT NOT NULL, generation TEXT, started_at TEXT,
+    ended_at TEXT, outcome TEXT, error_category TEXT, error_message TEXT,
+    retry_at TEXT, PRIMARY KEY (run_id, url, attempt_id)
+);
+CREATE INDEX IF NOT EXISTS download_attempts_order
+    ON download_attempts (run_id, url, attempt_number DESC, attempt_id);
 CREATE TABLE IF NOT EXISTS control_requests (
     request_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, session_id TEXT NOT NULL,
     action TEXT NOT NULL, outcome TEXT NOT NULL, reason TEXT NOT NULL,
@@ -517,8 +525,8 @@ class Downloader:
             self.stop_requested.set()
             raise RuntimeError(f"local provenance failure: {exc}") from exc
 
-    def attempt_event(self, url: str, number: int, started_at: str,
-                      outcome: str) -> None:
+    def attempt_event(self, db: sqlite3.Connection, url: str, number: int,
+                      started_at: str, outcome: str) -> None:
         self.provenance_event(
             "attempt_finished", item_id=self.item_id(url), source_url=url,
             attempt_number=number, request_started_at=started_at,
@@ -527,6 +535,25 @@ class Downloader:
             response_content_range=None, response_content_type=None,
             response_etag=None, response_last_modified=None,
         )
+        attempt_id = hashlib.sha256(
+            f"{self.run_id}:{url}:{number}".encode("utf-8")).hexdigest()
+        with self.db_lock:
+            db.execute("UPDATE download_attempts SET ended_at=?, outcome=? "
+                       "WHERE run_id=? AND url=? AND attempt_id=?",
+                       (utc_now(), outcome, self.run_id, url, attempt_id))
+            db.commit()
+
+    def record_attempt_start(self, db: sqlite3.Connection, url: str, number: int,
+                             started_at: str) -> None:
+        """Record a durable attempt identity without deriving historic attempts."""
+        attempt_id = hashlib.sha256(
+            f"{self.run_id}:{url}:{number}".encode("utf-8")).hexdigest()
+        with self.db_lock:
+            db.execute("INSERT OR IGNORE INTO download_attempts "
+                       "(run_id, url, attempt_number, attempt_id, started_at) "
+                       "VALUES (?, ?, ?, ?, ?)",
+                       (self.run_id, url, number, attempt_id, started_at))
+            db.commit()
 
     def finalized_event(self, url: str, logical: str, stored: str,
                         byte_count: int, sha256: str) -> None:
@@ -1305,6 +1332,7 @@ class Downloader:
         self.wait_for_cooldown()
         attempt_started_at = utc_now()
         self.transition(db, url, "active", attempts=attempts + 1)
+        self.record_attempt_start(db, url, attempts + 1, attempt_started_at)
         if self.telemetry:
             self.telemetry.update_phase(url, "connecting")
         try:
@@ -1326,7 +1354,7 @@ class Downloader:
                                          url, worker_id)
             delay = RETRY_DELAYS[min(attempts, len(RETRY_DELAYS) - 1)]
             outcome = "stopped" if self.stop_requested.is_set() else "retryable_failure"
-            self.attempt_event(url, attempts + 1, attempt_started_at, outcome)
+            self.attempt_event(db, url, attempts + 1, attempt_started_at, outcome)
             self.transition(db, url, "retry_wait", error, bytes=size,
                             last_error=error, next_retry_at=time.time() + delay)
             if self.telemetry:
@@ -1339,7 +1367,7 @@ class Downloader:
         except FileNotFoundError:
             is_regular_staging = False
         if not is_regular_staging:
-            self.attempt_event(url, attempts + 1, attempt_started_at, "validation_failed")
+            self.attempt_event(db, url, attempts + 1, attempt_started_at, "validation_failed")
             self.transition(db, url, "review_required", "staging is not a regular file",
                             bytes=0,
                             last_error="non-regular staging file")
@@ -1359,7 +1387,7 @@ class Downloader:
             raise
         if self.telemetry:
             self.telemetry.clear_validation(url)
-        self.attempt_event(url, attempts + 1, attempt_started_at, "success")
+        self.attempt_event(db, url, attempts + 1, attempt_started_at, "success")
         try:
             self.ensure_safe_parent(target)
             self.flush_file(staging)

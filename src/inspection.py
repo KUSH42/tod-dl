@@ -351,6 +351,15 @@ class InspectionServer:
             "FROM downloads d JOIN run_items r ON r.url=d.url WHERE r.run_id=? "
             "AND item_id(d.url)=?", (self.run_id, item_id)).fetchone()
 
+    @staticmethod
+    def _columns(db: sqlite3.Connection, table: str) -> set[str]:
+        """Return columns without assuming that an older case database migrated."""
+        return {str(row[1]) for row in db.execute(f"PRAGMA table_info({table})")}
+
+    @staticmethod
+    def _unavailable(reason: str) -> dict[str, Any]:
+        return {"value": None, "reason": reason}
+
     def _bucket(self, status: str, attempts: int) -> str:
         if status == "complete": return "complete"
         if status in {"active", "admitted", "promoting"}: return "busy"
@@ -369,6 +378,16 @@ class InspectionServer:
         (url, rank, logical, stored, staging, status, attempts, byte_count, digest, error,
          retry_at, target, updated_at, inventory_size, review_code) = row
         source = _source_url(url) if reveal else None
+        runtime = next((dict(value) for value in self.runtime_provider()
+                        if value.get("item_id") == item_id), None)
+        runtime = runtime or {}
+        source_label = "Source hidden"
+        if reveal and source:
+            source_label = "Source redacted"
+        elif reveal:
+            source_label = "Source unavailable"
+        # Keep the original flat keys for version-1 clients.  The section keys
+        # provide an explicit unavailable reason for the item-details view.
         data = {"item_id": item_id, "queue_rank": rank, "logical_path": logical,
                 "storage_path": stored, "staging_path": staging, "candidate_path": target,
                 "durable_state": status, "bucket": self._bucket(status, attempts),
@@ -376,7 +395,42 @@ class InspectionServer:
                 "received_bytes": byte_count, "sha256": digest, "last_error": error,
                 "retry_at": retry_at, "updated_at": updated_at,
                 "inventory_size": inventory_size, "review_code": review_code,
-                "source": source, "source_label": "Source redacted" if source else "Source hidden"}
+                "source": source, "source_label": source_label,
+                "identity": {"run_id": self.run_id, "item_id": item_id,
+                             "logical_path": logical, "storage_path": stored,
+                             "queue_rank": rank,
+                             "generation": runtime.get("generation"),
+                             "attempt_id": runtime.get("attempt_id"),
+                             "mapping_reason": review_code,
+                             "mapping_version": None},
+                "state": {"durable_state": status, "bucket": self._bucket(status, attempts),
+                          "phase": runtime.get("phase"),
+                          "phase_reason": runtime.get("reason"),
+                          "worker_id": runtime.get("worker_id"),
+                          "last_transition_at": updated_at, "attempt_count": attempts,
+                          "attempt_ceiling": self.max_attempts,
+                          "retry_at": retry_at, "blocking_condition": None},
+                "engine": {"name": runtime.get("engine_name"),
+                           "version": runtime.get("engine_version"),
+                           "instance_id": runtime.get("engine_instance_id"),
+                           "job_id": runtime.get("engine_job_id"), "pid": runtime.get("pid"),
+                           "sample_at": runtime.get("sample_at"),
+                           "sample_age_s": runtime.get("sample_age_s")},
+                "bytes": {"received": byte_count, "resume_baseline": runtime.get("resume_baseline_bytes"),
+                          "transfer_total": runtime.get("total_bytes"),
+                          "transfer_total_source": runtime.get("total_source"),
+                          "trusted_expected": None, "inventory_size": inventory_size,
+                          "retained_item_bytes": byte_count,
+                          "committed_completion_bytes": byte_count if status == "complete" else None},
+                "validation": {"method": "SHA-256" if digest else None,
+                               "processed_bytes": runtime.get("validation_processed_bytes"),
+                               "result": "recorded" if digest else None,
+                               "recorded_at": updated_at if digest else None,
+                               "expected_sha256": None, "observed_sha256": digest,
+                               "mismatch_reason": error if status == "review_required" else None,
+                               "promotion_status": status,
+                               "staging_cleanup_at": None},
+                "unavailable": self._unavailable("not recorded by this controller version")}
         return {"item": data}
 
     def _get_worker(self, db: sqlite3.Connection, parameters: dict[str, Any]) -> dict[str, Any]:
@@ -446,8 +500,41 @@ class InspectionServer:
         row = self._item_row(db, item_id)
         if not row:
             raise InspectionError("item was not found")
-        transitions = db.execute("SELECT to_status,detail,recorded_at FROM download_transitions "
-                                 "WHERE run_id=? AND url=? ORDER BY id DESC LIMIT ?",
-                                 (self.run_id, row[0], size)).fetchall()
-        return {"attempts": [{"outcome": outcome, "detail": detail, "recorded_at": recorded}
-                              for outcome, detail, recorded in transitions], "next_cursor": None}
+        # Transition rows are not attempt records.  Do not infer attempts from
+        # state changes when an older controller has not recorded them.
+        if "download_attempts" not in {str(value[0]) for value in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}:
+            return {"attempts": [], "next_cursor": None,
+                    "unavailable_reason": "attempt history was not recorded"}
+        columns = self._columns(db, "download_attempts")
+        required = {"run_id", "url", "attempt_number", "attempt_id"}
+        if not required <= columns:
+            return {"attempts": [], "next_cursor": None,
+                    "unavailable_reason": "attempt history is incompatible"}
+        cursor_number, cursor_id = None, None
+        if "cursor" in parameters:
+            cursor = _cursor_decode(parameters["cursor"])
+            if (cursor.get("run_id") != self.run_id or cursor.get("session_id") != self.session_id
+                    or cursor.get("revision") != revision or cursor.get("item_id") != item_id):
+                raise InspectionError("cursor expired")
+            cursor_number, cursor_id = cursor.get("attempt_number"), cursor.get("attempt_id")
+            if not isinstance(cursor_number, int) or not isinstance(cursor_id, str):
+                raise InspectionError("cursor is invalid")
+        select = [name for name in ("attempt_number", "attempt_id", "generation", "started_at",
+                  "ended_at", "outcome", "error_category", "error_message", "retry_at") if name in columns]
+        where = "run_id=? AND url=?"
+        values: list[Any] = [self.run_id, row[0]]
+        if cursor_number is not None:
+            where += " AND (attempt_number<? OR (attempt_number=? AND attempt_id>?))"
+            values.extend([cursor_number, cursor_number, cursor_id])
+        rows = db.execute("SELECT " + ",".join(select) + " FROM download_attempts WHERE " + where
+                          + " ORDER BY attempt_number DESC, attempt_id ASC LIMIT ?", values + [size + 1]).fetchall()
+        attempts = [dict(zip(select, value)) for value in rows[:size]]
+        next_cursor = None
+        if len(rows) > size and attempts:
+            last = attempts[-1]
+            next_cursor = _cursor_encode({"run_id": self.run_id, "session_id": self.session_id,
+                                           "revision": revision, "item_id": item_id,
+                                           "attempt_number": last["attempt_number"],
+                                           "attempt_id": last["attempt_id"]})
+        return {"attempts": attempts, "next_cursor": next_cursor}
