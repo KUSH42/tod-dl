@@ -535,7 +535,7 @@ def item_details_text(item: dict[str, Any], read_at: Any = None,
     byte_values = item.get("bytes", {})
     validation = item.get("validation", {})
     def field(section: dict[str, Any], name: str, fallback: Any = None) -> Any:
-        return section.get(name, fallback) if isinstawnce(section, dict) else fallback
+        return section.get(name, fallback) if isinstance(section, dict) else fallback
     lines = [
         "Item details",
         f"Read: {detail_value(read_at, 'read time unavailable')}  Revision: {detail_value(revision, 'revision unavailable')}  Freshness: {literal_text(sample_freshness)}",
