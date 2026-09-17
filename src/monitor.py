@@ -1011,13 +1011,20 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             if snapshot_path:
                 self.set_interval(1 / 2, self.refresh_snapshot)
 
-        def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        def open_worker_details(self, row_key: Any) -> None:
+            """Open the selected stable worker slot from either table event."""
             worker = next((row for row in self.current["workers"]
-                           if str(row.get("worker_id")) == str(event.row_key.value)), None)
+                           if str(row.get("worker_id")) == str(row_key)), None)
             if not worker:
                 return
             self.push_screen(WorkerDetails(self.current["run_id"], self.current["session_id"],
                                            int(worker["worker_id"]), self.current["state_revision"]))
+
+        def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+            self.open_worker_details(event.row_key.value)
+
+        def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
+            self.open_worker_details(event.cell_key.row_key.value)
 
         def submit_inspection(self, operation, completed) -> None:
             """Run one inspection request away from the render and input loop."""
