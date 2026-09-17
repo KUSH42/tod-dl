@@ -28,6 +28,7 @@ MAX_REQUEST_BYTES = 16 * 1024
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_REASON_BYTES = 512
 MAX_PAGE_SIZE = 200
+QUEUE_SCAN_BATCH = 500
 ITEM_ID = re.compile(r"[0-9a-f]{64}\Z")
 ASCII_CURSOR = re.compile(r"[\x21-\x7e]{1,1024}\Z")
 BUCKETS = {"queued", "busy", "retry", "exhausted", "complete",
@@ -313,9 +314,10 @@ class InspectionServer:
                          (self.run_id,)).fetchone()
         return int(row[0]) if row else 0
 
-    def _check_deadline(self, started: float) -> None:
+    def _check_deadline(self, started: float,
+                        message: str = "durable read exceeded one second") -> None:
         if time.monotonic() - started > 1:
-            raise InspectionError("durable read exceeded one second")
+            raise InspectionError(message)
 
     def _query(self, request: dict[str, Any], started: float) -> dict[str, Any]:
         with self._database() as db:
@@ -327,7 +329,7 @@ class InspectionServer:
             elif operation == "get_worker":
                 result = self._get_worker(db, request["parameters"])
             elif operation == "list_queue":
-                result = self._list_queue(db, request["parameters"], revision)
+                result = self._list_queue(db, request["parameters"], revision, started)
             else:
                 result = self._list_attempts(db, request["parameters"], revision)
             self._check_deadline(started)
@@ -378,8 +380,10 @@ class InspectionServer:
         (url, rank, logical, stored, staging, status, attempts, byte_count, digest, error,
          retry_at, target, updated_at, inventory_size, review_code) = row
         source = _source_url(url) if reveal else None
+        # Runtime samples are keyed by url, not item_id (see set_active in
+        # download_telemetry.py); item_id is only ever derived, never stored there.
         runtime = next((dict(value) for value in self.runtime_provider()
-                        if value.get("item_id") == item_id), None)
+                        if value.get("url") == url), None)
         runtime = runtime or {}
         source_label = "Source hidden"
         if reveal and source:
@@ -496,7 +500,8 @@ class InspectionServer:
                             "validation": worker.get("validation"),
                             "admission": worker.get("admission")}}
 
-    def _list_queue(self, db: sqlite3.Connection, parameters: dict[str, Any], revision: int) -> dict[str, Any]:
+    def _list_queue(self, db: sqlite3.Connection, parameters: dict[str, Any], revision: int,
+                    started: float) -> dict[str, Any]:
         allowed = {"bucket", "query", "page_size", "cursor"}
         if set(parameters) - allowed:
             raise InspectionError("queue parameters are invalid")
@@ -517,28 +522,48 @@ class InspectionServer:
             after_rank, after_item = cursor.get("rank"), cursor.get("item_id")
             if not isinstance(after_rank, int) or not isinstance(after_item, str):
                 raise InspectionError("cursor is invalid")
-        rows = db.execute(
-            "SELECT r.queue_rank,d.url,d.relative_path,d.storage_path,d.status,d.attempts,"
-            "d.bytes,d.next_retry_at FROM run_items r JOIN downloads d ON d.url=r.url "
-            "WHERE r.run_id=? AND (r.queue_rank>? OR (r.queue_rank=? AND item_id(d.url)>?)) "
-            "ORDER BY r.queue_rank, item_id(d.url) LIMIT ?", (self.run_id, after_rank, after_rank,
-                                                       after_item, MAX_PAGE_SIZE + 1)).fetchall()
-        output = []
-        for rank, url, logical, stored, status, attempts, received, retry_at in rows[:size]:
-            item_id = hashlib.sha256(url.encode()).hexdigest()
-            row_bucket = self._bucket(status, attempts)
-            if (bucket != "all" and bucket != row_bucket) or (query and query not in logical and query not in (stored or "") and query not in item_id):
-                continue
-            output.append({"item_id": item_id, "queue_rank": rank,
-                           "basename": Path(logical).name, "bucket": row_bucket,
-                           "phase": None, "received_bytes": received, "total_bytes": None,
-                           "retry_at": retry_at})
+        # Runtime samples are keyed by url, not item_id (see set_active in
+        # download_telemetry.py); item_id is only ever derived, never stored there.
+        runtime = {value.get("url"): value for value in self.runtime_provider()
+                  if value.get("url")}
+        output: list[dict[str, Any]] = []
+        filled = False
+        while len(output) < size:
+            self._check_deadline(
+                started, "durable read exceeded one second; narrow your search")
+            rows = db.execute(
+                "SELECT r.queue_rank,d.url,d.relative_path,d.storage_path,d.status,d.attempts,"
+                "d.bytes,d.next_retry_at FROM run_items r JOIN downloads d ON d.url=r.url "
+                "WHERE r.run_id=? AND (r.queue_rank>? OR (r.queue_rank=? AND item_id(d.url)>?)) "
+                "ORDER BY r.queue_rank, item_id(d.url) LIMIT ?",
+                (self.run_id, after_rank, after_rank, after_item, QUEUE_SCAN_BATCH)).fetchall()
+            if not rows:
+                break
+            for rank, url, logical, stored, status, attempts, received, retry_at in rows:
+                item_id = hashlib.sha256(url.encode()).hexdigest()
+                after_rank, after_item = rank, item_id
+                row_bucket = self._bucket(status, attempts)
+                if (bucket != "all" and bucket != row_bucket) or (
+                        query and query not in logical and query not in (stored or "")
+                        and query not in item_id):
+                    continue
+                sample = runtime.get(url)
+                output.append({"item_id": item_id, "queue_rank": rank,
+                               "basename": Path(logical).name, "bucket": row_bucket,
+                               "phase": sample.get("phase") if sample else None,
+                               "received_bytes": received,
+                               "total_bytes": sample.get("total_bytes") if sample else None,
+                               "retry_at": retry_at})
+                if len(output) == size:
+                    filled = True
+                    break
+            if filled or len(rows) < QUEUE_SCAN_BATCH:
+                break
         next_cursor = None
-        if len(rows) > MAX_PAGE_SIZE and output:
-            last = output[-1]
+        if filled:
             next_cursor = _cursor_encode({"run_id": self.run_id, "session_id": self.session_id,
                                            "revision": revision, "bucket": bucket, "query": query,
-                                           "rank": last["queue_rank"], "item_id": last["item_id"]})
+                                           "rank": after_rank, "item_id": after_item})
         return {"rows": output, "next_cursor": next_cursor, "matching_count": None}
 
     def _list_attempts(self, db: sqlite3.Connection, parameters: dict[str, Any], revision: int) -> dict[str, Any]:

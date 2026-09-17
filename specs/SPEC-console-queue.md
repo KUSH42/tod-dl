@@ -1,7 +1,8 @@
 # Specification: console queue view
 
-Status: planned, September 17, 2026. This view shows the immutable selected
-set, remaining work, and retry deadlines without changing acquisition order.
+Status: partially implemented, September 17, 2026. This view shows the
+immutable selected set, remaining work, and retry deadlines without changing
+acquisition order.
 
 The view supplements the [console UI](SPEC-console-ui.md) and uses the
 [read-only inspection interface](SPEC-console-inspection.md).

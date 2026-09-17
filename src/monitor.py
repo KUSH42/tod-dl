@@ -525,6 +525,51 @@ def format_retry_deadline(value: Any) -> str:
     return f"{deadline:%Y-%m-%d %H:%M:%S UTC} ({format_countdown(remaining)} remaining)"
 
 
+QUEUE_STATE_FILTERS = ("all", "queued", "busy", "retry", "exhausted", "complete",
+                      "existing_unverified", "review_required", "unavailable", "unknown")
+QUEUE_NOT_ELIGIBLE_BUCKETS = {"exhausted", "review_required"}
+
+
+def queue_retry_status(bucket: Any, retry_at: Any, cooldown_active: bool = False,
+                       reference_time: float | None = None) -> str:
+    """Format one queue row's retry status without implying controller admission."""
+    if bucket in QUEUE_NOT_ELIGIBLE_BUCKETS:
+        return "Not eligible"
+    if not isinstance(retry_at, (int, float)) or isinstance(retry_at, bool):
+        return detail_value(retry_at, "not recorded")
+    now = time.time() if reference_time is None else reference_time
+    remaining = retry_at - now
+    if remaining <= 0:
+        return "Eligible; cooldown active" if cooldown_active else "Eligible; awaiting controller"
+    deadline = dt.datetime.fromtimestamp(retry_at, dt.timezone.utc)
+    return f"{deadline:%Y-%m-%d %H:%M:%S UTC} ({format_countdown(remaining)} remaining)"
+
+
+def queue_row_cells(row: dict[str, Any], cooldown_active: bool = False,
+                    reference_time: float | None = None) -> tuple[str, str, str, str, str, str, str]:
+    """Render one queue row's literal-safe display cells in column order."""
+    bucket = row.get("bucket", "unknown")
+    return (
+        str(row.get("queue_rank", "?")),
+        truncate_filename(row.get("basename"), 32),
+        short_item_id(row.get("item_id")),
+        literal_text(bucket),
+        literal_text(row.get("phase")) if row.get("phase") else "—",
+        f"{format_bytes(row.get('received_bytes'))} / {format_bytes(row.get('total_bytes'))}",
+        queue_retry_status(bucket, row.get("retry_at"), cooldown_active, reference_time),
+    )
+
+
+def queue_header_text(run_id: Any, selected_count: Any, loaded_count: int,
+                      active_filters: str, read_at: Any, revision: Any) -> str:
+    """Build the queue tab's literal-safe header line."""
+    return (f"Run: {detail_value(run_id)}  Selected: {detail_value(selected_count)}  "
+            f"Loaded rows: {loaded_count}  Filters: {literal_text(active_filters)}  "
+            f"Matching count unavailable  "
+            f"Read: {detail_value(read_at, 'read time unavailable')}  "
+            f"Revision: {detail_value(revision, 'revision unavailable')}")
+
+
 def item_details_text(item: dict[str, Any], read_at: Any = None,
                       revision: Any = None, sample_freshness: str = "?") -> str:
     """Build a literal-safe, scrollable item-details display from one record."""
@@ -608,7 +653,7 @@ def worker_details_text(worker: dict[str, Any], read_at: Any = None,
         f"Received: {detail_bytes(worker.get('received_bytes'), reason)}  Total: {detail_bytes(worker.get('total_bytes'), reason)} ({detail_value(worker.get('total_source'), reason)})",
         f"Resume baseline: {detail_bytes(worker.get('resume_baseline_bytes'), reason)}",
         f"Speed: {detail_rate(worker.get('speed_bps'), reason)}  Smoothed: {detail_rate(worker.get('smoothed_speed_bps'), reason)}",
-        f"ETA (approximate): {detail_value(worker.get('eta_seconds'), 'Estimating' if worker.get('estimator') == 'Estimating' else reason)}  Connections: {detail_value(worker.get('connections'), reason)}",
+        f"ETA (approximate): {detail_value(format_countdown(worker.get('eta_seconds')) if isinstance(worker.get('eta_seconds'), (int, float)) and not isinstance(worker.get('eta_seconds'), bool) else None, 'Estimating' if worker.get('estimator') == 'Estimating' else reason)}  Connections: {detail_value(worker.get('connections'), reason)}",
         f"Sample sequence: {detail_value(worker.get('sample_sequence'), reason)}  Sample age: {detail_value(worker.get('sample_age_s'), reason)}  Quality: {detail_value(worker.get('quality'), reason)}",
         "", "Admission",
         f"Controller conditions: {detail_value(worker.get('admission'), 'not reported')}",
@@ -628,7 +673,8 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
         from textual.containers import Horizontal, Vertical, VerticalScroll
         from rich.text import Text
         from textual.screen import ModalScreen, Screen
-        from textual.widgets import Button, DataTable, Footer, Static
+        from textual.widgets import (Button, DataTable, Footer, Input, Select, Static,
+                                     TabbedContent, TabPane)
     except ImportError:
         print("Textual is optional. Install requirements-monitor.txt, or use "
               "./run.sh --status.", file=sys.stderr)
@@ -965,9 +1011,304 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
         def action_disabled_control(self) -> None:
             return
 
+    class QueueSearchInput(Input):
+        """A literal-substring search box that cancels unsubmitted edits on Escape."""
+        BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+
+        def __init__(self, pane: "QueuePane", **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self.pane = pane
+
+        def action_cancel(self) -> None:
+            self.value = self.pane.query
+            self.blur()
+
+    class QueuePane(Vertical):
+        """Paginated, filtered browsing of the immutable selected queue."""
+        BINDINGS = [
+            Binding("slash", "focus_search", "Search", show=True),
+            Binding("pagedown", "next_page", "Next page", priority=True),
+            Binding("pageup", "previous_page", "Prev page", priority=True),
+            Binding("c", "clear_filters", "Clear filters"),
+            Binding("f", "refresh_results", "Refresh results", show=False),
+            Binding("l", "logs", "Logs"),
+            Binding("question_mark", "help", "Help", show=True),
+        ]
+        CSS = """
+        QueuePane { height: 1fr; }
+        #queue-filters { height: 3; }
+        #queue-filters Select { width: 26; }
+        #queue-filters Input { width: 1fr; }
+        #queue-table { height: 1fr; }
+        """
+
+        def __init__(self) -> None:
+            super().__init__(id="queue-pane")
+            self.bucket = "all"
+            self.query = ""
+            self.cursor_stack: list[str | None] = [None]
+            self.page_index = 0
+            self.next_cursor: str | None = None
+            self.rows: list[dict[str, Any]] = []
+            self.read_at: Any = None
+            self.revision: Any = None
+            self.selected_item_id: str | None = None
+            self.request_active = False
+            self.wide = True
+
+        def compose(self) -> ComposeResult:
+            yield Static("", id="queue-header")
+            with Horizontal(id="queue-filters"):
+                yield Select([(name.capitalize() if name != "all" else "All", name)
+                             for name in QUEUE_STATE_FILTERS], value="all",
+                             allow_blank=False, id="queue-bucket")
+                yield QueueSearchInput(self, placeholder="/ to search, Enter to apply",
+                                       id="queue-search")
+            yield Static("", id="queue-banner")
+            yield DataTable(id="queue-table")
+
+        def on_mount(self) -> None:
+            self.query_one("#queue-table", DataTable).cursor_type = "row"
+            self.set_wide(self.size.width >= 100)
+            self.reload(reset=True)
+            self.set_interval(3, self.poll_revision)
+            self.focus_default()
+
+        def focus_default(self) -> None:
+            """Move focus inside the pane so its own bindings receive keys."""
+            self.query_one("#queue-table", DataTable).focus()
+
+        def on_resize(self, event: Any) -> None:
+            self.set_wide(self.size.width >= 100)
+
+        def set_wide(self, wide: bool) -> None:
+            table = self.query_one("#queue-table", DataTable)
+            if wide == self.wide and table.columns:
+                return
+            self.wide = wide
+            table.clear(columns=True)
+            table.add_column("Rank", key="rank", width=6)
+            table.add_column("Basename", key="basename", width=32)
+            table.add_column("Item ID", key="item_id", width=12)
+            table.add_column("Bucket", key="bucket", width=18)
+            if wide:
+                table.add_column("Phase", key="phase", width=13)
+                table.add_column("Received / total", key="bytes", width=21)
+            table.add_column("Retry deadline", key="retry", width=34)
+            self.render_rows()
+
+        def active_filters_label(self) -> str:
+            parts = []
+            if self.bucket != "all":
+                parts.append(f"state={self.bucket}")
+            if self.query:
+                parts.append(f"search={self.query!r}")
+            return ", ".join(parts) if parts else "none"
+
+        def update_header(self) -> None:
+            run = self.app.current
+            self.query_one("#queue-header", Static).update(
+                queue_header_text(run.get("run_id"), run["run"].get("selected_count"),
+                                  len(self.rows), self.active_filters_label(),
+                                  self.read_at, self.revision))
+
+        def set_banner(self, text: str) -> None:
+            self.query_one("#queue-banner", Static).update(literal_text(text))
+
+        def reload(self, reset: bool) -> None:
+            if reset:
+                self.cursor_stack = [None]
+                self.page_index = 0
+                self.next_cursor = None
+            if not self.app.current["run"].get("selected_count", 0):
+                self.rows = []
+                self.set_banner("No selected items")
+                self.update_header()
+                self.render_rows()
+                return
+            self.request_page(self.cursor_stack[self.page_index])
+
+        def request_page(self, cursor: str | None) -> None:
+            if self.request_active:
+                return
+            self.request_active = True
+            run_id = self.app.current["run_id"]
+            parameters: dict[str, Any] = {"bucket": self.bucket, "query": self.query,
+                                          "page_size": 100}
+            if cursor:
+                parameters["cursor"] = cursor
+            self.app.submit_inspection(
+                lambda: inspection_request(state, run_id, "list_queue", parameters),
+                lambda response, error: self.apply_page(cursor, response, error))
+
+        def apply_page(self, cursor: str | None, response: dict[str, Any] | None,
+                       error: str | None) -> None:
+            self.request_active = False
+            if error or not response:
+                self.set_banner("Queue unavailable: " + literal_text(error or "request failed"))
+                self.update_header()
+                self.refresh_bindings()
+                return
+            data = response.get("data", {})
+            rows = data.get("rows")
+            if not isinstance(rows, list):
+                self.set_banner("Queue unavailable: invalid response")
+                self.update_header()
+                self.refresh_bindings()
+                return
+            if not rows:
+                if cursor is None:
+                    self.rows = []
+                    self.read_at = response.get("read_at")
+                    self.revision = response.get("state_revision")
+                    self.set_banner("No matching items")
+                else:
+                    self.next_cursor = None
+                    self.set_banner("")
+                self.update_header()
+                self.render_rows()
+                self.refresh_bindings()
+                return
+            self.rows = rows
+            self.next_cursor = (data.get("next_cursor")
+                                if isinstance(data.get("next_cursor"), str) else None)
+            self.read_at = response.get("read_at")
+            self.revision = response.get("state_revision")
+            if self.page_index + 1 >= len(self.cursor_stack):
+                self.cursor_stack.append(self.next_cursor)
+            else:
+                self.cursor_stack[self.page_index + 1] = self.next_cursor
+            del self.cursor_stack[100:]
+            self.set_banner("")
+            self.update_header()
+            self.render_rows()
+            self.refresh_bindings()
+
+        def render_rows(self) -> None:
+            table = self.query_one("#queue-table", DataTable)
+            table.clear()
+            health = self.app.current.get("health", {})
+            cooldown = health.get("cooldown_remaining_s")
+            cooldown_active = (isinstance(cooldown, (int, float))
+                              and not isinstance(cooldown, bool) and cooldown > 0)
+            for row in self.rows:
+                cells = queue_row_cells(row, cooldown_active)
+                if not self.wide:
+                    cells = (cells[0], cells[1], cells[2], cells[3], cells[6])
+                table.add_row(*cells, key=row["item_id"])
+            if self.rows and any(row["item_id"] == self.selected_item_id for row in self.rows):
+                index = next(i for i, row in enumerate(self.rows)
+                            if row["item_id"] == self.selected_item_id)
+                table.move_cursor(row=index)
+            elif self.rows:
+                if self.selected_item_id is not None:
+                    self.app.notify("Selection changed; the previous item left the page.",
+                                    severity="warning")
+                self.selected_item_id = self.rows[0]["item_id"]
+                table.move_cursor(row=0)
+            else:
+                self.selected_item_id = None
+
+        def on_select_changed(self, event: Select.Changed) -> None:
+            if event.select.id != "queue-bucket":
+                return
+            self.bucket = event.value
+            self.reload(reset=True)
+
+        def on_input_submitted(self, event: Input.Submitted) -> None:
+            if event.input.id != "queue-search":
+                return
+            self.query = event.value
+            self.reload(reset=True)
+
+        def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+            event.stop()
+            item_id = event.row_key.value
+            if any(row["item_id"] == item_id for row in self.rows):
+                self.selected_item_id = item_id
+                self.app.push_screen(ItemDetails(self.app.current["run_id"], item_id))
+
+        def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+            event.stop()
+            if event.row_key and event.row_key.value:
+                self.selected_item_id = event.row_key.value
+
+        def action_focus_search(self) -> None:
+            self.query_one("#queue-search", Input).focus()
+
+        def action_next_page(self) -> None:
+            if not self.next_cursor:
+                return
+            self.page_index += 1
+            if self.page_index >= len(self.cursor_stack):
+                self.cursor_stack.append(self.next_cursor)
+            self.request_page(self.cursor_stack[self.page_index])
+
+        def action_previous_page(self) -> None:
+            if self.page_index == 0:
+                return
+            self.page_index -= 1
+            self.request_page(self.cursor_stack[self.page_index])
+
+        def action_clear_filters(self) -> None:
+            self.bucket, self.query = "all", ""
+            self.query_one("#queue-bucket", Select).value = "all"
+            self.query_one("#queue-search", Input).value = ""
+            self.reload(reset=True)
+
+        def action_refresh_results(self) -> None:
+            self.reload(reset=True)
+
+        def action_logs(self) -> None:
+            self.app.notify("Item logs are unavailable", severity="warning")
+
+        def action_help(self) -> None:
+            self.app.notify(
+                "/ search   Enter apply   Escape cancel   PageUp/PageDown page   "
+                "Enter opens item details   l logs   c clear filters   f refresh results",
+                title="Queue help")
+
+        def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+            if action == "next_page" and not self.next_cursor:
+                return None
+            if action == "previous_page" and self.page_index == 0:
+                return None
+            if action == "clear_filters" and self.bucket == "all" and not self.query:
+                return None
+            return True
+
+        def poll_revision(self) -> None:
+            if self.request_active or not self.rows:
+                return
+            run_id = self.app.current["run_id"]
+            parameters: dict[str, Any] = {"bucket": self.bucket, "query": self.query,
+                                          "page_size": 100}
+            cursor = self.cursor_stack[self.page_index]
+            if cursor:
+                parameters["cursor"] = cursor
+
+            def completed(response: dict[str, Any] | None, error: str | None) -> None:
+                if error or not response or self.revision is None:
+                    return
+                revision = response.get("state_revision")
+                if revision is not None and revision != self.revision:
+                    self.set_banner("Results changed")
+
+            self.app.submit_inspection(
+                lambda: inspection_request(state, run_id, "list_queue", parameters), completed)
+
     class Monitor(App):
         BINDINGS = [("q", "quit", "Close"), ("r", "prepare_retry_now", "Retry now"),
                     ("t", "prepare_renew_tor_circuits", "Renew Tor")]
+
+        def __init__(self) -> None:
+            super().__init__()
+            # Set before compose() so a child's own on_mount (e.g. QueuePane) can
+            # already read self.app.current and submit_inspection; App.on_mount
+            # fires after children mount.
+            self.current = snapshot
+            self.inspection_request_active = False
+
         CSS = """
         #activity-pane {
             height: 1fr;
@@ -1097,11 +1438,15 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             return rendered
 
         def compose(self) -> ComposeResult:
-            yield Static("", id="summary")
-            yield DataTable(id="workers")
-            yield Static("", id="disk")
-            with VerticalScroll(id="activity-pane", classes="event-log"):
-                yield Static(self.activity_text(snapshot["recent_events"]), id="activity")
+            with TabbedContent(initial="activity-tab"):
+                with TabPane("Activity", id="activity-tab"):
+                    yield Static("", id="summary")
+                    yield DataTable(id="workers")
+                    yield Static("", id="disk")
+                    with VerticalScroll(id="activity-pane", classes="event-log"):
+                        yield Static(self.activity_text(snapshot["recent_events"]), id="activity")
+                with TabPane("Queue", id="queue-tab"):
+                    yield QueuePane()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -1113,7 +1458,6 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             table.add_column("Speed", key="speed", width=11)
             table.add_column("ETA", key="eta", width=9)
             self.query_one("#activity-pane", VerticalScroll).border_title = "Event log"
-            self.current = snapshot
             self.trend = SpeedTrend()
             self.snapshot_sequence = None
             self.snapshot_elapsed_s = 0.0
@@ -1148,6 +1492,10 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
 
         def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
             self.open_worker_details(event.cell_key.row_key.value)
+
+        def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+            if event.pane.id == "queue-tab":
+                self.query_one(QueuePane).focus_default()
 
         def submit_inspection(self, operation, completed) -> None:
             """Run one inspection request away from the render and input loop."""

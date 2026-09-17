@@ -7,7 +7,9 @@ import hashlib
 import json
 import sqlite3
 import tempfile
+import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import sys
@@ -25,7 +27,8 @@ from monitor import (SnapshotError, event_item_path, event_message_style,
                      lifecycle_style, select_snapshot, worker_phase_label,
                      truncate_filename, SpeedTrend, disk_status, progress_status,
                      screen_summary, validate_snapshot, detail_bytes, item_details_text,
-                     worker_details_text, format_retry_deadline)
+                     worker_details_text, format_retry_deadline, queue_retry_status,
+                     queue_row_cells, queue_header_text)
 
 
 def snapshot(lifecycle: str = "running") -> dict:
@@ -101,6 +104,8 @@ class MonitorTests(unittest.TestCase):
                                             {"item_id": item_id})
                 self.assertEqual(hidden["state_revision"], 7)
                 self.assertEqual(hidden["data"]["item"]["source"], None)
+                self.assertEqual(hidden["data"]["item"]["state"]["phase"], "downloading")
+                self.assertEqual(hidden["data"]["item"]["bytes"]["transfer_total"], 10)
                 shown = inspection_request(root, "run-one", "get_item",
                                            {"item_id": item_id,
                                             "reveal_source": True})
@@ -427,6 +432,220 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(format_retry_deadline(0), "Eligible; awaiting controller")
         rendered = item_details_text({"retry_at": 0})
         self.assertIn("Retry deadline: Eligible; awaiting controller", rendered)
+
+    def test_queue_retry_status_never_shows_a_countdown_for_exhausted_or_review(self):
+        self.assertEqual(queue_retry_status("exhausted", 123456789), "Not eligible")
+        self.assertEqual(queue_retry_status("review_required", 0), "Not eligible")
+
+    def test_queue_retry_status_distinguishes_cooldown_from_plain_eligibility(self):
+        self.assertEqual(queue_retry_status("retry", 0, cooldown_active=False),
+                         "Eligible; awaiting controller")
+        self.assertEqual(queue_retry_status("retry", 0, cooldown_active=True),
+                         "Eligible; cooldown active")
+        rendered = queue_retry_status("retry", 1000.0, reference_time=0.0)
+        self.assertIn("remaining)", rendered)
+        self.assertNotIn("1000", rendered)
+
+    def test_queue_row_cells_are_literal_safe_and_mark_unknown_phase(self):
+        row = {"queue_rank": 3, "basename": "<tag>\x1b[31m", "item_id": "a" * 64,
+              "bucket": "queued", "phase": None, "received_bytes": 0, "total_bytes": None,
+              "retry_at": None}
+        cells = queue_row_cells(row)
+        self.assertEqual(cells[0], "3")
+        self.assertIn("\\x1b[31m", cells[1])
+        self.assertEqual(cells[4], "—")
+        self.assertIn("not recorded", cells[6])
+
+    def test_queue_header_always_shows_matching_count_unavailable(self):
+        header = queue_header_text("run-one", 5, 5, "none", "2026-09-17T00:00:00Z", 4)
+        self.assertIn("Matching count unavailable", header)
+        self.assertIn("Loaded rows: 5", header)
+
+    @staticmethod
+    def _queue_manifest(root: Path, rows: list[tuple[str, str, int]], revision: int = 1) -> Path:
+        """Build a temporary manifest with (status, url, queue_rank) selected rows."""
+        database = root / "manifest.sqlite"
+        db = sqlite3.connect(database)
+        db.executescript("""
+            CREATE TABLE downloads (url TEXT PRIMARY KEY, relative_path TEXT NOT NULL,
+                storage_path TEXT, staging_path TEXT, inventory_size TEXT,
+                status TEXT NOT NULL, attempts INTEGER NOT NULL, bytes INTEGER,
+                sha256 TEXT, last_error TEXT, next_retry_at REAL NOT NULL,
+                promotion_target TEXT, updated_at TEXT NOT NULL, review_code TEXT);
+            CREATE TABLE run_items (run_id TEXT, url TEXT, queue_rank INTEGER);
+            CREATE TABLE telemetry_revisions (run_id TEXT PRIMARY KEY, revision INTEGER);
+        """)
+        for status, url, rank in rows:
+            db.execute("INSERT INTO downloads VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                       (url, url.rsplit("/", 1)[-1], None, None, None, status, 0, rank, None,
+                        None, 0, None, "2026-09-17T00:00:00Z", None))
+            db.execute("INSERT INTO run_items VALUES (?,?,?)", ("run-one", url, rank))
+        db.execute("INSERT INTO telemetry_revisions VALUES (?,?)", ("run-one", revision))
+        db.commit()
+        db.close()
+        return database
+
+    def test_list_queue_pages_in_manifest_order_with_stable_ranks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            rows = [("queued", f"http://example.onion/{i}", i) for i in range(5)]
+            database = self._queue_manifest(root, rows)
+            server = InspectionServer(root, "run-one", "session-one", database, 3)
+            server.start()
+            try:
+                first = inspection_request(root, "run-one", "list_queue", {"page_size": 2})
+                self.assertEqual([row["queue_rank"] for row in first["data"]["rows"]], [0, 1])
+                self.assertIsNotNone(first["data"]["next_cursor"])
+                self.assertIsNone(first["data"]["matching_count"])
+                second = inspection_request(root, "run-one", "list_queue",
+                                            {"page_size": 2, "cursor": first["data"]["next_cursor"]})
+                self.assertEqual([row["queue_rank"] for row in second["data"]["rows"]], [2, 3])
+                third = inspection_request(root, "run-one", "list_queue",
+                                           {"page_size": 2, "cursor": second["data"]["next_cursor"]})
+                self.assertEqual([row["queue_rank"] for row in third["data"]["rows"]], [4])
+                self.assertIsNone(third["data"]["next_cursor"])
+            finally:
+                server.stop()
+
+    def test_list_queue_filters_by_bucket_and_literal_search_without_expanding_selection(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            rows = [("complete", "http://example.onion/keep.txt", 0),
+                   ("queued", "http://example.onion/other.txt", 1),
+                   ("complete", "http://example.onion/keep2.txt", 2)]
+            database = self._queue_manifest(root, rows)
+            server = InspectionServer(root, "run-one", "session-one", database, 3)
+            server.start()
+            try:
+                by_bucket = inspection_request(root, "run-one", "list_queue",
+                                               {"bucket": "complete", "page_size": 10})
+                self.assertEqual({row["basename"] for row in by_bucket["data"]["rows"]},
+                                 {"keep.txt", "keep2.txt"})
+                by_query = inspection_request(root, "run-one", "list_queue",
+                                              {"query": "keep2", "page_size": 10})
+                self.assertEqual([row["basename"] for row in by_query["data"]["rows"]], ["keep2.txt"])
+                combined = inspection_request(root, "run-one", "list_queue",
+                                              {"bucket": "queued", "query": "keep", "page_size": 10})
+                self.assertEqual(combined["data"]["rows"], [])
+            finally:
+                server.stop()
+
+    def test_list_queue_cursor_expires_when_revision_changes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            rows = [("queued", f"http://example.onion/{i}", i) for i in range(3)]
+            database = self._queue_manifest(root, rows)
+            server = InspectionServer(root, "run-one", "session-one", database, 3)
+            server.start()
+            try:
+                first = inspection_request(root, "run-one", "list_queue", {"page_size": 1})
+                cursor = first["data"]["next_cursor"]
+                db = sqlite3.connect(database)
+                db.execute("UPDATE telemetry_revisions SET revision=2 WHERE run_id='run-one'")
+                db.commit()
+                db.close()
+                with self.assertRaisesRegex(InspectionError, "cursor expired"):
+                    inspection_request(root, "run-one", "list_queue",
+                                       {"page_size": 1, "cursor": cursor})
+            finally:
+                server.stop()
+
+    def test_list_queue_empty_page_against_a_cursor_is_exhaustion_not_no_matching_items(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            rows = [("queued", "http://example.onion/only", 0)]
+            database = self._queue_manifest(root, rows)
+            server = InspectionServer(root, "run-one", "session-one", database, 3)
+            server.start()
+            try:
+                first = inspection_request(root, "run-one", "list_queue", {"page_size": 1})
+                # One item exactly fills page_size=1, so it gets a non-null cursor
+                # per spec even though no further matching row exists.
+                cursor = first["data"]["next_cursor"]
+                self.assertIsNotNone(cursor)
+                second = inspection_request(root, "run-one", "list_queue",
+                                            {"page_size": 1, "cursor": cursor})
+                self.assertEqual(second["data"]["rows"], [])
+                self.assertIsNone(second["data"]["next_cursor"])
+            finally:
+                server.stop()
+
+    def test_list_queue_reads_phase_and_total_bytes_from_the_active_engine_sample(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            url = "http://example.onion/active.bin"
+            rows = [("active", url, 0), ("queued", "http://example.onion/idle.bin", 1)]
+            database = self._queue_manifest(root, rows)
+            server = InspectionServer(
+                root, "run-one", "session-one", database, 3,
+                runtime_provider=lambda: [{"url": url, "phase": "downloading",
+                                           "total_bytes": 500}])
+            server.start()
+            try:
+                page = inspection_request(root, "run-one", "list_queue", {"page_size": 10})
+                by_basename = {row["basename"]: row for row in page["data"]["rows"]}
+                self.assertEqual(by_basename["active.bin"]["phase"], "downloading")
+                self.assertEqual(by_basename["active.bin"]["total_bytes"], 500)
+                self.assertIsNone(by_basename["idle.bin"]["phase"])
+                self.assertIsNone(by_basename["idle.bin"]["total_bytes"])
+            finally:
+                server.stop()
+
+    def test_list_queue_scans_a_large_manifest_without_loading_it_whole(self):
+        """A scaled-down stand-in for the spec's million-item scale test.
+
+        Verifies the keyset batch-scan algorithm returns correct, non-duplicated
+        pages over a large filtered manifest, entirely server-side (no Textual
+        widget tree). A literal million-row run is a separate, environment-sized
+        exercise; this bounds the same algorithm at a size this suite can run in
+        under a second.
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            total = 20_000
+            rows = [("complete" if i % 5 == 0 else "queued",
+                    f"http://example.onion/item{i}", i) for i in range(total)]
+            database = self._queue_manifest(root, rows)
+            server = InspectionServer(root, "run-one", "session-one", database, 3)
+            server.start()
+            try:
+                started = time.monotonic()
+                seen: list[int] = []
+                cursor = None
+                pages = 0
+                while True:
+                    parameters = {"bucket": "complete", "page_size": 200}
+                    if cursor:
+                        parameters["cursor"] = cursor
+                    response = inspection_request(root, "run-one", "list_queue", parameters)
+                    seen.extend(row["queue_rank"] for row in response["data"]["rows"])
+                    cursor = response["data"]["next_cursor"]
+                    pages += 1
+                    self.assertLess(pages, 100, "runaway pagination")
+                    if not cursor:
+                        break
+                elapsed = time.monotonic() - started
+                expected = [i for i in range(total) if i % 5 == 0]
+                self.assertEqual(seen, expected)
+                self.assertLess(elapsed, 5.0)
+            finally:
+                server.stop()
+
+    def test_list_queue_scan_deadline_returns_unavailable_with_a_narrowing_suggestion(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            rows = [("queued", f"http://example.onion/{i}", i) for i in range(3)]
+            database = self._queue_manifest(root, rows)
+            server = InspectionServer(root, "run-one", "session-one", database, 3)
+            server.start()
+            try:
+                import inspection as inspection_module
+                with unittest.mock.patch.object(
+                        inspection_module.time, "monotonic", side_effect=[0.0, 5.0, 5.0]):
+                    with self.assertRaisesRegex(InspectionError, "narrow your search"):
+                        inspection_request(root, "run-one", "list_queue", {"page_size": 1})
+            finally:
+                server.stop()
 
 
 if __name__ == "__main__":
