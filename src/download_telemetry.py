@@ -8,6 +8,7 @@ more truthful than deriving progress from a staging file's length.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import os
 import threading
@@ -221,7 +222,8 @@ class TelemetryPublisher:
                    pid: int | None = None) -> None:
         with self._lock:
             self.active[url] = {"url": url, "worker_id": worker_id,
-                                "generation": attempt, "attempt_id": f"{url}:{attempt}",
+                                "generation": attempt,
+                                "attempt_id": f"{hashlib.sha256(url.encode()).hexdigest()}:{attempt}",
                                 "attempt_number": attempt, "phase": phase,
                                 "reason": None, "phase_started": time.monotonic(),
                                 "attempt_started": time.monotonic(), "pid": pid,

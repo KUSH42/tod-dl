@@ -400,7 +400,9 @@ class InspectionServer:
                              "logical_path": logical, "storage_path": stored,
                              "queue_rank": rank,
                              "generation": runtime.get("generation"),
-                             "attempt_id": runtime.get("attempt_id"),
+                             "attempt_id": (f"{item_id}:{runtime.get('attempt_number')}"
+                                            if isinstance(runtime.get('attempt_number'), int)
+                                            else None),
                              "mapping_reason": review_code,
                              "mapping_version": None},
                 "state": {"durable_state": status, "bucket": self._bucket(status, attempts),
@@ -444,6 +446,9 @@ class InspectionServer:
                                 "phase": "idle", "reason": "Reason unavailable"}}
         url = worker.pop("url", None)
         item_id = hashlib.sha256(url.encode()).hexdigest() if isinstance(url, str) else None
+        attempt_id = (f"{item_id}:{worker.get('attempt_number')}"
+                      if item_id and isinstance(worker.get('attempt_number'), int)
+                      else None)
         row = self._item_row(db, item_id) if item_id else None
         basename = Path(row[2]).name if row else None
         samples = worker.pop("progress_samples", [])
@@ -467,7 +472,7 @@ class InspectionServer:
         assignment = {"run_id": self.run_id, "session_id": self.session_id,
                       "worker_id": worker_id, "item_id": item_id, "basename": basename,
                       "generation": worker.get("generation"),
-                      "attempt_id": worker.get("attempt_id"),
+                      "attempt_id": attempt_id,
                       "attempt_number": worker.get("attempt_number"),
                       "engine_instance_id": worker.get("engine_instance_id"),
                       "engine_job_id": worker.get("engine_job_id"), "pid": worker.get("pid")}

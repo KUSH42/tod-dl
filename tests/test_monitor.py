@@ -85,7 +85,7 @@ class MonitorTests(unittest.TestCase):
                 root, "run-one", "session-one", database, 3,
                 runtime_provider=lambda: [{"url": source, "worker_id": 1,
                                            "phase": "downloading", "generation": 1,
-                                           "attempt_id": "attempt-1", "attempt_number": 1,
+                                           "attempt_id": source + ":1", "attempt_number": 1,
                                            "received_bytes": 0, "total_bytes": 10,
                                            "sample_age_s": 0, "sample_sequence": 3,
                                            "progress_samples": []}])
@@ -112,6 +112,7 @@ class MonitorTests(unittest.TestCase):
                 self.assertEqual(worker["assignment"]["basename"], "file.txt")
                 self.assertEqual(worker["received_bytes"], 0)
                 self.assertEqual(worker["quality"], "exact")
+                self.assertNotIn(source, worker["assignment"]["attempt_id"])
                 with self.assertRaisesRegex(InspectionError, "not found"):
                     inspection_request(root, "run-one", "get_item",
                                        {"item_id": "0" * 64})
@@ -414,6 +415,7 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("details differ", rendered)
         self.assertIn("No progress for 60s", rendered)
         self.assertIn("a<id>\\x1b[31m", rendered)
+        self.assertNotIn("http://", rendered)
         self.assertIn("\n\nSource\n", rendered)
         self.assertIn("Source hidden", rendered)
         idle = worker_details_text({"worker_id": 2, "assignment": None,

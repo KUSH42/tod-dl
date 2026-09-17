@@ -535,7 +535,7 @@ def item_details_text(item: dict[str, Any], read_at: Any = None,
     byte_values = item.get("bytes", {})
     validation = item.get("validation", {})
     def field(section: dict[str, Any], name: str, fallback: Any = None) -> Any:
-        return section.get(name, fallback) if isinstance(section, dict) else fallback
+        return section.get(name, fallback) if isinstawnce(section, dict) else fallback
     lines = [
         "Item details",
         f"Read: {detail_value(read_at, 'read time unavailable')}  Revision: {detail_value(revision, 'revision unavailable')}  Freshness: {literal_text(sample_freshness)}",
@@ -596,7 +596,7 @@ def worker_details_text(worker: dict[str, Any], read_at: Any = None,
     lines.extend([
         f"Run: {detail_value(assignment.get('run_id'), reason)}  Session: {detail_value(assignment.get('session_id'), reason)}  Worker: {detail_value(assignment.get('worker_id'), reason)}",
         f"Item ID: {detail_value(assignment.get('item_id'), reason)}  Basename: {detail_value(assignment.get('basename'), reason)}",
-        f"Generation: {detail_value(assignment.get('generation'), reason)}  Attempt: {detail_value(assignment.get('attempt_number'), reason)} / {detail_value(assignment.get('attempt_id'), reason)}",
+        f"Generation: {detail_value(assignment.get('generation'), reason)}  Attempt: {detail_value(assignment.get('attempt_number'), reason)}",
         f"Engine instance: {detail_value(assignment.get('engine_instance_id'), reason)}  Job: {detail_value(assignment.get('engine_job_id'), reason)}  PID: {detail_value(assignment.get('pid'), reason)}",
         "", "Activity",
         f"Phase: {detail_value(worker.get('phase'), reason)}  Reason: {detail_value(worker.get('reason'), reason)}",
