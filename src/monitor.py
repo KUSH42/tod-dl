@@ -580,7 +580,8 @@ def item_details_text(item: dict[str, Any], read_at: Any = None,
 
 def worker_details_text(worker: dict[str, Any], read_at: Any = None,
                         revision: Any = None, dashboard_revision: Any = None,
-                        sample_freshness: str = "?") -> str:
+                        sample_freshness: str = "?", source_label: str = "Source hidden",
+                        source: Any = None) -> str:
     """Build a literal-safe worker details display from one slot record."""
     assignment = worker.get("assignment") if isinstance(worker.get("assignment"), dict) else None
     reason = "not recorded"
@@ -612,8 +613,10 @@ def worker_details_text(worker: dict[str, Any], read_at: Any = None,
         f"Controller conditions: {detail_value(worker.get('admission'), 'not reported')}",
         "", "Validation",
         f"Validation: {detail_value(worker.get('validation'), 'not owned by this slot')}",
+        "", "Source",
+        f"{literal_text(source_label)}: {detail_value(source, 'hidden until you select Reveal source')}",
     ])
-    return "\n".join(line for line in lines if line != "")
+    return "\n".join(lines)
 
 
 def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
@@ -814,9 +817,8 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
     class WorkerDetails(Screen[None]):
         """Read-only view bound to one worker slot in one controller session."""
         BINDINGS = [("escape", "dismiss", "Back"), ("i", "item_details", "Item details"),
-                    ("l", "logs", "Logs"),
+                    ("l", "logs", "Logs"), ("r", "reveal_source", "Reveal source"),
                     Binding("q", "disabled_control", show=False),
-                    Binding("r", "disabled_control", show=False),
                     Binding("t", "disabled_control", show=False)]
         CSS = "#worker-details { height: 1fr; overflow-y: auto; }"
 
@@ -830,6 +832,9 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             self.revision: Any = None
             self.displayed_item_id: str | None = None
             self.session_ended = False
+            self.revealed = False
+            self.source: Any = None
+            self.source_label = "Source hidden"
 
         def compose(self) -> ComposeResult:
             with VerticalScroll(id="worker-details"):
@@ -837,8 +842,15 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             yield Footer()
 
         def on_mount(self) -> None:
+            self.set_source_binding()
             self.load_worker()
             self.set_interval(2, self.refresh_worker)
+
+        def set_source_binding(self) -> None:
+            action = "hide_source" if self.revealed else "reveal_source"
+            label = "Hide source" if self.revealed else "Reveal source"
+            self._bindings.key_to_bindings["r"] = [Binding("r", action, label)]
+            self.refresh_bindings()
 
         def refresh_worker(self) -> None:
             if self.app.current.get("session_id") != self.session_id:
@@ -867,7 +879,14 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                 return
             self.worker, self.read_at, self.revision = worker, response.get("read_at"), response.get("state_revision")
             assignment = worker.get("assignment")
-            self.displayed_item_id = assignment.get("item_id") if isinstance(assignment, dict) and isinstance(assignment.get("item_id"), str) else None
+            item_id = (assignment.get("item_id") if isinstance(assignment, dict)
+                       and isinstance(assignment.get("item_id"), str) else None)
+            if item_id != self.displayed_item_id:
+                self.displayed_item_id = item_id
+                self.revealed = False
+                self.source = None
+                self.source_label = "Source hidden"
+                self.set_source_binding()
             self.update_details()
 
         def update_details(self, error: str | None = None) -> None:
@@ -876,10 +895,49 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             elif error:
                 output = "Worker details\nLast-known values retained\n" + literal_text(error)
                 if self.worker:
-                    output += "\n\n" + worker_details_text(self.worker, self.read_at, self.revision, self.dashboard_revision, freshness(self.app.current))
+                    output += "\n\n" + worker_details_text(
+                        self.worker, self.read_at, self.revision,
+                        self.dashboard_revision, freshness(self.app.current),
+                        self.source_label, self.source)
             else:
-                output = worker_details_text(self.worker or {"worker_id": self.worker_id}, self.read_at, self.revision, self.dashboard_revision, freshness(self.app.current))
+                output = worker_details_text(
+                    self.worker or {"worker_id": self.worker_id}, self.read_at,
+                    self.revision, self.dashboard_revision, freshness(self.app.current),
+                    self.source_label, self.source)
             self.query_one("#worker-details-text", Static).update(detail_visual(output))
+
+        def action_reveal_source(self) -> None:
+            if not self.displayed_item_id:
+                self.app.notify("No item assigned", severity="warning")
+                return
+            self.revealed = True
+            self.set_source_binding()
+            target = self.displayed_item_id
+            self.app.submit_inspection(
+                lambda: inspection_request(state, self.run_id, "get_item",
+                                            {"item_id": target, "reveal_source": True}),
+                lambda response, error: self.apply_source(target, response, error))
+
+        def apply_source(self, target: str, response: dict[str, Any] | None,
+                         error: str | None) -> None:
+            if target != self.displayed_item_id or not self.revealed:
+                return
+            data = response.get("data", {}) if response else {}
+            item = data.get("item") if isinstance(data, dict) else None
+            if error or not isinstance(item, dict):
+                self.source = None
+                self.source_label = "Source unavailable"
+            else:
+                self.source = item.get("source")
+                self.source_label = literal_text(item.get("source_label", "Source unavailable"))
+            self.update_details()
+
+        def action_hide_source(self) -> None:
+            self.revealed = False
+            self.source = None
+            self.source_label = "Source hidden"
+            self.set_source_binding()
+            self.update_details()
 
         def action_item_details(self) -> None:
             if not self.displayed_item_id:
@@ -891,6 +949,8 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             self.app.notify("No item logs" if not self.displayed_item_id else "Item logs are unavailable", severity="warning")
 
         def action_dismiss(self) -> None:
+            self.revealed = False
+            self.source = None
             self.app.pop_screen()
 
         def action_disabled_control(self) -> None:

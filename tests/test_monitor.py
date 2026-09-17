@@ -414,6 +414,8 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("details differ", rendered)
         self.assertIn("No progress for 60s", rendered)
         self.assertIn("a<id>\\x1b[31m", rendered)
+        self.assertIn("\n\nSource\n", rendered)
+        self.assertIn("Source hidden", rendered)
         idle = worker_details_text({"worker_id": 2, "assignment": None,
                                     "reason": "Reason unavailable"})
         self.assertIn("No item assigned", idle)
