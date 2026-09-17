@@ -8,6 +8,7 @@ from collections import deque
 import datetime as dt
 import hashlib
 import json
+import re
 import sys
 import threading
 import time
@@ -512,6 +513,17 @@ def detail_rate(value: Any, reason: str = "not recorded") -> str:
     return detail_value(None, reason)
 
 
+def format_retry_deadline(value: Any) -> str:
+    """Format a durable retry deadline without exposing its epoch value."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return detail_value(value, "not recorded")
+    remaining = value - time.time()
+    if remaining <= 0:
+        return "Eligible; awaiting controller"
+    deadline = dt.datetime.fromtimestamp(value, dt.timezone.utc)
+    return f"{deadline:%Y-%m-%d %H:%M:%S UTC} ({format_countdown(remaining)} remaining)"
+
+
 def item_details_text(item: dict[str, Any], read_at: Any = None,
                       revision: Any = None, sample_freshness: str = "?") -> str:
     """Build a literal-safe, scrollable item-details display from one record."""
@@ -541,7 +553,7 @@ def item_details_text(item: dict[str, Any], read_at: Any = None,
         f"Phase: {detail_value(field(state, 'phase'), reason)}  Reason: {detail_value(field(state, 'phase_reason'), reason)}",
         f"Worker: {detail_value(field(state, 'worker_id'), reason)}  Last transition: {detail_value(field(state, 'last_transition_at', item.get('updated_at')), reason)}",
         f"Attempts: {detail_value(field(state, 'attempt_count', item.get('attempt_count')), reason)} / {detail_value(field(state, 'attempt_ceiling', item.get('attempt_ceiling')), reason)}",
-        f"Retry deadline: {detail_value(field(state, 'retry_at', item.get('retry_at')), reason)}",
+        f"Retry deadline: {format_retry_deadline(field(state, 'retry_at', item.get('retry_at')))}",
         "", "Engine",
         f"Engine: {detail_value(field(engine, 'name'), reason)} {detail_value(field(engine, 'version'), reason)}",
         f"Instance: {detail_value(field(engine, 'instance_id'), reason)}  Job: {detail_value(field(engine, 'job_id'), reason)}  PID: {detail_value(field(engine, 'pid'), reason)}",
@@ -608,6 +620,7 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                 state: Path | None = None, control: bool = False, fps: int = 30) -> int:
     try:
         from textual.app import App, ComposeResult
+        from textual.binding import Binding
         from textual.containers import Horizontal, Vertical, VerticalScroll
         from rich.text import Text
         from textual.screen import ModalScreen, Screen
@@ -616,6 +629,27 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
         print("Textual is optional. Install requirements-monitor.txt, or use "
               "./run.sh --status.", file=sys.stderr)
         return 2
+
+    section_labels = {"Identity and paths", "State", "Engine", "Bytes", "Validation",
+                      "Source", "Attempts and errors", "Assignment", "Activity",
+                      "Transfer", "Admission", "Worker details", "Item details"}
+
+    def detail_visual(output: str) -> Text:
+        """Style trusted labels without parsing untrusted values as Rich markup."""
+        visual = Text()
+        for line_number, line in enumerate(output.splitlines()):
+            if line in section_labels:
+                visual.append(line, style="bold white")
+            else:
+                position = 0
+                for match in re.finditer(r"(?:^|  )([^:\n]{1,40}:)", line):
+                    visual.append(line[position:match.start(1)])
+                    visual.append(match.group(1), style="dim")
+                    position = match.end(1)
+                visual.append(line[position:])
+            if line_number < len(output.splitlines()) - 1:
+                visual.append("\n")
+        return visual
 
     class ActionConfirmation(ModalScreen[bool]):
         BINDINGS = [("y", "confirm", "Yes"), ("n", "dismiss", "No"),
@@ -670,7 +704,9 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
     class ItemDetails(Screen[None]):
         """Read-only view bound to one immutable run and item identity."""
         BINDINGS = [("escape", "dismiss", "Back"), ("r", "reveal_source", "Reveal source"),
-                    ("h", "hide_source", "Hide source"), ("n", "next_attempts", "Next attempts")]
+                    ("n", "next_attempts", "Next attempts"),
+                    Binding("q", "disabled_control", show=False),
+                    Binding("t", "disabled_control", show=False)]
         CSS = "#item-details { height: 1fr; overflow-y: auto; }"
 
         def __init__(self, run_id: str, item_id: str) -> None:
@@ -690,7 +726,14 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             yield Footer()
 
         def on_mount(self) -> None:
+            self.set_source_binding()
             self.load_item()
+
+        def set_source_binding(self) -> None:
+            action = "hide_source" if self.revealed else "reveal_source"
+            label = "Hide source" if self.revealed else "Reveal source"
+            self._bindings.key_to_bindings["r"] = [Binding("r", action, label)]
+            self.refresh_bindings()
 
         def update_details(self, error: str | None = None) -> None:
             output = ("Details unavailable\n" + literal_text(error)
@@ -701,7 +744,7 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                 output += "\n\nRecorded attempts\n" + "\n".join(
                     f"#{detail_value(row.get('attempt_number'))} {detail_value(row.get('outcome'))} "
                     f"{detail_value(row.get('attempt_id'))}" for row in self.attempts)
-            self.query_one("#item-details-text", Static).update(output)
+            self.query_one("#item-details-text", Static).update(detail_visual(output))
 
         def load_item(self) -> None:
             self.app.submit_inspection(
@@ -726,6 +769,7 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
 
         def action_reveal_source(self) -> None:
             self.revealed = True
+            self.set_source_binding()
             self.load_item()
 
         def action_hide_source(self) -> None:
@@ -733,6 +777,7 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             if self.item:
                 self.item["source"] = None
                 self.item["source_label"] = "Source hidden"
+            self.set_source_binding()
             self.update_details()
 
         def action_next_attempts(self) -> None:
@@ -761,12 +806,18 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
 
         def action_dismiss(self) -> None:
             self.revealed = False
-            self.pop_screen()
+            self.app.pop_screen()
+
+        def action_disabled_control(self) -> None:
+            return
 
     class WorkerDetails(Screen[None]):
         """Read-only view bound to one worker slot in one controller session."""
         BINDINGS = [("escape", "dismiss", "Back"), ("i", "item_details", "Item details"),
-                    ("l", "logs", "Logs")]
+                    ("l", "logs", "Logs"),
+                    Binding("q", "disabled_control", show=False),
+                    Binding("r", "disabled_control", show=False),
+                    Binding("t", "disabled_control", show=False)]
         CSS = "#worker-details { height: 1fr; overflow-y: auto; }"
 
         def __init__(self, run_id: str, session_id: str, worker_id: int,
@@ -828,7 +879,7 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                     output += "\n\n" + worker_details_text(self.worker, self.read_at, self.revision, self.dashboard_revision, freshness(self.app.current))
             else:
                 output = worker_details_text(self.worker or {"worker_id": self.worker_id}, self.read_at, self.revision, self.dashboard_revision, freshness(self.app.current))
-            self.query_one("#worker-details-text", Static).update(output)
+            self.query_one("#worker-details-text", Static).update(detail_visual(output))
 
         def action_item_details(self) -> None:
             if not self.displayed_item_id:
@@ -840,7 +891,10 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             self.app.notify("No item logs" if not self.displayed_item_id else "Item logs are unavailable", severity="warning")
 
         def action_dismiss(self) -> None:
-            self.pop_screen()
+            self.app.pop_screen()
+
+        def action_disabled_control(self) -> None:
+            return
 
     class Monitor(App):
         BINDINGS = [("q", "quit", "Close"), ("r", "prepare_retry_now", "Retry now"),

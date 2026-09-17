@@ -25,7 +25,7 @@ from monitor import (SnapshotError, event_item_path, event_message_style,
                      lifecycle_style, select_snapshot, worker_phase_label,
                      truncate_filename, SpeedTrend, disk_status, progress_status,
                      screen_summary, validate_snapshot, detail_bytes, item_details_text,
-                     worker_details_text)
+                     worker_details_text, format_retry_deadline)
 
 
 def snapshot(lifecycle: str = "running") -> dict:
@@ -418,6 +418,11 @@ class MonitorTests(unittest.TestCase):
                                     "reason": "Reason unavailable"})
         self.assertIn("No item assigned", idle)
         self.assertNotIn("Received:", idle)
+
+    def test_retry_deadline_hides_the_durable_epoch_value(self):
+        self.assertEqual(format_retry_deadline(0), "Eligible; awaiting controller")
+        rendered = item_details_text({"retry_at": 0})
+        self.assertIn("Retry deadline: Eligible; awaiting controller", rendered)
 
 
 if __name__ == "__main__":
