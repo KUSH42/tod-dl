@@ -692,7 +692,7 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
         def on_mount(self) -> None:
             self.load_item()
 
-        def render(self, error: str | None = None) -> None:
+        def update_details(self, error: str | None = None) -> None:
             output = ("Details unavailable\n" + literal_text(error)
                       if error else item_details_text(self.item or {}, self.read_at,
                                                        self.revision,
@@ -712,17 +712,17 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
 
         def apply_item(self, response: dict[str, Any] | None, error: str | None) -> None:
             if error or not response:
-                self.render(error or "inspection returned no record")
+                self.update_details(error or "inspection returned no record")
                 return
             data = response.get("data", {})
             item = data.get("item") if isinstance(data, dict) else None
             if not isinstance(item, dict):
-                self.render("inspection returned an invalid item")
+                self.update_details("inspection returned an invalid item")
                 return
             self.item = item
             self.read_at = response.get("read_at")
             self.revision = response.get("state_revision")
-            self.render()
+            self.update_details()
 
         def action_reveal_source(self) -> None:
             self.revealed = True
@@ -733,7 +733,7 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             if self.item:
                 self.item["source"] = None
                 self.item["source_label"] = "Source hidden"
-            self.render()
+            self.update_details()
 
         def action_next_attempts(self) -> None:
             parameters: dict[str, Any] = {"item_id": self.item_id, "page_size": 200}
@@ -757,7 +757,7 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                 return
             self.attempts.extend(row for row in rows if isinstance(row, dict))
             self.cursor = data.get("next_cursor") if isinstance(data.get("next_cursor"), str) else None
-            self.render()
+            self.update_details()
 
         def action_dismiss(self) -> None:
             self.revealed = False
@@ -792,7 +792,7 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
         def refresh_worker(self) -> None:
             if self.app.current.get("session_id") != self.session_id:
                 self.session_ended = True
-                self.render()
+                self.update_details()
                 return
             self.load_worker()
 
@@ -807,19 +807,19 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             if error or not response:
                 if error and "session" in error:
                     self.session_ended = True
-                self.render(error or "inspection returned no worker")
+                self.update_details(error or "inspection returned no worker")
                 return
             data = response.get("data", {})
             worker = data.get("worker") if isinstance(data, dict) else None
             if not isinstance(worker, dict):
-                self.render("inspection returned an invalid worker")
+                self.update_details("inspection returned an invalid worker")
                 return
             self.worker, self.read_at, self.revision = worker, response.get("read_at"), response.get("state_revision")
             assignment = worker.get("assignment")
             self.displayed_item_id = assignment.get("item_id") if isinstance(assignment, dict) and isinstance(assignment.get("item_id"), str) else None
-            self.render()
+            self.update_details()
 
-        def render(self, error: str | None = None) -> None:
+        def update_details(self, error: str | None = None) -> None:
             if self.session_ended:
                 output = "Worker details\nSession ended\nReturn to the current dashboard."
             elif error:
