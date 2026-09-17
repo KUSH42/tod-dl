@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from controller import (ControlError, ControlServer, control_request,
                         get_control_state, read_control_session)
+from inspection import (InspectionError, InspectionServer, inspection_request,
+                        read_inspection_session)
 from monitor import (SnapshotError, event_item_path, event_message_style,
                      event_timestamp, freshness, literal_text, read_snapshot,
                      marquee_filename, retry_summary, event_severity_style,
@@ -45,6 +48,61 @@ def snapshot(lifecycle: str = "running") -> dict:
 
 
 class MonitorTests(unittest.TestCase):
+    def test_inspection_endpoint_reads_redacted_item_records(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = root / "manifest.sqlite"
+            db = sqlite3.connect(database)
+            db.executescript("""
+                CREATE TABLE downloads (
+                    url TEXT PRIMARY KEY, relative_path TEXT NOT NULL,
+                    storage_path TEXT, staging_path TEXT, inventory_size TEXT,
+                    status TEXT NOT NULL, attempts INTEGER NOT NULL, bytes INTEGER,
+                    sha256 TEXT, last_error TEXT, next_retry_at REAL NOT NULL,
+                    promotion_target TEXT, updated_at TEXT NOT NULL, review_code TEXT
+                );
+                CREATE TABLE run_items (run_id TEXT NOT NULL, url TEXT NOT NULL,
+                                        queue_rank INTEGER NOT NULL);
+                CREATE TABLE telemetry_revisions (run_id TEXT PRIMARY KEY,
+                                                  revision INTEGER NOT NULL);
+                CREATE TABLE download_transitions (id INTEGER PRIMARY KEY,
+                    url TEXT, run_id TEXT, to_status TEXT, detail TEXT,
+                    recorded_at TEXT);
+            """)
+            source = "http://user:secret@example.onion/a/file.txt?token=secret"
+            db.execute("INSERT INTO downloads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                       (source, "a/file.txt", "safe/file.txt", None, None, "pending",
+                        0, None, None, None, 0, None, "2026-09-17T00:00:00Z", None))
+            db.execute("INSERT INTO run_items VALUES (?, ?, ?)",
+                       ("run-one", source, 1))
+            db.execute("INSERT INTO telemetry_revisions VALUES (?, ?)",
+                       ("run-one", 7))
+            db.commit()
+            db.close()
+            server = InspectionServer(root, "run-one", "session-one", database, 3)
+            server.start()
+            try:
+                descriptor = read_inspection_session(root, "run-one")
+                self.assertNotIn("token", descriptor)
+                self.assertEqual((root / "telemetry" / "run-one" /
+                                  "inspection-session.json").stat().st_mode & 0o777, 0o600)
+                page = inspection_request(root, "run-one", "list_queue")
+                item_id = page["data"]["rows"][0]["item_id"]
+                hidden = inspection_request(root, "run-one", "get_item",
+                                            {"item_id": item_id})
+                self.assertEqual(hidden["state_revision"], 7)
+                self.assertEqual(hidden["data"]["item"]["source"], None)
+                shown = inspection_request(root, "run-one", "get_item",
+                                           {"item_id": item_id,
+                                            "reveal_source": True})
+                self.assertEqual(shown["data"]["item"]["source"],
+                                 "http://example.onion/a/file.txt")
+                with self.assertRaisesRegex(InspectionError, "not found"):
+                    inspection_request(root, "run-one", "get_item",
+                                       {"item_id": "0" * 64})
+            finally:
+                server.stop()
+
     def test_local_control_endpoint_requires_its_session_capability(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

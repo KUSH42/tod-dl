@@ -273,6 +273,11 @@ class TelemetryPublisher:
         with self._lock:
             return list(self.errors)
 
+    def runtime_copy(self) -> list[dict[str, Any]]:
+        """Return a bounded controller-owned copy for local inspection only."""
+        with self._lock:
+            return [dict(value) for value in self.active.values()]
+
     def time_status_copy(self) -> tuple[str | None, str | None, str | None]:
         """Return observed payload and final lifecycle times for one snapshot."""
         with self._lock:

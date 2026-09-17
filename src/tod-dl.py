@@ -25,6 +25,7 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlsplit
 
 from controller import ControlServer
+from inspection import InspectionServer
 from download_telemetry import (TelemetryPublisher, estimate_eta_seconds,
                                 reduce_projected_metrics, sanitize_message)
 from provenance import ProvenanceError, ProvenanceWriter, utc_now
@@ -1588,6 +1589,12 @@ class Downloader:
                                     self.control_state,
                                     lambda request: self.control_action(db, request))
             control.start()
+            inspection = InspectionServer(
+                self.state, self.run_id, self.telemetry.session_id,
+                self.state / "manifest.sqlite", self.args.max_attempts,
+                self.telemetry.runtime_copy,
+            )
+            inspection.start()
             for severity, message, url in self.pending_remediation_events:
                 self.telemetry.event(severity, "safe_path", message, url)
             self.pending_remediation_events.clear()
@@ -1680,6 +1687,7 @@ class Downloader:
                     except OSError as exc:
                         print(f"[telemetry] final snapshot failed: {exc}", file=sys.stderr)
                 control.stop()
+                inspection.stop()
                 db.close()
             print("Run summary: " + ", ".join(
                 f"{key}={value}" for key, value in sorted(results.items())))
