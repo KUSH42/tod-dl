@@ -505,6 +505,13 @@ def detail_bytes(value: Any, reason: str = "not recorded") -> str:
     return detail_value(None, reason)
 
 
+def detail_rate(value: Any, reason: str = "not recorded") -> str:
+    """Show a nonnegative byte rate without converting an unknown to zero."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+        return f"{format_bytes(int(value))}/s"
+    return detail_value(None, reason)
+
+
 def item_details_text(item: dict[str, Any], read_at: Any = None,
                       revision: Any = None, sample_freshness: str = "?") -> str:
     """Build a literal-safe, scrollable item-details display from one record."""
@@ -557,6 +564,44 @@ def item_details_text(item: dict[str, Any], read_at: Any = None,
         "", "Attempts and errors", "Select Next attempts to load another recorded page.",
     ]
     return "\n".join(lines)
+
+
+def worker_details_text(worker: dict[str, Any], read_at: Any = None,
+                        revision: Any = None, dashboard_revision: Any = None,
+                        sample_freshness: str = "?") -> str:
+    """Build a literal-safe worker details display from one slot record."""
+    assignment = worker.get("assignment") if isinstance(worker.get("assignment"), dict) else None
+    reason = "not recorded"
+    lines = ["Worker details",
+             f"Read: {detail_value(read_at, 'read time unavailable')}  Revision: {detail_value(revision, 'revision unavailable')}  Freshness: {literal_text(sample_freshness)}"]
+    if dashboard_revision is not None and revision != dashboard_revision:
+        lines.append(f"Dashboard revision: {detail_value(dashboard_revision)} (details differ)")
+    lines.extend(["", "Assignment"])
+    if not assignment or not assignment.get("item_id"):
+        lines.extend(["No item assigned", f"Reason: {detail_value(worker.get('reason'), 'Reason unavailable')}"])
+        return "\n".join(lines)
+    lines.extend([
+        f"Run: {detail_value(assignment.get('run_id'), reason)}  Session: {detail_value(assignment.get('session_id'), reason)}  Worker: {detail_value(assignment.get('worker_id'), reason)}",
+        f"Item ID: {detail_value(assignment.get('item_id'), reason)}  Basename: {detail_value(assignment.get('basename'), reason)}",
+        f"Generation: {detail_value(assignment.get('generation'), reason)}  Attempt: {detail_value(assignment.get('attempt_number'), reason)} / {detail_value(assignment.get('attempt_id'), reason)}",
+        f"Engine instance: {detail_value(assignment.get('engine_instance_id'), reason)}  Job: {detail_value(assignment.get('engine_job_id'), reason)}  PID: {detail_value(assignment.get('pid'), reason)}",
+        "", "Activity",
+        f"Phase: {detail_value(worker.get('phase'), reason)}  Reason: {detail_value(worker.get('reason'), reason)}",
+        f"Phase elapsed: {format_elapsed_duration(worker.get('phase_elapsed_s'))}  Attempt elapsed: {format_elapsed_duration(worker.get('attempt_elapsed_s'))}",
+        f"Last payload progress: {format_countdown(worker.get('last_progress_age_s')) if worker.get('last_progress_age_s') is not None else '?'} ago",
+        "No progress for 60s" if worker.get('phase') == 'downloading' and isinstance(worker.get('last_progress_age_s'), (int, float)) and worker['last_progress_age_s'] >= 60 else "",
+        "", "Transfer",
+        f"Received: {detail_bytes(worker.get('received_bytes'), reason)}  Total: {detail_bytes(worker.get('total_bytes'), reason)} ({detail_value(worker.get('total_source'), reason)})",
+        f"Resume baseline: {detail_bytes(worker.get('resume_baseline_bytes'), reason)}",
+        f"Speed: {detail_rate(worker.get('speed_bps'), reason)}  Smoothed: {detail_rate(worker.get('smoothed_speed_bps'), reason)}",
+        f"ETA (approximate): {detail_value(worker.get('eta_seconds'), 'Estimating' if worker.get('estimator') == 'Estimating' else reason)}  Connections: {detail_value(worker.get('connections'), reason)}",
+        f"Sample sequence: {detail_value(worker.get('sample_sequence'), reason)}  Sample age: {detail_value(worker.get('sample_age_s'), reason)}  Quality: {detail_value(worker.get('quality'), reason)}",
+        "", "Admission",
+        f"Controller conditions: {detail_value(worker.get('admission'), 'not reported')}",
+        "", "Validation",
+        f"Validation: {detail_value(worker.get('validation'), 'not owned by this slot')}",
+    ])
+    return "\n".join(line for line in lines if line != "")
 
 
 def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
@@ -716,6 +761,85 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
 
         def action_dismiss(self) -> None:
             self.revealed = False
+            self.pop_screen()
+
+    class WorkerDetails(Screen[None]):
+        """Read-only view bound to one worker slot in one controller session."""
+        BINDINGS = [("escape", "dismiss", "Back"), ("i", "item_details", "Item details"),
+                    ("l", "logs", "Logs")]
+        CSS = "#worker-details { height: 1fr; overflow-y: auto; }"
+
+        def __init__(self, run_id: str, session_id: str, worker_id: int,
+                     dashboard_revision: Any) -> None:
+            super().__init__()
+            self.run_id, self.session_id, self.worker_id = run_id, session_id, worker_id
+            self.dashboard_revision = dashboard_revision
+            self.worker: dict[str, Any] | None = None
+            self.read_at: Any = None
+            self.revision: Any = None
+            self.displayed_item_id: str | None = None
+            self.session_ended = False
+
+        def compose(self) -> ComposeResult:
+            with VerticalScroll(id="worker-details"):
+                yield Static("Loading worker details…", id="worker-details-text")
+            yield Footer()
+
+        def on_mount(self) -> None:
+            self.load_worker()
+            self.set_interval(2, self.refresh_worker)
+
+        def refresh_worker(self) -> None:
+            if self.app.current.get("session_id") != self.session_id:
+                self.session_ended = True
+                self.render()
+                return
+            self.load_worker()
+
+        def load_worker(self) -> None:
+            if self.session_ended:
+                return
+            self.app.submit_inspection(
+                lambda: inspection_request(state, self.run_id, "get_worker",
+                                            {"worker_id": self.worker_id}), self.apply_worker)
+
+        def apply_worker(self, response: dict[str, Any] | None, error: str | None) -> None:
+            if error or not response:
+                if error and "session" in error:
+                    self.session_ended = True
+                self.render(error or "inspection returned no worker")
+                return
+            data = response.get("data", {})
+            worker = data.get("worker") if isinstance(data, dict) else None
+            if not isinstance(worker, dict):
+                self.render("inspection returned an invalid worker")
+                return
+            self.worker, self.read_at, self.revision = worker, response.get("read_at"), response.get("state_revision")
+            assignment = worker.get("assignment")
+            self.displayed_item_id = assignment.get("item_id") if isinstance(assignment, dict) and isinstance(assignment.get("item_id"), str) else None
+            self.render()
+
+        def render(self, error: str | None = None) -> None:
+            if self.session_ended:
+                output = "Worker details\nSession ended\nReturn to the current dashboard."
+            elif error:
+                output = "Worker details\nLast-known values retained\n" + literal_text(error)
+                if self.worker:
+                    output += "\n\n" + worker_details_text(self.worker, self.read_at, self.revision, self.dashboard_revision, freshness(self.app.current))
+            else:
+                output = worker_details_text(self.worker or {"worker_id": self.worker_id}, self.read_at, self.revision, self.dashboard_revision, freshness(self.app.current))
+            self.query_one("#worker-details-text", Static).update(output)
+
+        def action_item_details(self) -> None:
+            if not self.displayed_item_id:
+                self.app.notify("No item assigned", severity="warning")
+                return
+            self.app.push_screen(ItemDetails(self.run_id, self.displayed_item_id))
+
+        def action_logs(self) -> None:
+            self.app.notify("No item logs" if not self.displayed_item_id else "Item logs are unavailable", severity="warning")
+
+        def action_dismiss(self) -> None:
             self.pop_screen()
 
     class Monitor(App):
@@ -890,10 +1014,10 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
         def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
             worker = next((row for row in self.current["workers"]
                            if str(row.get("worker_id")) == str(event.row_key.value)), None)
-            if not worker or not isinstance(worker.get("item_id"), str):
-                self.notify("Details unavailable: no item assigned", severity="warning")
+            if not worker:
                 return
-            self.push_screen(ItemDetails(self.current["run_id"], worker["item_id"]))
+            self.push_screen(WorkerDetails(self.current["run_id"], self.current["session_id"],
+                                           int(worker["worker_id"]), self.current["state_revision"]))
 
         def submit_inspection(self, operation, completed) -> None:
             """Run one inspection request away from the render and input loop."""

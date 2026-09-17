@@ -223,13 +223,14 @@ class TelemetryPublisher:
             self.active[url] = {"url": url, "worker_id": worker_id,
                                 "generation": attempt, "attempt_id": f"{url}:{attempt}",
                                 "attempt_number": attempt, "phase": phase,
-                                "reason": None, "phase_started": time.monotonic(), "pid": pid,
+                                "reason": None, "phase_started": time.monotonic(),
+                                "attempt_started": time.monotonic(), "pid": pid,
                                 "engine_instance_id": None, "engine_job_id": None,
                                 "received_bytes": None, "total_bytes": None,
                                 "total_source": "unavailable", "speed_bps": None,
                                 "connections": None, "sample_age_s": None,
                                 "last_progress_monotonic": None,
-                                "sample_sequence": None}
+                                "sample_sequence": None, "progress_samples": []}
         self.request_publish()
 
     def update_phase(self, url: str, phase: str) -> None:
@@ -255,6 +256,11 @@ class TelemetryPublisher:
                            "speed_bps": speed_bps, "connections": connections,
                            "total_source": "aria2_rpc", "sample_age_s": 0,
                            "sample_sequence": (sample.get("sample_sequence") or 0) + 1})
+            observed = time.monotonic()
+            history = sample.setdefault("progress_samples", [])
+            history.append((observed, received_bytes))
+            sample["progress_samples"] = [value for value in history
+                                         if observed - value[0] <= 30]
         self.request_publish()
 
     def set_validation(self, url: str, processed: int, total: int) -> None:

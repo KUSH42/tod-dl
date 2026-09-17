@@ -24,7 +24,8 @@ from monitor import (SnapshotError, event_item_path, event_message_style,
                      event_worker_label, format_countdown, freshness_style,
                      lifecycle_style, select_snapshot, worker_phase_label,
                      truncate_filename, SpeedTrend, disk_status, progress_status,
-                     screen_summary, validate_snapshot, detail_bytes, item_details_text)
+                     screen_summary, validate_snapshot, detail_bytes, item_details_text,
+                     worker_details_text)
 
 
 def snapshot(lifecycle: str = "running") -> dict:
@@ -80,7 +81,14 @@ class MonitorTests(unittest.TestCase):
                        ("run-one", 7))
             db.commit()
             db.close()
-            server = InspectionServer(root, "run-one", "session-one", database, 3)
+            server = InspectionServer(
+                root, "run-one", "session-one", database, 3,
+                runtime_provider=lambda: [{"url": source, "worker_id": 1,
+                                           "phase": "downloading", "generation": 1,
+                                           "attempt_id": "attempt-1", "attempt_number": 1,
+                                           "received_bytes": 0, "total_bytes": 10,
+                                           "sample_age_s": 0, "sample_sequence": 3,
+                                           "progress_samples": []}])
             server.start()
             try:
                 descriptor = read_inspection_session(root, "run-one")
@@ -98,6 +106,12 @@ class MonitorTests(unittest.TestCase):
                                             "reveal_source": True})
                 self.assertEqual(shown["data"]["item"]["source"],
                                  "http://example.onion/a/file.txt")
+                worker = inspection_request(root, "run-one", "get_worker",
+                                            {"worker_id": 1})["data"]["worker"]
+                self.assertEqual(worker["assignment"]["item_id"], item_id)
+                self.assertEqual(worker["assignment"]["basename"], "file.txt")
+                self.assertEqual(worker["received_bytes"], 0)
+                self.assertEqual(worker["quality"], "exact")
                 with self.assertRaisesRegex(InspectionError, "not found"):
                     inspection_request(root, "run-one", "get_item",
                                        {"item_id": "0" * 64})
@@ -388,6 +402,22 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("<tag>\\x1b[31m", rendered)
         self.assertIn("0 B (0 bytes)", rendered)
         self.assertEqual(detail_bytes(None), "? (not recorded)")
+
+    def test_worker_details_keep_assignment_identity_and_clear_idle_values(self):
+        worker = {"worker_id": 2, "phase": "downloading", "last_progress_age_s": 60,
+                  "received_bytes": 0, "total_bytes": None, "quality": "exact",
+                  "assignment": {"run_id": "run-one", "session_id": "session-one",
+                                 "worker_id": 2, "item_id": "a<id>\x1b[31m",
+                                 "basename": "<file>", "generation": 1,
+                                 "attempt_id": "attempt", "attempt_number": 1}}
+        rendered = worker_details_text(worker, "read", 4, 3, "live")
+        self.assertIn("details differ", rendered)
+        self.assertIn("No progress for 60s", rendered)
+        self.assertIn("a<id>\\x1b[31m", rendered)
+        idle = worker_details_text({"worker_id": 2, "assignment": None,
+                                    "reason": "Reason unavailable"})
+        self.assertIn("No item assigned", idle)
+        self.assertNotIn("Received:", idle)
 
 
 if __name__ == "__main__":

@@ -441,11 +441,55 @@ class InspectionServer:
                        if row.get("worker_id") == worker_id), None)
         if worker is None:
             return {"worker": {"worker_id": worker_id, "assignment": None,
-                                "reason": "No item assigned"}}
+                                "phase": "idle", "reason": "Reason unavailable"}}
         url = worker.pop("url", None)
-        if isinstance(url, str):
-            worker["item_id"] = hashlib.sha256(url.encode()).hexdigest()
-        return {"worker": worker}
+        item_id = hashlib.sha256(url.encode()).hexdigest() if isinstance(url, str) else None
+        row = self._item_row(db, item_id) if item_id else None
+        basename = Path(row[2]).name if row else None
+        samples = worker.pop("progress_samples", [])
+        now = time.monotonic()
+        fresh_samples = [(at, value) for at, value in samples
+                         if isinstance(at, (int, float)) and isinstance(value, int)
+                         and now - at <= 30]
+        smoothed = None
+        if len(fresh_samples) >= 2 and fresh_samples[-1][0] - fresh_samples[0][0] >= 10:
+            growth = sum(max(0, later[1] - earlier[1])
+                         for earlier, later in zip(fresh_samples, fresh_samples[1:]))
+            span = fresh_samples[-1][0] - fresh_samples[0][0]
+            smoothed = growth / span if span else None
+        received, total = worker.get("received_bytes"), worker.get("total_bytes")
+        eta = None
+        if (isinstance(received, int) and isinstance(total, int) and smoothed
+                and total >= received):
+            eta = (total - received) / smoothed
+        sample_age = worker.get("sample_age_s")
+        quality = "exact" if sample_age is not None and sample_age <= 5 else "unavailable"
+        assignment = {"run_id": self.run_id, "session_id": self.session_id,
+                      "worker_id": worker_id, "item_id": item_id, "basename": basename,
+                      "generation": worker.get("generation"),
+                      "attempt_id": worker.get("attempt_id"),
+                      "attempt_number": worker.get("attempt_number"),
+                      "engine_instance_id": worker.get("engine_instance_id"),
+                      "engine_job_id": worker.get("engine_job_id"), "pid": worker.get("pid")}
+        return {"worker": {"worker_id": worker_id, "assignment": assignment,
+                            "phase": worker.get("phase"), "reason": worker.get("reason"),
+                            "phase_elapsed_s": worker.get("phase_age_s"),
+                            "attempt_elapsed_s": (max(0.0, now - worker["attempt_started"])
+                                                  if isinstance(worker.get("attempt_started"), (int, float)) else None),
+                            "last_progress_age_s": worker.get("last_progress_age_s"),
+                            "received_bytes": worker.get("received_bytes"),
+                            "total_bytes": worker.get("total_bytes"),
+                            "total_source": worker.get("total_source"),
+                            "resume_baseline_bytes": worker.get("resume_baseline_bytes"),
+                            "speed_bps": worker.get("speed_bps"),
+                            "smoothed_speed_bps": smoothed,
+                            "eta_seconds": eta,
+                            "connections": worker.get("connections"),
+                            "sample_sequence": worker.get("sample_sequence"),
+                            "sample_age_s": sample_age, "quality": quality,
+                            "estimator": "ready" if smoothed is not None else "Estimating",
+                            "validation": worker.get("validation"),
+                            "admission": worker.get("admission")}}
 
     def _list_queue(self, db: sqlite3.Connection, parameters: dict[str, Any], revision: int) -> dict[str, Any]:
         allowed = {"bucket", "query", "page_size", "cursor"}
