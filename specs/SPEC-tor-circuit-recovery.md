@@ -1,6 +1,6 @@
 # Specification: Tor circuit recovery control
 
-Status: implemented behavior, September 16, 2026. This specification defines
+Status: implemented, September 16, 2026. This specification defines
 controlled Tor circuit renewal for acquisition retries. It supplements the
 [controller command specification](SPEC-controller-control-ui.md) and the
 [reliable acquisition specification](SPEC-reliable-acquisition.md).

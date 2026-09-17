@@ -1,6 +1,6 @@
 # Specification: reproducible inventory discovery
 
-Status: proposed behavior, September 15, 2026. This specification separates
+Status: planned, September 15, 2026. This specification separates
 finding source files from acquiring their bytes. Implement it after the basic
 [acquisition workflow](SPEC-reliable-acquisition.md) is reliable; existing URL
 queues remain usable without a crawler.
