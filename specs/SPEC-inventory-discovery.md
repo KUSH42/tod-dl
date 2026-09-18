@@ -3,8 +3,8 @@
 Status: partially implemented, September 18, 2026. Local snapshot parsing,
 reproducible manifests, and queue export are implemented; see
 [the snapshot, manifest, and queue export specification](SPEC-inventory-snapshot-manifest.md).
-Snapshot diffing, the dated parse/diff report, network refresh, and directory
-crawling are not. This specification separates
+Snapshot diffing and the dated parse/diff report are implemented too. Network
+refresh and directory crawling are not. This specification separates
 finding source files from acquiring their bytes. Implement it after the basic
 [acquisition workflow](SPEC-reliable-acquisition.md) is reliable; existing URL
 queues remain usable without a crawler.

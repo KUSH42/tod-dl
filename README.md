@@ -256,6 +256,16 @@ python3 src/inventory.py manifest --snapshot /case/inventory/snapshots/<name> \
 python3 src/inventory.py queue --manifest /case/manifests/m1 --output /case/urls_1.txt
 ```
 
+After you import a newer listing, compare it with the old one:
+
+```bash
+python3 src/inventory.py diff --old /case/inventory/snapshots/<old> \
+    --new /case/inventory/snapshots/<new> --output /case/diffs/d1
+```
+
+`report.md` in the output directory is the dated report. A removed path does
+not authorize local deletion. Review every `ambiguous` item.
+
 A rejected snapshot lands in `rejected/` and cannot become a baseline. Read
 its `parse-report.json` before you use `--max-issues`. The policy file assigns
 each item to `priority`, `deferred`, or `rejected`; the specification shows

@@ -3,9 +3,9 @@
 Status: implemented, September 18, 2026. This specification defines the first
 release of [inventory discovery](SPEC-inventory-discovery.md): local snapshot
 parsing, reproducible manifest generation, and safe queue export. It defines
-the concrete formats that the parent specification leaves open. It does not
-add network refresh, directory crawling, or snapshot diffing. Those stay in
-the parent specification.
+the concrete formats that the parent specification leaves open. It also
+defines the snapshot diff and its dated report. It does not add network
+refresh or directory crawling. Those stay in the parent specification.
 
 The implementation is `src/inventory.py`. It does not open the acquisition
 database, contact a network, or write outside the paths that the operator
@@ -23,6 +23,7 @@ existing file. Each command refuses to run if its output path exists.
 | `activate` | accepted snapshot | one line in `activations.jsonl` |
 | `manifest` | snapshot, policy, base URL | manifest directory |
 | `queue` | manifest | queue file plus provenance sidecar |
+| `diff` | two accepted snapshots | diff directory with a dated report |
 
 ## Listing format
 
@@ -208,6 +209,61 @@ checksum. An equal size token does not prove equal bytes.
 The tool does not update any queue in place and does not touch a persisted
 acquisition run.
 
+## Snapshot diff
+
+`diff --old DIR --new DIR --output DIR` compares two accepted snapshots. It
+re-verifies both raw files and refuses a rejected snapshot. The output
+directory must not exist. The tool writes it in a temporary directory and
+renames it.
+
+Every unique path falls into exactly one category:
+
+- `added`: the path is only in the new snapshot.
+- `removed`: the path is only in the old snapshot. A removed path does not
+  authorize local deletion.
+- `metadata_changed`: the path is in both and the size tokens differ.
+- `unchanged`: the path is in both and the size tokens are equal. This means
+  unchanged inventory metadata only. Rounded tokens do not prove equal bytes.
+- `ambiguous`: the path is listed more than once in either snapshot, cannot
+  map safely, or one snapshot has it only in a Unicode-normalization
+  variant of a path that only the other snapshot has. Each item carries its
+  reasons: `duplicate_path_in_old`, `duplicate_path_in_new`, `unsafe_path`,
+  `nfc_equivalent_add_remove`.
+
+The root `ALL_FILES` entry is not a change. The tool counts it apart, because
+the listing file changes with every refresh.
+
+`diff.jsonl` has a header line (both snapshot hashes, parser version, totals)
+and one line per path that is not `unchanged`, sorted by path. It is
+byte-for-byte reproducible. The totals must reconcile: for each snapshot,
+file lines equal unique paths plus duplicate lines plus listing entries, and
+the category counts add up to the union of both path sets. The tool stops with
+an error if they differ. `diff.sha256` holds the SHA-256, and
+`diff.meta.json` holds the generation time. `report.md` is the dated report.
+It gives both snapshot hashes and parse summaries, the category table, a
+per-directory table (first 25 top-level directories), and the reading notes
+above.
+
+## Policy validation against an earlier filter
+
+A policy can be checked against filtered and deferred listings that an
+operator made earlier. Build the manifest from the original listing. Then
+compare the `priority` and `deferred` path sets with those listings. Keep
+case-specific policies in the case directory, not in this repository.
+
+On 2026-09-18 this method reproduced two earlier lists exactly: 3 and 59
+deferred trees gave the same deferred sets as the old files (2,544 and
+147,382 files). The old filter also removed files by extension
+(`.cab .com .dll .exe .iso .lnk .msi .msp .ocx .rpm .scr .sys .url .wc`) and
+by name (`desktop.ini`, `thumbs.db`) outside the deferred trees. The priority
+sets equal the old filtered sets, except that the root `ALL_FILES` entry is
+now rejected. A third list could not be reconciled: its deferred file matched
+no listing.
+
+The extension and name rules are inferred from what the old filter removed.
+They are not the old filter's own definition. Review them before you rely on
+them.
+
 ## Acceptance
 
 Tests use synthetic fixtures only. They must show these conditions:
@@ -224,6 +280,9 @@ Tests use synthetic fixtures only. They must show these conditions:
   zero rejections, and the path agrees with `relative_path()`.
 - No command changes the input listing, an existing snapshot, or an existing
   queue. A tampered manifest blocks queue export.
+- Added, removed, changed-size, duplicate, unsafe, and normalization-variant
+  paths land in the right diff category. The diff totals reconcile, and two
+  runs give the same bytes.
 
 ## Runbook
 
@@ -235,8 +294,11 @@ Tests use synthetic fixtures only. They must show these conditions:
    reasons.
 4. Run `queue`. Start the acquisition separately with a bounded
    `--max-files`.
+5. After you import a newer listing, run `diff` on the old and new
+   snapshots. Read `report.md`, and review every `ambiguous` item.
 
 ## Remaining work
 
-Snapshot diffing, the dated parse/diff report, network refresh, and directory
-crawling are not implemented. They stay in the parent specification.
+Network refresh and directory crawling are not implemented. They stay in the
+parent specification, and they wait for a reliable acquisition workflow and
+the source pilot.

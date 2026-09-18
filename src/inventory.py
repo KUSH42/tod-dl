@@ -612,6 +612,146 @@ def command_queue(args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- snapshot diff
+
+DIFF_CATEGORIES = ("added", "removed", "metadata_changed", "ambiguous", "unchanged")
+
+
+def _load_sizes(snapshot_dir: Path) -> dict:
+    """Read one snapshot into path -> size token, keeping duplicates and unsafe paths apart."""
+    side = {"sizes": {}, "dups": set(), "unsafe": set(), "files": 0, "listing": 0, "dup_lines": 0}
+    with (snapshot_dir / "raw.txt").open("rb") as handle:
+        for entry in ListingParser().parse(handle):
+            path = f"{entry.directory}/{entry.name}" if entry.directory else entry.name
+            side["files"] += 1
+            if path == "ALL_FILES":  # the listing file itself changes with every refresh
+                side["listing"] += 1
+            elif path in side["sizes"]:
+                side["dups"].add(path)
+                side["dup_lines"] += 1
+            else:
+                side["sizes"][path] = entry.size_token
+                if unsafe_path_reason(path, entry.name):
+                    side["unsafe"].add(path)
+    return side
+
+
+def diff_snapshots(old: dict, new: dict) -> tuple[list[dict], dict]:
+    """Classify every path once. Return (records without unchanged, totals)."""
+    counts = dict.fromkeys(DIFF_CATEGORIES, 0)
+    records: list[dict] = []
+    for path in sorted(old["sizes"].keys() | new["sizes"].keys()):
+        before, after = old["sizes"].get(path), new["sizes"].get(path)
+        reasons = []
+        if path in old["dups"]:
+            reasons.append("duplicate_path_in_old")
+        if path in new["dups"]:
+            reasons.append("duplicate_path_in_new")
+        if path in old["unsafe"] or path in new["unsafe"]:
+            reasons.append("unsafe_path")
+        if reasons:
+            category = "ambiguous"
+        elif before is None:
+            category = "added"
+        elif after is None:
+            category = "removed"
+        elif before != after:
+            category = "metadata_changed"
+        else:
+            counts["unchanged"] += 1
+            continue
+        records.append({"type": "item", "path": path, "category": category,
+                        "old_size_token": before, "new_size_token": after, "reasons": reasons})
+    # A name that only changed Unicode normalization is not a real add plus remove.
+    removed = {}
+    for record in records:
+        if record["category"] == "removed":
+            removed.setdefault(unicodedata.normalize("NFC", record["path"]), []).append(record)
+    for record in records:
+        twins = removed.get(unicodedata.normalize("NFC", record["path"])) if record["category"] == "added" else None
+        if twins:
+            for other in (record, *twins):
+                other["category"], other["reasons"] = "ambiguous", ["nfc_equivalent_add_remove"]
+    for record in records:
+        counts[record["category"]] += 1
+    totals = {"old_files": old["files"], "new_files": new["files"],
+              "old_unique_paths": len(old["sizes"]), "new_unique_paths": len(new["sizes"]),
+              "old_duplicate_lines": old["dup_lines"], "new_duplicate_lines": new["dup_lines"],
+              "old_inventory_listing_entries": old["listing"], "new_inventory_listing_entries": new["listing"],
+              "categories": counts}
+    for side in ("old", "new"):
+        if totals[f"{side}_files"] != (totals[f"{side}_unique_paths"] + totals[f"{side}_duplicate_lines"]
+                                       + totals[f"{side}_inventory_listing_entries"]):
+            raise InventoryError(f"diff does not reconcile with the {side} snapshot file count")
+    if sum(counts.values()) != len(old["sizes"].keys() | new["sizes"].keys()):
+        raise InventoryError("diff categories do not cover every path exactly once")
+    return records, totals
+
+
+def _report_markdown(old_meta: dict, new_meta: dict, totals: dict, records: list[dict], sidecar: dict) -> str:
+    def summary(meta):
+        report = meta["report"]
+        return (f"`{meta['sha256']}` ({meta['imported_utc']}): {report['lines']} lines, "
+                f"{report['classes']['file']} files, {report['issue_total']} parse issues")
+    rows = ["| Category | Paths |", "| --- | ---: |"]
+    rows += [f"| {name} | {totals['categories'][name]} |" for name in DIFF_CATEGORIES]
+    by_top: dict[str, dict[str, int]] = {}
+    for record in records:
+        top = record["path"].split("/", 1)[0] if "/" in record["path"] else "(root)"
+        by_top.setdefault(top, {}).setdefault(record["category"], 0)
+        by_top[top][record["category"]] += 1
+    top_rows = sorted(by_top.items(), key=lambda kv: (-sum(kv[1].values()), kv[0]))[:25]
+    lines = [f"# Inventory diff report, {sidecar['generated_utc'][:10]}", "",
+             f"- Old snapshot: {summary(old_meta)}", f"- New snapshot: {summary(new_meta)}",
+             f"- Parser version: {PARSER_VERSION}; tool version: {TOOL_VERSION}", "",
+             "## Totals", "", *rows, "",
+             "## Reading this report", "",
+             "- A removed path does not authorize local deletion.",
+             "- `unchanged` means unchanged inventory metadata. Size tokens are rounded, so an equal token "
+             "does not prove equal bytes.",
+             "- `ambiguous` paths appear more than once in a listing, cannot map safely, or differ only in "
+             "Unicode normalization. Review them by hand.", ""]
+    if top_rows:
+        lines += [f"## Changes by top-level directory (first {len(top_rows)})", "",
+                  "| Directory | Added | Removed | Metadata changed | Ambiguous |", "| --- | ---: | ---: | ---: | ---: |"]
+        for top, cats in top_rows:
+            lines.append(f"| `{top}` | {cats.get('added', 0)} | {cats.get('removed', 0)} | "
+                         f"{cats.get('metadata_changed', 0)} | {cats.get('ambiguous', 0)} |")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def command_diff(args) -> int:
+    old_dir, new_dir, output = Path(args.old), Path(args.new), Path(args.output)
+    old_meta, new_meta = load_snapshot(old_dir), load_snapshot(new_dir)
+    if output.exists():
+        raise InventoryError(f"output exists; not replacing it: {output}")
+    if not output.parent.is_dir():
+        raise InventoryError(f"output parent directory is missing: {output.parent}")
+    records, totals = diff_snapshots(_load_sizes(old_dir), _load_sizes(new_dir))
+    header = {"type": "header", "diff_format": 1, "old_snapshot_sha256": old_meta["sha256"],
+              "new_snapshot_sha256": new_meta["sha256"], "parser_version": PARSER_VERSION, "totals": totals}
+    body = "".join(canonical_json(x) + "\n" for x in (header, *records))
+    sha = hashlib.sha256(body.encode("ascii")).hexdigest()
+    sidecar = {"generated_utc": utc_now().strftime("%Y-%m-%dT%H:%M:%SZ"), "tool_version": TOOL_VERSION,
+               "python": sys.version.split()[0], "old_snapshot_path": str(old_dir),
+               "new_snapshot_path": str(new_dir), "diff_sha256": sha}
+    staging = Path(tempfile.mkdtemp(prefix=".diff-", dir=output.parent))
+    try:
+        write_new(staging / "diff.jsonl", body)
+        write_new(staging / "diff.sha256", f"{sha}  diff.jsonl\n")
+        write_new(staging / "diff.meta.json", pretty_json(sidecar))
+        write_new(staging / "report.md", _report_markdown(old_meta, new_meta, totals, records, sidecar))
+        os.chmod(staging, 0o755)
+        os.rename(staging, output)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)  # staging holds only our own partial output
+        raise
+    print(f"diff: {output}")
+    print(" ".join(f"{k}={v}" for k, v in totals["categories"].items()))
+    return 0
+
+
 # ---------------------------------------------------------------- command line
 
 def build_parser() -> argparse.ArgumentParser:
@@ -632,6 +772,11 @@ def build_parser() -> argparse.ArgumentParser:
     man.add_argument("--base-url", required=True)
     man.add_argument("--output", required=True)
     man.set_defaults(func=command_manifest)
+    dif = sub.add_parser("diff", help="compare two accepted snapshots")
+    dif.add_argument("--old", required=True, help="older accepted snapshot directory")
+    dif.add_argument("--new", required=True, help="newer accepted snapshot directory")
+    dif.add_argument("--output", required=True)
+    dif.set_defaults(func=command_diff)
     que = sub.add_parser("queue", help="export a plain URL queue from a manifest")
     que.add_argument("--manifest", required=True)
     que.add_argument("--output", required=True)

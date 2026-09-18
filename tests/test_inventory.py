@@ -398,5 +398,89 @@ class QueueExportTests(InventoryTestCase):
         self.assertEqual({p: inventory.sha256_file(p) for p in hashes}, hashes)
 
 
+class DiffTests(InventoryTestCase):
+    OLD = (b".:\n\n- 1 gone.txt\n- 1.8M same.bin\n- 1.8M size.bin\n- 5 dup.txt\n- 5 dup.txt\n"
+           b"- 0 ALL_FILES\n- 3 caf\xc3\xa9.txt\n- 9 stays.txt\n")
+    NEW = (b".:\n\n- 1 new.txt\n- 1.8M same.bin\n- 1.9M size.bin\n- 5 dup.txt\n- 2 ALL_FILES\n"
+           b"- 3 cafe\xcc\x81.txt\n- 9 stays.txt\n\nDocs/../x:\n\n- 1 evil\n")
+
+    def snapshots(self, old=None, new=None):
+        one = self.import_snapshot(self.write_listing(old or self.OLD, "old.txt"))
+        shutil.move(str(self.store), str(self.tmp / "store-old"))
+        one = next((self.tmp / "store-old" / "snapshots").iterdir())
+        two = self.import_snapshot(self.write_listing(new or self.NEW, "new.txt"))
+        return one, two
+
+    def run_diff(self, old, new, name="d1"):
+        code, out, err = self.run_cli("diff", "--old", old, "--new", new, "--output", self.tmp / name)
+        self.assertEqual(code, 0, out + err)
+        lines = (self.tmp / name / "diff.jsonl").read_text().splitlines()
+        return json.loads(lines[0]), {r["path"]: r for r in map(json.loads, lines[1:])}
+
+    def test_categories_and_reconciliation(self):
+        old, new = self.snapshots()
+        header, records = self.run_diff(old, new)
+        cats = {p: r["category"] for p, r in records.items()}
+        self.assertEqual(cats["gone.txt"], "removed")
+        self.assertEqual(cats["new.txt"], "added")
+        self.assertEqual(cats["size.bin"], "metadata_changed")
+        self.assertEqual((records["size.bin"]["old_size_token"], records["size.bin"]["new_size_token"]), ("1.8M", "1.9M"))
+        self.assertEqual(cats["dup.txt"], "ambiguous")  # listed twice in the old snapshot
+        self.assertEqual(records["dup.txt"]["reasons"], ["duplicate_path_in_old"])
+        self.assertEqual(cats["Docs/../x/evil"], "ambiguous")
+        self.assertNotIn("same.bin", records)  # unchanged paths are counted, not listed
+        self.assertNotIn("ALL_FILES", records)  # the listing file is excluded, not a change
+        totals = header["totals"]
+        self.assertEqual(totals["categories"]["unchanged"], 2)  # same.bin, stays.txt
+        self.assertEqual(totals["old_files"], 8)
+        self.assertEqual(totals["old_inventory_listing_entries"], 1)
+        self.assertEqual(totals["old_duplicate_lines"], 1)
+
+    def test_unicode_normalization_change_is_ambiguous_not_add_plus_remove(self):
+        old, new = self.snapshots()
+        _, records = self.run_diff(old, new)
+        composed, decomposed = "caf\u00e9.txt", unicodedata.normalize("NFD", "caf\u00e9.txt")
+        for name in (composed, decomposed):
+            self.assertEqual(records[name]["category"], "ambiguous")
+            self.assertEqual(records[name]["reasons"], ["nfc_equivalent_add_remove"])
+
+    def test_equal_rounded_size_is_reported_as_unchanged_metadata_only(self):
+        old, new = self.snapshots()
+        self.run_diff(old, new)
+        report = (self.tmp / "d1" / "report.md").read_text()
+        self.assertIn("unchanged inventory metadata", report)
+        self.assertIn("does not authorize local deletion", report)
+        self.assertIn(inventory.sha256_file(old / "raw.txt"), report)
+
+    def test_diff_is_reproducible_and_leaves_inputs_unchanged(self):
+        old, new = self.snapshots()
+        before = [inventory.sha256_file(p) for p in (old / "raw.txt", new / "raw.txt")]
+        self.run_diff(old, new, "d1")
+        self.run_diff(old, new, "d2")
+        self.assertEqual((self.tmp / "d1" / "diff.jsonl").read_bytes(), (self.tmp / "d2" / "diff.jsonl").read_bytes())
+        self.assertEqual([inventory.sha256_file(p) for p in (old / "raw.txt", new / "raw.txt")], before)
+        self.assertNotIn("generated_utc", (self.tmp / "d1" / "diff.jsonl").read_text())
+
+    def test_identical_snapshots_have_no_changes(self):
+        old, _ = self.snapshots()
+        header, records = self.run_diff(old, old)
+        # Only the path that the listing repeats stays ambiguous; nothing is added, removed, or changed.
+        self.assertEqual(set(records), {"dup.txt"})
+        self.assertEqual(header["totals"]["categories"],
+                         {"added": 0, "removed": 0, "metadata_changed": 0, "ambiguous": 1, "unchanged": 5})
+
+    def test_rejected_snapshot_and_existing_output_are_refused(self):
+        old, new = self.snapshots()
+        self.run_diff(old, new)
+        code, _, err = self.run_cli("diff", "--old", old, "--new", new, "--output", self.tmp / "d1")
+        self.assertEqual(code, 2)
+        page = self.write_listing(b"<html>error</html>\n", "bad.txt")
+        self.run_cli("snapshot", "--input", page, "--store", self.tmp / "bad-store")
+        rejected = next((self.tmp / "bad-store" / "rejected").iterdir())
+        code, _, err = self.run_cli("diff", "--old", old, "--new", rejected, "--output", self.tmp / "d3")
+        self.assertEqual(code, 2)
+        self.assertFalse((self.tmp / "d3").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
