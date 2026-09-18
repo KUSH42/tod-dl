@@ -92,8 +92,12 @@ each cause at the grain the table needs. The outage/retry table below groups
 row, for retry purposes only. "No reliable version protection or expected
 checksum" is not an outage/retry cause. It comes from the Resume and
 representation integrity section instead. Defining the full categorized-error
-value set is future work. This spec requires only that the three
-review_required causes below stay distinguishable in that field.
+value set is future work. This spec requires only that the four
+review_required causes below stay distinguishable in that field. The
+"recorded review code" checked by automatic safe-path remediation in
+[SPEC-download-telemetry.md](SPEC-download-telemetry.md) is this same field,
+not a separate one; `ENAMETOOLONG` (or the legacy `Errno 36`/`File name too
+long` text) is the value it stores for the promotion-failure cause below.
 
 | Terminal state or cause | Field handling |
 | --- | --- |
@@ -102,6 +106,7 @@ review_required causes below stay distinguishable in that field.
 | `review_required` — validation mismatch | Retain the value. |
 | `review_required` — changed remote representation | Clear the value on entry to this state. Detecting the change enters this state directly, per the outage/retry table below. A recorded restart decision is needed only to leave this state and resume under a new staging generation, not to enter it. The cleared value described a representation the record no longer promotes. |
 | `review_required` — no reliable version protection or expected checksum | Clear the value on entry to this state. Unlike the row above, the representation is not known to have changed; it is only unconfirmed. Treat that uncertainty the same as a confirmed change for this field. |
+| `review_required` — promotion blocked by a filesystem name-length failure (`ENAMETOOLONG`) | Retain the value. Entering this state is defined in Validation and finalization below, not the outage/retry table. The failure is a destination-naming problem, not a representation change; the staged bytes remain valid, so nothing needs clearing. |
 | `unavailable`, with a staging generation already recorded | Retain the value. A routine recheck alone never changes the staging generation. The resume transition below states what happens once the item becomes available again. |
 | `unavailable`, with no staging generation recorded | The field has no value to clear, since it was never staged. A later recheck that admits the item as fresh work follows the same admission rule as any newly selected item, in Selection and resource controls below. |
 
@@ -141,6 +146,21 @@ where their meaning remains compatible:
 Separate source availability, item-specific errors, and local failures. Store
 retry deadlines across restarts and avoid retries at multiple policy layers.
 Use one engine attempt per adapter attempt when the adapter owns backoff.
+
+An adapter attempt begins when the adapter starts or resumes an engine job for
+an item and ends when that engine job exits back to the adapter, by
+completion, by failure, or by an adapter-initiated stop. A redirect the engine
+follows, a range-resume the engine performs after its own reconnect, and any
+retry the engine performs under its own internal backoff happen inside one
+engine job; none of them end the attempt or increment the attempt count. The
+attempt count increments only when the adapter starts a new engine job after
+the previous one exited back to it, under the backoff intervals in the table
+below. The outage-recovery probe described later in this section runs outside
+any item's engine job; it does not start, end, or count as an attempt for that
+item, as already stated for the last-measured-total field above. A daily
+404/410 recheck request, described later in this section, is likewise not an
+engine job the adapter starts for active transfer; it does not increment the
+attempt count either.
 
 | Condition | Required policy |
 | --- | --- |
@@ -226,6 +246,13 @@ promotion for a material discrepancy or an obvious error body inconsistent
 with the expected file type. A type check must accept legitimate HTML items
 and unknown binary formats; don't treat every unfamiliar file as corrupt.
 Support genuine zero-byte files through the same success checks.
+
+If creating the final file fails because a destination path component exceeds
+the filesystem's name-length limit (`ENAMETOOLONG`), move the item to
+`review_required` and preserve the staging file as a review candidate, the
+same as any other blocked promotion; record the cause in the field-handling
+table above. Do not retry the same destination path; a name-length failure is
+a naming problem, not a transient one.
 
 Finalize with this crash-recoverable sequence on the same filesystem:
 

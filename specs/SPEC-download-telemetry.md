@@ -281,9 +281,10 @@ unrelated evidence.
 An item is eligible only when all of these conditions hold:
 
 - Its durable status is `review_required`.
-- Its recorded review code is `ENAMETOOLONG`. Legacy rows qualify only when the
-  recorded error unambiguously contains both `Errno 36` and `File name too
-  long`.
+- Its recorded review code — the last categorized error field defined in
+  [SPEC-reliable-acquisition.md](SPEC-reliable-acquisition.md), not a separate
+  field — is `ENAMETOOLONG`. Legacy rows qualify only when the recorded error
+  unambiguously contains both `Errno 36` and `File name too long`.
 - Its recorded staging path is an existing regular file on the approved state
   filesystem.
 - Its recorded SHA-256 is present, and a new SHA-256 pass over staging matches
