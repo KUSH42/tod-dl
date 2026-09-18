@@ -6,9 +6,10 @@ event logs, and structured reports. E01 through E14 ran against the current
 per-URL aria2 candidate; all 14 pass and the engineering targets are met
 (`specs/reports/acquisition-tool-evaluation-2026-09-18c.md`). The separately
 scheduled source pilot ran on 2026-09-18 for one queue of 5 URLs, and all 5
-transferred (`specs/reports/source-pilot-2026-09-18.md`). A resume test on
-one file recorded HTTP 206 with a `Content-Range` header, so the source
-honors Range requests. Queues B and C and a bounded production run are open,
+transferred (`specs/reports/source-pilot-2026-09-18.md`). Resume tests on
+three files (JPEG, PDF, MOV) recorded HTTP 206 with a `Content-Range` header,
+and each resumed file equals a fresh full download, so the source honors Range
+requests. Queues B and C and a bounded production run are open,
 so the specification is not complete. This specification defines how you select an existing transfer tool
 before expanding custom code. It does not authorize a production download.
 

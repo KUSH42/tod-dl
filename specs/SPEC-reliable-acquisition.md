@@ -178,7 +178,10 @@ any item's engine job; it does not start, end, or count as an attempt for that
 item, as already stated for the last-measured-total field above. A daily
 404/410 recheck request, described later in this section, is likewise not an
 engine job the adapter starts for active transfer; it does not increment the
-attempt count either.
+attempt count either. An
+adapter-initiated stop, such as a SIGTERM, a SIGINT, or a run time limit,
+schedules no backoff. The interrupted item is eligible at once when the
+operator restarts the run.
 
 | Condition | Required policy |
 | --- | --- |

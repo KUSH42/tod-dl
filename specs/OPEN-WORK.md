@@ -10,7 +10,7 @@ The controller has durable selected-run state, no-overwrite finalization,
 recovery tests, signed provenance records, telemetry snapshots, and local
 confirmed controls for retry, Tor renewal, pause admission, resume
 admission, drain and stop, and checkpoint and stop. The repository test
-suite runs 321 local tests. These features do not establish compliance
+suite runs 322 local tests. These features do not establish compliance
 with every requirement in the related specifications.
 
 A process-ownership review closed five gaps in this session and the four
@@ -77,8 +77,11 @@ record set verifies, and the raw inventory and snapshot hashes did not change
 returned HTTP 404 for all 5 files, because the base URL in `~/base-url.txt` lacked
 the `/data/` segment. A resume test then interrupted one 2.7 MB transfer at
 1,048,576 bytes and resumed it. The source answered HTTP 206 with
-`Content-Range: bytes 1081344-2745378/2745379`, and the file completed. One gap
-remains open, and it does not block selection:
+`Content-Range: bytes 1081344-2745378/2745379`, and the file completed. A
+follow-up resumed a PDF and a MOV the same way (HTTP 206). Fresh full downloads
+of all three files are byte-identical to the resumed files, and the ETag is the
+same across attempts. The follow-up also removed the 60-second backoff after a
+planned stop. One gap remains open, and it does not block selection:
 
 - Queues B and C, and a bounded production run, have not run. Do not treat
   the candidate as validated for unattended production use until they do.

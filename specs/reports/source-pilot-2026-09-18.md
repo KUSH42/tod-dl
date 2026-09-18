@@ -108,24 +108,40 @@ The count of source URLs stays within the 5-URL bound.
 Both provenance record sets (the stopped run and the resumed run) pass
 `verify_provenance.py`. The SHA-256 of `~/source-listing` is unchanged.
 
-Findings and limits:
-- The source honors Range requests on this file. The result comes from one
-  file of one type (JPEG). It does not cover other files.
-- No source checksum exists, so the test does not prove that the joined bytes
-  equal a single uninterrupted download. The final size equals the total in
-  `Content-Range`. The stopped attempt recorded no ETag, so the test cannot
-  show that the representation stayed the same between the two attempts. A
-  full second download would compare the bytes.
-- A planned stop goes to `retry_wait`, and the first backoff (60 seconds)
-  delays the resume after a restart. `SPEC-reliable-acquisition.md` counts
-  an adapter-initiated stop as an ended attempt, and it does not require an
-  immediate retry. No fix was made. Recommend a review if operators find the
-  wait too long after a planned stop.
+Limits found in this first test, and how a later test closed each one, are in
+the next section.
+
+## Follow-up: limits closed (same day)
+
+The first resume test left four limits. Each one got a check. The follow-up
+used 3 source URLs (JPEG, PDF, MOV), within the 5-URL bound, with separate
+state directories under `~/pilot/`.
+
+| Limit | Result |
+| --- | --- |
+| One file type only | Two more types resumed with HTTP 206: a PDF (`bytes 1048576-1996853/1996854`) and a MOV video (`bytes 1064960-2032622/2032623`). |
+| No proof that joined bytes equal one download | A fresh full download of all 3 files (state `st-full`, HTTP 200) gave files that `cmp` reports byte-identical to the resumed files. Sizes are 2,745,379 (JPEG), 1,996,854 (PDF), and 2,032,623 (MOV). |
+| ETag between attempts unknown | The earlier statement that the stopped attempt recorded no ETag was wrong. The stopped attempt records the response ETag in its provenance event, and the item row keeps it as the resume baseline. For all 3 files, the stopped attempt, the resumed attempt, and the fresh full download show the same ETag (`"6a90132c-29e423"`, `"6a9012fe-1e7836"`, `"6a901377-1f03ef"`). The controller compares the baseline with a fresh probe before it resumes, so a changed ETag would have sent the item to `review_required`. |
+| A planned stop waited 60 seconds | Fixed in `src/tod-dl.py`: a stop schedules no backoff. The PDF and MOV resumes started at once. The whole second run took 33 s and 35 s. |
+
+The fix changes one line in `transfer()`. The delay is 0 when
+`stop_requested` is set, and the attempt still counts, as
+`SPEC-reliable-acquisition.md` requires. The new test
+`test_planned_stop_does_not_delay_the_resume_but_a_source_failure_does` fails
+without the fix (60 s delay) and checks that a real source failure still gets a
+delay longer than 30 s. The full suite has 322 tests. All pass.
+
+All 6 provenance record sets of the follow-up pass `verify_provenance.py`.
+The SHA-256 of `~/source-listing` is unchanged.
+
+Remaining limit: the three files are 2 to 2.7 MB. A much larger file was not
+tested. The queue carried no `sha256=` token, so the byte comparison rests on
+the fresh download, which came from the same source.
 
 ## Required checks
 
-This pass changed no code. `git diff --check` reported no whitespace error in
-the edited documents.
+The follow-up changed `src/tod-dl.py`. Python compile, `bash -n ./run.sh`, the
+full test suite (322 tests, all pass), and `git diff --check` all pass.
 
 ## Not covered
 

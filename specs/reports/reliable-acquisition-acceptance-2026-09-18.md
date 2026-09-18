@@ -99,4 +99,8 @@ the spec is already satisfied (or was overtaken by an earlier edit).
   so no source checksum was compared.
 - A resume test on one file got HTTP 206 with
   `Content-Range: bytes 1081344-2745378/2745379`, and the file completed.
+- A follow-up resumed a PDF and a MOV, and compared all three resumed files
+  with fresh full downloads: all byte-identical, same ETag across attempts.
+  It also fixed the retry delay after a planned stop. Suite: 322 tests, all
+  pass.
 - Still open: queues B and C, and a bounded production run.

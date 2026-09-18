@@ -2649,8 +2649,10 @@ class Downloader:
                 if renewed and self.telemetry:
                     self.telemetry.event("info", "tor", "requested fresh Tor circuits",
                                          url, worker_id)
-            delay = RETRY_DELAYS[min(attempts, len(RETRY_DELAYS) - 1)]
-            outcome = "stopped" if self.stop_requested.is_set() else "retryable_failure"
+            # A planned stop is not a source failure, so it schedules no backoff.
+            stopped = self.stop_requested.is_set()
+            delay = 0 if stopped else RETRY_DELAYS[min(attempts, len(RETRY_DELAYS) - 1)]
+            outcome = "stopped" if stopped else "retryable_failure"
             self.attempt_event(db, url, attempts + 1, attempt_started_at, outcome)
             self.transition(db, url, "retry_wait", error, bytes=size,
                             last_error=error, next_retry_at=time.time() + delay)

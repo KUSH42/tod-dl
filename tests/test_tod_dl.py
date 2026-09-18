@@ -2193,6 +2193,34 @@ class AcquisitionFaultRecoveryTests(unittest.TestCase):
             self.assertEqual(self.selected_urls(db), [self.url])
             db.close()
 
+    def test_planned_stop_does_not_delay_the_resume_but_a_source_failure_does(self):
+        # A stop is the operator's choice, not a sign of a bad source. Backing
+        # off after it would only make the restarted run idle for no reason.
+        with FaultRoot() as root:
+            downloader, db, _queue = self.make_controller(root)
+            engine = LocalFakeTransferEngine(self.payload)
+            staging = downloader.staging_path(self.url)
+
+            def stopped_by_shutdown(*_):
+                engine.partial(staging)
+                downloader.stop_requested.set()
+                return False, "run time limit or stop requested"
+
+            downloader.run_aria2 = stopped_by_shutdown
+            self.assertEqual(downloader.transfer(downloader.next_pending(db), db), "failed")
+            stopped_retry_at = db.execute("SELECT next_retry_at FROM downloads WHERE url=?",
+                                          (self.url,)).fetchone()[0]
+            self.assertLessEqual(stopped_retry_at, time.time())
+            downloader.update(db, "UPDATE downloads SET status='queued', next_retry_at=0 "
+                                  "WHERE url=?", (self.url,))
+            downloader.stop_requested.clear()
+            downloader.run_aria2 = lambda *_: (False, "errorCode=1 fixture source failure")
+            downloader.transfer(downloader.next_pending(db), db)
+            failed_retry_at = db.execute("SELECT next_retry_at FROM downloads WHERE url=?",
+                                         (self.url,)).fetchone()[0]
+            self.assertGreater(failed_retry_at, time.time() + 30)
+            db.close()
+
     def run_with_time_limit(self, root: Path, time_limit: float, ticking_clock: bool = False):
         queue = root / "queue.txt"
         queue.write_text(self.url + "\n", encoding="utf-8")
