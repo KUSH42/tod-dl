@@ -104,6 +104,11 @@ against the schema; `close_reason`, attempt `outcome`, and candidate reasons
 used values outside the specified enums; no `local_failure` event existed; and
 a staging-cleanup error moved a completed item to `review_required`.
 
+The `retry_access_denied` controller action returns an `access_denied` review
+item to `queued` and ends the origin pause. The monitor's Queue tab binds it to
+`A` for a `review_required` row. `resume_new_generation` still has no monitor
+keybinding.
+
 Still open before the two specs can become `implemented`:
 
 - `candidate_created` never records `unsafe_path` or `promotion_error`.

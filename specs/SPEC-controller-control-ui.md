@@ -224,8 +224,8 @@ against an already-torn-down default screen during app shutdown, raising
 Row-scoped queue actions now have Pilot-level interaction tests in
 `QueueRowScopedActionInteractionTests` (`tests/test_monitor_interaction.py`),
 driving a real `ControlServer` and `InspectionServer` over temporary
-sockets: `retry_now`, `exclude_item`, `set_item_priority`, and
-`set_retry_cooldown` each confirm the row-scoped `item_ids` sent to the
+sockets: `retry_now`, `exclude_item`, `retry_access_denied`,
+`set_item_priority`, and `set_retry_cooldown` each confirm the row-scoped `item_ids` sent to the
 executor matches only the focused row, and one test confirms a bucket
 filter that hides a second selected item does not widen that scope.
 

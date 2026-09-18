@@ -123,7 +123,7 @@ transfer with a recorded ETag or Last-Modified baseline) a changed or
 unconfirmed remote representation. Use `--status` to list `review_required`
 items and read each item's `review_code` and `last_error`.
 
-Three row-scoped actions apply to a `review_required` item, both durable and
+Three row-scoped actions apply to a `review_required` item. Each is durable and
 confirmed before the controller applies them:
 
 - `exclude_item` durably moves the item to `excluded`. It leaves every other
@@ -143,8 +143,10 @@ confirmed before the controller applies them:
   HTTP 401 or 403). It returns the item to `queued` and keeps its staged
   bytes, attempts, and staging generation. The origin pause ends when no
   other `access_denied` item of that origin remains. A repeated 401 or 403
-  pauses the origin again. It is controller-API-only; `src/monitor.py` has no
-  keybinding for it.
+  pauses the origin again. In the monitor's Queue tab (`src/monitor.py
+  --control`), select the item and press `A`, then confirm. The key is
+  offered only for a row in the `review_required` bucket; the controller
+  still rejects an item with any other review code.
 
 ## Resume a run
 

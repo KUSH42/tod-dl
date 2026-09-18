@@ -843,6 +843,35 @@ class QueueRowScopedActionInteractionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(commands[0]["action"], "exclude_item")
             self.assertEqual(commands[0]["parameters"]["item_ids"], [item_id_for(first)])
 
+    async def test_row_scoped_retry_access_denied_sends_only_the_focused_denied_item(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = build_item_database(root)
+            first, second = "http://a.onion/first.bin", "http://a.onion/second.bin"
+            insert_item(database, first, 1, "first.bin", status="queued")
+            insert_item(database, second, 2, "second.bin", status="review_required",
+                        review_code="access_denied")
+            commands = []
+            app = self.make_queue_app(
+                root, database,
+                lambda request: commands.append(request) or {"outcome": "completed"})
+            async with app.run_test() as pilot:
+                pane = await self.open_queue_tab(pilot, 0)
+                self.assertEqual(pane.selected_item_id, item_id_for(first))
+                await pilot.press("A")
+                await pilot.pause(0.2)
+                self.assertNotEqual(app.screen.__class__.__name__, "ActionConfirmation")
+                pane = await self.open_queue_tab(pilot, 1)
+                self.assertEqual(pane.selected_item_id, item_id_for(second))
+                await pilot.press("A")
+                await pilot.pause(0.2)
+                self.assertEqual(app.screen.__class__.__name__, "ActionConfirmation")
+                await pilot.press("y")
+                await pilot.pause(0.2)
+            self.assertEqual(len(commands), 1)
+            self.assertEqual(commands[0]["action"], "retry_access_denied")
+            self.assertEqual(commands[0]["parameters"]["item_ids"], [item_id_for(second)])
+
     async def test_row_scoped_priority_raise_sends_only_the_focused_item(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

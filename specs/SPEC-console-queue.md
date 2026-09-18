@@ -197,9 +197,9 @@ restore the queue's filter, page, selection, and scroll position.
 Retry rows must show the recorded UTC deadline and a local countdown when
 freshness permits, applying the console's five-second stale and 15-second
 disconnected rules. At zero, show **Eligible; awaiting controller**.
-Freeze countdowns when stale. This release has no controller mechanism to
-re-admit an exhausted or review-required item, so the view must always show
-those buckets as not eligible, never a countdown.
+Freeze countdowns when stale. The `retry_access_denied` action can re-admit an access-denied review item,
+but no controller mechanism re-admits an exhausted item. The view must always
+show those buckets as not eligible, never a countdown.
 Global or origin cooldown can delay an eligible item; show
 **Eligible; cooldown active** instead of **Eligible; awaiting controller**.
 
@@ -212,7 +212,11 @@ implemented, bound to `x` in the queue pane. Reordering is implemented, bound
 to `]` (raise) and `[` (lower) in the queue pane. Queue editing is
 implemented, bound to `}` (raise) and `{` (lower) in the queue pane, in
 30-second steps within the controller-defined bounds. Export is implemented,
-bound to `e` in the queue pane. All five are scoped as follows.
+bound to `e` in the queue pane. All five are scoped as follows. Retrying an
+access-denied item is implemented as a sixth row-scoped action, bound to `A` in
+the queue pane. It sends `retry_access_denied` with `item_ids` limited to the
+focused row, and the key is offered only for a `review_required` row. The
+controller alone validates the `access_denied` review code.
 
 Row-scoped retry sends the existing `retry_now` action with an `item_ids`
 parameter limited to the focused or multi-selected rows, instead of every

@@ -804,6 +804,10 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
                 message = (f"Exclude {self.item_count} selected item(s)?\n"
                            "This stops future admission and retry for them. It cannot "
                            "be undone in this release and does not change queue rank.")
+            elif self.action == "retry_access_denied":
+                message = (f"Retry {self.item_count} selected access-denied item(s)?\n"
+                           "This returns them to queued and lifts the origin pause. "
+                           "A repeated 401 or 403 pauses the origin again.")
             elif self.action == "pause_admission":
                 message = ("Pause admission of new transfers?\n"
                            "Active transfers keep running; nothing new is admitted "
@@ -1208,6 +1212,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             Binding("g", "first_page", "First page", show=False),
             Binding("R", "prepare_retry_selected", "Retry row", show=True),
             Binding("x", "prepare_exclude_selected", "Exclude row", show=True),
+            Binding("A", "prepare_retry_access_denied_selected", "Retry denied row", show=True),
             Binding("right_square_bracket", "prepare_raise_priority_selected",
                    "Raise priority", show=True),
             Binding("left_square_bracket", "prepare_lower_priority_selected",
@@ -1501,6 +1506,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             self.app.notify(
                 "/ search   Enter apply   Escape cancel   PageUp/PageDown page   "
                 "Enter opens item details   R retry row   x exclude row   "
+                "A retry access-denied row   "
                 "] raise priority   [ lower priority   } raise cooldown   "
                 "{ lower cooldown   e export queue   l logs   "
                 "c clear filters   f refresh results   g first page",
@@ -1521,6 +1527,22 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             actual excludable state at execution time.
             """
             return bool(control and state and self.selected_item_id)
+
+        def retry_access_denied_selected_eligible(self) -> bool:
+            """Return whether the focused row is offered for an access-denied retry.
+
+            Eligibility is advisory only; the controller validates the item's
+            actual `access_denied` review state at execution time.
+            """
+            if not (control and state and self.selected_item_id):
+                return False
+            row = next((row for row in self.rows if row["item_id"] == self.selected_item_id), None)
+            return bool(row and row.get("bucket") == "review_required")
+
+        def action_prepare_retry_access_denied_selected(self) -> None:
+            if not self.retry_access_denied_selected_eligible():
+                return
+            self.app.prepare_row_scoped_retry_access_denied(self.selected_item_id)
 
         def action_prepare_retry_selected(self) -> None:
             if not self.retry_selected_eligible():
@@ -1666,6 +1688,9 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             if action == "prepare_retry_selected" and not self.retry_selected_eligible():
                 return None
             if action == "prepare_exclude_selected" and not self.exclude_selected_eligible():
+                return None
+            if (action == "prepare_retry_access_denied_selected"
+                    and not self.retry_access_denied_selected_eligible()):
                 return None
             if action == "prepare_raise_priority_selected" and not self.priority_selected_eligible(1):
                 return None
@@ -2116,6 +2141,12 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
                 return
             self.pending_item_ids = [item_id]
             self.prepare_action("exclude_item", {"item_ids": [item_id]})
+
+        def prepare_row_scoped_retry_access_denied(self, item_id: str) -> None:
+            if not (control and state):
+                return
+            self.pending_item_ids = [item_id]
+            self.prepare_action("retry_access_denied", {"item_ids": [item_id]})
 
         def prepare_row_scoped_priority(self, item_id: str, priority: int) -> None:
             if not (control and state):
