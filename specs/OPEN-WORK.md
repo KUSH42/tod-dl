@@ -126,9 +126,41 @@ Complete the monitor and control UI. Add the planned Errors / review tab.
 Inventory discovery is partly done. `src/inventory.py` implements local
 snapshot parsing, reproducible manifest generation, safe queue export, and
 snapshot diffing with a dated report (`SPEC-inventory-snapshot-manifest.md`,
-implemented). Still open: bounded network refresh and directory discovery.
-Add those only after the basic acquisition workflow is reliable and the
-source pilot is done.
+implemented). A real 1,012,909-line listing parsed with 0 issues, and two
+manifest runs gave identical bytes.
+
+Still open in inventory discovery:
+
+- Network refresh and directory discovery are not built. Add them only after
+  the basic acquisition workflow is reliable and the source pilot is done.
+  Scheduled refresh waits for both.
+- The `diff` command does not produce a candidate queue or candidate manifest
+  from the `added` and `metadata_changed` paths. The parent specification
+  requires new items to become candidate manifest items.
+- Neither the manifest nor the queue export can carry an expected checksum.
+  The queue reader accepts a `sha256=` token, but no source of checksums
+  exists in the inventory tools yet. The rescan specification needs one for
+  checksum verification.
+- The parser splits on `\n`. A file name that contains a newline is split
+  into fragments that the parser can misread as valid entries. The parser
+  cannot detect this case from the text alone.
+- A manifest flags only the later item of a Unicode-normalization collision.
+  The earlier item has no flag. The diff flags both.
+- Memory use grows with the number of unique paths. The `diff` command used
+  316 MB for two lists of about 450,000 files. The 1 GiB snapshot limit does
+  not bound this. Measure a larger listing before you raise the limit.
+- The reject rules in a policy that an operator derived from an earlier
+  filter are inferred from what that filter removed. An operator must review
+  them. One earlier deferred list matched no listing, so it has no policy.
+  Find its source before you derive one.
+- `queue --generation` is opt-in. A new `generation=` value starts early
+  rechecks in the downloader. Decide whether a default value (for example a
+  snapshot hash prefix) is wanted.
+- Nobody has reviewed `SPEC-inventory-snapshot-manifest.md` in a fresh
+  spec-review pass. It has only the author's checks and its tests.
+- The test `test_row_scoped_resume_new_generation_sends_only_the_focused_review_item`
+  failed once in one full run and passed alone and in the other runs. The
+  cause is not found. It is probably a timing flake in the headless UI test.
 
 Add on-demand target-directory rescan after inventory discovery. It
 reconciles files already in the target directory against the inventory
@@ -149,15 +181,13 @@ exist yet; that is the remaining "review view" work, not a dashboard rename.
 
 The current specification status is grouped below.
 
-- Implemented: `SPEC-tor-circuit-recovery.md`, worker details, and item
-  details.
+- Implemented: `SPEC-tor-circuit-recovery.md`, worker details, item
+  details, and `SPEC-inventory-snapshot-manifest.md`.
 - Partially implemented: acquisition tool evaluation, acquisition fault
   recovery, provenance, console UI, controller controls, download telemetry,
-  reliable acquisition, queue view, console visual style, and console
-  inspection.
-- Implemented (new): `SPEC-inventory-snapshot-manifest.md`.
-- Partially implemented (new): inventory discovery.
-- Planned: target-directory rescan.
+  reliable acquisition, queue view, console visual style, console
+  inspection, and inventory discovery.
+- Planned: target-directory rescan. Its input manifest now exists.
 
 ## Next steps
 
