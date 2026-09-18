@@ -763,7 +763,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
         BINDINGS = [("y", "confirm", "Yes"), ("n", "dismiss", "No"),
                     ("escape", "dismiss", "Cancel")]
 
-        CSS = """
+        DEFAULT_CSS = """
         ActionConfirmation {
             align: center middle;
         }
@@ -837,7 +837,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
         """Prompt for a local file path; triggers no controller action."""
         BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
 
-        CSS = """
+        DEFAULT_CSS = """
         ExportDestination {
             align: center middle;
         }
@@ -878,7 +878,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
                     Binding("u", "disabled_control", show=False),
                     Binding("d", "disabled_control", show=False),
                     Binding("k", "disabled_control", show=False)]
-        CSS = "#item-details { height: 1fr; overflow-y: auto; }"
+        DEFAULT_CSS = "#item-details { height: 1fr; overflow-y: auto; }"
 
         def __init__(self, run_id: str, item_id: str) -> None:
             super().__init__()
@@ -1045,7 +1045,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
                     Binding("u", "disabled_control", show=False),
                     Binding("d", "disabled_control", show=False),
                     Binding("k", "disabled_control", show=False)]
-        CSS = "#worker-details { height: 1fr; overflow-y: auto; }"
+        DEFAULT_CSS = "#worker-details { height: 1fr; overflow-y: auto; }"
 
         def __init__(self, run_id: str, session_id: str, worker_id: int,
                      dashboard_revision: Any) -> None:
@@ -1216,7 +1216,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             Binding("l", "logs", "Logs"),
             Binding("question_mark", "help", "Help", show=True),
         ]
-        CSS = """
+        DEFAULT_CSS = """
         QueuePane { height: 1fr; }
         #queue-filters { height: 3; }
         #queue-filters Select { width: 26; }
@@ -1680,7 +1680,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             self.current = snapshot
             self.inspection_request_active = False
 
-        CSS = """
+        DEFAULT_CSS = """
         #activity-pane {
             height: 1fr;
             min-height: 5;
