@@ -1827,15 +1827,27 @@ class Downloader:
         if not ok or not staging.exists() or control.exists():
             size = staging.stat().st_size if staging.exists() else 0
             if staging.exists() and size > 0 and is_incomplete_body_failure(error):
-                self.attempt_event(db, url, attempts + 1, attempt_started_at,
-                                   "validation_failed")
-                candidate = self.move_candidate(staging)
-                self.candidate_event(url, staging, candidate, None, "incomplete_body")
-                self.transition(db, url, "review_required", error,
-                                bytes=candidate.stat().st_size, last_error=error)
-                self.clear_transfer_telemetry(url)
-                print(f"[review] {rel}: incomplete transfer: {error}", flush=True)
-                return "review"
+                prior = db.execute("SELECT bytes, last_error FROM downloads WHERE url=?",
+                                   (url,)).fetchone()
+                prior_bytes, prior_error = prior if prior else (None, None)
+                stalled = (prior_error is not None and is_incomplete_body_failure(prior_error)
+                           and prior_bytes is not None and size <= prior_bytes)
+                if stalled:
+                    self.attempt_event(db, url, attempts + 1, attempt_started_at,
+                                       "validation_failed")
+                    candidate = self.move_candidate(staging)
+                    self.candidate_event(url, staging, candidate, None, "incomplete_body")
+                    self.transition(db, url, "review_required", error,
+                                    bytes=candidate.stat().st_size, last_error=error)
+                    self.clear_transfer_telemetry(url)
+                    print(f"[review] {rel}: incomplete transfer: {error}", flush=True)
+                    return "review"
+                # A first incomplete-body failure, or one that grew past the
+                # prior one, may be a resumable mid-transfer cut rather than a
+                # genuinely short body: aria2 reports both identically
+                # (errorCode=1 "Got EOF from the server"), so retry once with
+                # --continue=true and only give up when a retry makes no
+                # further progress.
             if is_connectivity_failure(error):
                 with self.cooldown_lock:
                     self.cooldown_until = max(self.cooldown_until,

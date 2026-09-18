@@ -20,9 +20,16 @@ completion timestamps from `download_transitions` via `read_transitions`
 E02, E05, E06, E10, or E13 was run as part of this work; a later evaluation
 report must run them, per
 [the acquisition tool evaluation specification](SPEC-acquisition-tool-evaluation.md).
-E02 is expected to fail as built, per Section 1's resolved note: a
-mid-transfer connection cut is routed to `review_required`, foreclosing
-resume, and that controller-side gap stays out of this specification's scope.
+Section 1's `is_incomplete_body_failure()` gap is fixed outside this
+specification's scope, after this specification's implementation date:
+`Downloader.transfer()` (`src/tod-dl.py`) now retries a first
+"Got EOF from the server" failure through the normal `retry_wait` path
+instead of routing it straight to `review_required`, so a resumable
+mid-transfer cut can complete via `--continue=true` on the next attempt. It
+gives up to `review_required` only when a retry's incomplete-body failure
+shows no growth in staged bytes since the prior one, which is the signal for
+a genuinely short body. E02 is expected to pass as built; rerun it to
+confirm.
 
 ## Outcome and scope
 

@@ -1393,12 +1393,44 @@ class AcquisitionFaultRecoveryTests(unittest.TestCase):
             self.assertEqual(self.selected_urls(db), [self.url])
             db.close()
 
-    def test_incomplete_body_blocks_promotion_and_retains_review_candidate(self):
+    def test_incomplete_body_retries_once_before_review(self):
+        """A single EOF failure may be a resumable mid-transfer cut; retry it."""
         with FaultRoot() as root:
             downloader, db, _ = self.make_controller(root)
             engine = LocalFakeTransferEngine(self.payload)
             staging = downloader.staging_path(self.url)
             downloader.run_aria2 = lambda *_: engine.incomplete_body(staging)
+            self.assertEqual(downloader.transfer(downloader.next_pending(db), db), "failed")
+            row = db.execute("SELECT status, last_error FROM downloads WHERE url=?",
+                             (self.url,)).fetchone()
+            self.assertEqual(row[0], "retry_wait")
+            self.assertIn("Got EOF from the server", row[1])
+            self.assertTrue(staging.exists())  # kept in place for --continue=true
+            self.assertFalse(list(downloader.candidates.glob("*")))
+            db.close()
+
+    def test_incomplete_body_resumes_to_completion_on_retry(self):
+        """Growth on the retry means the cut was resumable, not a short body."""
+        with FaultRoot() as root:
+            downloader, db, _ = self.make_controller(root)
+            engine = LocalFakeTransferEngine(self.payload)
+            staging = downloader.staging_path(self.url)
+            downloader.run_aria2 = lambda *_: engine.incomplete_body(staging)
+            self.assertEqual(downloader.transfer(downloader.next_pending(db), db), "failed")
+            downloader.reset_retry_now(db)
+            downloader.run_aria2 = lambda *_: engine.complete(staging)
+            self.assertEqual(downloader.transfer(downloader.next_pending(db), db), "complete")
+            db.close()
+
+    def test_incomplete_body_blocks_promotion_and_retains_review_candidate(self):
+        """No growth on the retry means a genuinely short body; give up to review."""
+        with FaultRoot() as root:
+            downloader, db, _ = self.make_controller(root)
+            engine = LocalFakeTransferEngine(self.payload)
+            staging = downloader.staging_path(self.url)
+            downloader.run_aria2 = lambda *_: engine.incomplete_body(staging)
+            self.assertEqual(downloader.transfer(downloader.next_pending(db), db), "failed")
+            downloader.reset_retry_now(db)
             self.assertEqual(downloader.transfer(downloader.next_pending(db), db), "review")
             row = db.execute("SELECT status, last_error FROM downloads WHERE url=?",
                              (self.url,)).fetchone()

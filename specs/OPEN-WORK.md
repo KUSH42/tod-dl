@@ -27,13 +27,16 @@ candidate, and transitions the item to `review_required` instead of
 `retry_wait`; `read_queues()` now takes an `on_reject` callback, and
 `import_queues` uses it to print a `[queue-rejected] <url>: <reason>` line
 for an invalid URL and for a duplicate URL. The fixture-driven E08/E12
-scenarios in the evaluation report have not been rerun against the fix. E02,
-E05, E06, E10, and E13 did not run and still need their own infrastructure
-(an 8 GiB fixture pass, a process-kill injection harness, controller
-failpoints, a one-million-row queue generator with an RSS/latency sampler,
-and concurrency-timing assertions). Rerun E08 and E12 against the fixture
-harness, build the remaining scenario infrastructure, and rerun all 14
-before selecting a configuration. Add a long-lived RPC worker only when the
+scenarios in the evaluation report have not been rerun against the fix. The
+infrastructure for E02, E05, E06, E10, and E13 is now built
+(`specs/SPEC-acquisition-evaluation-infrastructure.md`), but none of the five
+has run yet. E02's own controller-side gap — `is_incomplete_body_failure()`
+routing a resumable mid-transfer cut straight to `review_required` — is also
+fixed: `Downloader.transfer()` now retries a first incomplete-body failure
+through `retry_wait` and gives up to `review_required` only when a retry
+shows no growth in staged bytes. Rerun E08 and E12 against the fixture
+harness, run E02, E05, E06, E10, and E13, and rerun all 14 before selecting a
+configuration. Add a long-lived RPC worker only when the
 results show a mandatory scheduling, recovery, or resource gap. Do not run a
 source pilot until the evaluation selects a configuration.
 
