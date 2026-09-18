@@ -106,8 +106,6 @@ a staging-cleanup error moved a completed item to `review_required`.
 
 Still open before the two specs can become `implemented`:
 
-- No controller action returns an `access_denied` item to `queued`. The origin
-  pause therefore ends only when the operator excludes the item.
 - `candidate_created` never records `unsafe_path` or `promotion_error`.
 - The writer rejects user-info URLs only. Queue import does not reject them,
   and no rule exists for query values that grant access.

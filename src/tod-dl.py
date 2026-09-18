@@ -883,6 +883,7 @@ class Downloader:
                 "get_control_state": "available",
                 "retry_now": "available",
                 "exclude_item": "available",
+                "retry_access_denied": "available",
                 "set_item_priority": "available",
                 "set_retry_cooldown": "available",
                 "renew_tor_circuits": "available" if renewal_available else "unavailable",
@@ -904,6 +905,8 @@ class Downloader:
             return self.control_exclude_item(db, request)
         if request.get("action") == "resume_new_generation":
             return self.control_resume_new_generation(db, request)
+        if request.get("action") == "retry_access_denied":
+            return self.control_retry_access_denied(db, request)
         if request.get("action") == "set_item_priority":
             return self.control_set_item_priority(db, request)
         if request.get("action") == "set_retry_cooldown":
@@ -1126,6 +1129,81 @@ class Downloader:
             self.projection.set_revision(revision)
         if self.telemetry:
             self.telemetry.event("info", "control", "resume new generation accepted")
+        return {"outcome": "completed", "reason": reason, "state_revision": revision,
+                "items": item_outcomes}
+
+    def control_retry_access_denied(self, db: sqlite3.Connection,
+                                    request: dict[str, object]) -> dict[str, object]:
+        """Durably return selected `access_denied` review items to `queued`.
+
+        The operator decides that access is restored. The item keeps its
+        attempts, bytes, validators, and staging generation, so the next
+        attempt resumes the same staged bytes. A repeated 401 or 403 moves the
+        item back to `review_required` and pauses its origin again."""
+        request_id = request["request_id"]
+        session_id = request["session_id"]
+        if not isinstance(request_id, str) or not isinstance(session_id, str):
+            return {"outcome": "rejected", "reason": "invalid control request"}
+        parameters = request.get("parameters")
+        item_ids = parameters.get("item_ids") if isinstance(parameters, dict) else None
+        if (not isinstance(item_ids, list) or not item_ids
+                or not all(isinstance(item_id, str) and item_id for item_id in item_ids)):
+            return {"outcome": "rejected", "reason": "item_ids must be a non-empty list of strings"}
+        with self.db_lock:
+            existing = db.execute("SELECT outcome, reason, state_revision FROM control_requests "
+                                  "WHERE request_id=?", (request_id,)).fetchone()
+            if existing:
+                outcome, reason, revision = existing
+                return {"outcome": outcome, "reason": reason, "state_revision": revision}
+            selected_rows = db.execute(
+                "SELECT downloads.url, downloads.status, downloads.attempts, downloads.bytes, "
+                "downloads.next_retry_at, downloads.last_error, downloads.review_code "
+                "FROM downloads JOIN run_items "
+                "ON run_items.url=downloads.url WHERE run_items.run_id=?",
+                (self.run_id,),
+            ).fetchall()
+            by_id = {self.item_id(row[0]): row for row in selected_rows}
+            item_outcomes: dict[str, str] = {}
+            changed_rows = []
+            for item_id in item_ids:
+                row = by_id.get(item_id)
+                if row is None:
+                    item_outcomes[item_id] = "rejected: item is outside the selected set"
+                elif row[1] != "review_required" or row[6] != "access_denied":
+                    item_outcomes[item_id] = (
+                        f"rejected: item is in {row[1]}, not an access-denied review")
+                else:
+                    item_outcomes[item_id] = "returned to queued"
+                    changed_rows.append(row)
+            urls = [row[0] for row in changed_rows]
+            if urls:
+                placeholders = ",".join("?" * len(urls))
+                db.execute(
+                    f"UPDATE downloads SET status='queued', review_code=NULL, last_error=NULL, "
+                    f"next_retry_at=0, updated_at=? WHERE url IN ({placeholders})",
+                    (now(), *urls),
+                )
+            reason = f"retried {len(changed_rows)} of {len(item_ids)} requested access-denied item(s)"
+            db.execute("INSERT INTO download_transitions "
+                       "(url, run_id, from_status, to_status, detail, recorded_at) "
+                       "VALUES (?, ?, ?, ?, ?, ?)",
+                       ("__control__", self.run_id, "control", "control", reason, now()))
+            revision = self.advance_telemetry_revision(db)
+            db.execute("INSERT INTO control_requests "
+                       "(request_id, run_id, session_id, action, outcome, reason, "
+                       "state_revision, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                       (request_id, self.run_id, session_id, "retry_access_denied",
+                        "completed", reason, revision, now()))
+            db.commit()
+        for url, status, attempts, byte_count, retry_at, error, _review_code in changed_rows:
+            old = {"url": url, "status": status, "attempts": attempts,
+                   "bytes": byte_count, "next_retry_at": retry_at, "last_error": error}
+            new = dict(old, status="queued", next_retry_at=0, last_error=None)
+            self.apply_projection_change(old, new, revision)
+        if self.projection and not changed_rows:
+            self.projection.set_revision(revision)
+        if self.telemetry:
+            self.telemetry.event("info", "control", "retry access denied accepted")
         return {"outcome": "completed", "reason": reason, "state_revision": revision,
                 "items": item_outcomes}
 

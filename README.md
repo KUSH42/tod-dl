@@ -123,7 +123,7 @@ transfer with a recorded ETag or Last-Modified baseline) a changed or
 unconfirmed remote representation. Use `--status` to list `review_required`
 items and read each item's `review_code` and `last_error`.
 
-Two row-scoped actions apply to a `review_required` item, both durable and
+Three row-scoped actions apply to a `review_required` item, both durable and
 confirmed before the controller applies them:
 
 - `exclude_item` durably moves the item to `excluded`. It leaves every other
@@ -139,6 +139,12 @@ confirmed before the controller applies them:
   for it yet. Drive it with the same confirmed request/response protocol the
   monitor uses (`prepare_confirmation` then the action with its returned
   `nonce`), addressed to the run's control socket.
+- `retry_access_denied` applies only to an `access_denied` review item (an
+  HTTP 401 or 403). It returns the item to `queued` and keeps its staged
+  bytes, attempts, and staging generation. The origin pause ends when no
+  other `access_denied` item of that origin remains. A repeated 401 or 403
+  pauses the origin again. It is controller-API-only; `src/monitor.py` has no
+  keybinding for it.
 
 ## Resume a run
 

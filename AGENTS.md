@@ -80,8 +80,9 @@ The monitor can request `retry_now`, `renew_tor_circuits`, `pause_admission`,
 `resume_admission`, `drain_and_stop`, `checkpoint_stop`, and the row-scoped
 `exclude_item`, `set_item_priority`, and `set_retry_cooldown` only after user
 confirmation. The controller also accepts `resume_new_generation` for a
-`review_required` item flagged by a changed remote representation, but no
-monitor keybinding exists for it yet. A Tor renewal affects future streams.
+`review_required` item flagged by a changed remote representation, and
+`retry_access_denied` for an `access_denied` review item. No monitor
+keybinding exists for either yet. A Tor renewal affects future streams.
 It must not change active transfers or claim that Tor selected a new route.
 `drain_and_stop` and `checkpoint_stop` end the run and cannot be undone;
 `drain_and_stop` lets active transfers reach a durable state first,

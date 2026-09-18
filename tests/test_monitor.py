@@ -616,6 +616,31 @@ class MonitorTests(unittest.TestCase):
             finally:
                 server.stop()
 
+    def test_retry_access_denied_requires_item_ids_and_binds_the_confirmed_scope(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            commands = []
+            server = ControlServer(root, "run-one", "session-one", lambda: {},
+                                   lambda request: commands.append(request) or {
+                                       "outcome": "completed", "reason": "retried",
+                                       "state_revision": 7,
+                                   })
+            server.start()
+            try:
+                with self.assertRaisesRegex(ControlError, "item_ids must be"):
+                    control_request(root, "run-one", "prepare_confirmation",
+                                    {"action": "retry_access_denied"})
+                prepared = control_request(
+                    root, "run-one", "prepare_confirmation",
+                    {"action": "retry_access_denied", "item_ids": ["a"]})["confirmation"]
+                self.assertIn("1 selected item(s)", prepared["scope"])
+                control_request(root, "run-one", "retry_access_denied",
+                                {"nonce": prepared["nonce"],
+                                 "confirmation": "retry_access_denied", "item_ids": ["b", "c"]})
+                self.assertEqual(commands[0]["parameters"]["item_ids"], ["a"])
+            finally:
+                server.stop()
+
     def test_tor_renewal_requires_confirmation_and_replays_request_id(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

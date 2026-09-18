@@ -1434,6 +1434,53 @@ class AcquisitionFaultRecoveryTests(unittest.TestCase):
             self.assertEqual(downloader.next_pending(db)[0], denied)
             db.close()
 
+    def test_retry_access_denied_action_lifts_the_origin_pause_and_rejects_other_states(self):
+        denied = "https://denied.test/first/data/a.bin"
+        same_origin = "https://denied.test/first/data/b.bin"
+        with FaultRoot() as root:
+            downloader, db, queue = self.make_controller(root, [denied, same_origin], max_files=2)
+            downloader.update(db, "UPDATE downloads SET status='review_required', attempts=2, "
+                              "review_code='access_denied', last_error='status=403' WHERE url=?",
+                              (denied,))
+            db.commit()
+            self.assertIsNone(downloader.next_pending(db))
+            denied_id = downloader.item_id(denied)
+            queued_id = downloader.item_id(same_origin)
+            response = downloader.control_retry_access_denied(db, {
+                "request_id": "req-1", "session_id": "sess-1",
+                "parameters": {"item_ids": [denied_id, queued_id, "missing"]},
+            })
+            self.assertEqual(response["outcome"], "completed")
+            self.assertEqual(response["items"][denied_id], "returned to queued")
+            self.assertIn("rejected: item is in queued", response["items"][queued_id])
+            self.assertIn("outside the selected set", response["items"]["missing"])
+            row = db.execute("SELECT status, review_code, last_error, attempts FROM downloads "
+                             "WHERE url=?", (denied,)).fetchone()
+            self.assertEqual(row, ("queued", None, None, 2))
+            self.assertIsNotNone(downloader.next_pending(db))
+            replay = downloader.control_retry_access_denied(db, {
+                "request_id": "req-1", "session_id": "sess-1",
+                "parameters": {"item_ids": [denied_id]},
+            })
+            self.assertEqual(replay["state_revision"], response["state_revision"])
+            db.close()
+
+    def test_retry_access_denied_action_rejects_other_review_codes(self):
+        with FaultRoot() as root:
+            downloader, db, _ = self.make_controller(root)
+            downloader.transition(db, self.url, "review_required", "changed remote representation",
+                                  bytes=None, review_code="changed_remote_representation")
+            item_id = downloader.item_id(self.url)
+            response = downloader.control_retry_access_denied(db, {
+                "request_id": "req-2", "session_id": "sess-1",
+                "parameters": {"item_ids": [item_id]},
+            })
+            self.assertIn("not an access-denied review", response["items"][item_id])
+            self.assertEqual(db.execute("SELECT status, review_code FROM downloads WHERE url=?",
+                                        (self.url,)).fetchone(),
+                             ("review_required", "changed_remote_representation"))
+            db.close()
+
     def selected_urls(self, db):
         return [row[0] for row in db.execute(
             "SELECT url FROM run_items WHERE run_id='test-run' ORDER BY queue_rank"

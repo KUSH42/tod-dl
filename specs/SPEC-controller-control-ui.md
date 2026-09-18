@@ -2,8 +2,9 @@
 
 Status: partially implemented, September 18, 2026. `get_control_state`,
 `retry_now` (including its row-scoped `item_ids` parameter), `exclude_item`,
-`resume_new_generation`, `renew_tor_circuits`, `pause_admission`,
-`resume_admission`, `drain_and_stop`, and `checkpoint_stop` are implemented.
+`resume_new_generation`, `retry_access_denied`, `renew_tor_circuits`,
+`pause_admission`, `resume_admission`, `drain_and_stop`, and `checkpoint_stop`
+are implemented.
 This specification extends the
 read-only [acquisition console UI](SPEC-console-ui.md) with a local,
 controller-owned command channel.
@@ -70,7 +71,7 @@ replayed request returns the original result and cannot repeat a mutation.
 
 The implemented command set contains `get_control_state`,
 `prepare_confirmation`, `retry_now`, `exclude_item`, `resume_new_generation`,
-`set_item_priority`,
+`retry_access_denied`, `set_item_priority`,
 `set_retry_cooldown`, `renew_tor_circuits`, `pause_admission`,
 `resume_admission`, `drain_and_stop`, and `checkpoint_stop`. The controller
 must validate every precondition
@@ -89,6 +90,7 @@ at execution time; the UI state is advisory and can be stale.
 | `set_item_priority` | Sets a scheduler-preference hint on selected items. It does not change queue rank, manifest order, or pagination order. | Required. |
 | `exclude_item` | Moves selected items to the `excluded` durable state, defined in [SPEC-reliable-acquisition.md](SPEC-reliable-acquisition.md), stopping future admission and retry. It does not remove the item from the selected set's audit history or renumber remaining ranks. | Required. |
 | `resume_new_generation` | The recorded restart decision defined in [SPEC-reliable-acquisition.md](SPEC-reliable-acquisition.md)'s Resume and representation integrity section. Moves a `review_required` item whose review code is `changed_remote_representation` or `no_reliable_version_protection` back to `queued`, increments its staging generation, and clears its review code, last error, and recorded validators so the next attempt starts a fresh representation baseline. Rejects an item in any other state or review code. | Required. |
+| `retry_access_denied` | Moves a `review_required` item whose review code is `access_denied` back to `queued`, and clears its review code and last error. It keeps the item's attempts, staged bytes, validators, and staging generation. The origin pause ends when no other `access_denied` item of that origin remains. A repeated HTTP 401 or 403 returns the item to `review_required` and pauses the origin again. Rejects an item in any other state or review code. | Required. |
 | `set_retry_cooldown` | Sets a per-item retry-cooldown override within controller-defined bounds. It does not bypass the existing global or origin cooldown. | Required. |
 
 Before any mutating action, the UI asks the controller for an action-specific
@@ -103,15 +105,15 @@ transition and emits a sanitized telemetry event after acceptance. It records
 only selected `retry_wait` and `failed` items as immediately eligible; it
 doesn't alter queue inputs, selection, final evidence, or review items.
 
-For `set_item_priority`, `exclude_item`, `resume_new_generation`, and
-`set_retry_cooldown`, the
+For `set_item_priority`, `exclude_item`, `resume_new_generation`,
+`retry_access_denied`, and `set_retry_cooldown`, the
 controller records the same durable audit fields as `retry_now`: request ID,
 action, outcome, state revision, and UTC timestamp, plus a bounded control
 transition and a sanitized telemetry event. Each action requires `item_ids`
 and validates every ID against the immutable selected set at execution time;
 an ID outside that set, or an item whose current state makes the action
 inapplicable, is rejected per item, and the response reports the per-item
-outcome. None of the four changes queue rank, manifest order, the selected
+outcome. None of the five changes queue rank, manifest order, the selected
 set's membership, or an item's destination path.
 
 Automatic safe-path remediation remains governed by
