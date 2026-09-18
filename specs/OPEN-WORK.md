@@ -44,11 +44,17 @@ Since the second report, two real bugs were found and fixed:
   so the scenario never finished constructing its fixture list. Fixed by
   bounding the digest length to what each block actually needs.
 
-Two gaps remain open, neither blocking selection under the specification's
+E08's HTML-200-error and post-hash-mismatch sub-cases are closed. Commits
+`a7d289d`, `b387eb1`, and `b676f0e` added expected-checksum detection; all
+three E08 sub-cases (short body, HTML-200-error, post-hash-mismatch) now
+reach `review_required`, confirmed by re-running
+`e08_checksum_mismatch_review()` directly. `acquisition-tool-evaluation-2026-09-18c.md`
+predates this fix and still shows the old gap; a fresh dated report has not
+been written yet.
+
+One gap remains open, not blocking selection under the specification's
 stated gate:
 
-- E08's HTML-200-error and post-hash-mismatch sub-cases have no scenario
-  yet; only the short-body sub-case ran.
 - The source pilot (at most five URLs, separate state, verified SOCKS
   routing evidence) has not run. Do not treat the candidate as validated for
   production use until it does.
@@ -102,8 +108,8 @@ The current specification status is grouped below.
 
 ## Next steps
 
-Add E08's HTML-200-error and post-hash-mismatch sub-cases, then run the
-separately scheduled source pilot (at most five URLs, separate state,
-verified SOCKS routing evidence) before treating the aria2 candidate as
-validated for production use. Do not run the pilot without an explicit
+Write a fresh dated evaluation report reflecting the closed E08 gap, then
+run the separately scheduled source pilot (at most five URLs, separate
+state, verified SOCKS routing evidence) before treating the aria2 candidate
+as validated for production use. Do not run the pilot without an explicit
 instruction to do so.
