@@ -950,6 +950,36 @@ class RunSelectionTests(unittest.TestCase):
                              .fetchone()[0], "complete")
             db.close()
 
+    def test_reconcile_promotion_recreates_link_when_target_never_created(self):
+        # Reproduces E06 failpoint (a): the durable promoting record and its
+        # digest committed, but the process was killed before os.link()
+        # created the final file. The digest is already trustworthy, so
+        # reconciliation must complete automatically instead of discarding it
+        # into review_required.
+        url = "https://fixture.test/first/data/item.bin"
+        payload = b"fixture bytes"
+        with tempfile.TemporaryDirectory() as temporary:
+            downloader, db = self.prepare(Path(temporary), [url])
+            staging = downloader.staging_path(url)
+            staging.parent.mkdir(parents=True)
+            staging.write_bytes(payload)
+            target = downloader.destination / "first" / "data" / "item.bin"
+            # ensure_safe_parent() creates this directory before promoting is
+            # ever recorded, so the parent must already exist here too.
+            target.parent.mkdir(parents=True)
+            downloader.update(db, "UPDATE downloads SET status='promoting', sha256=?, "
+                              "staging_path=?, promotion_target=? WHERE url=?",
+                              (hashlib.sha256(payload).hexdigest(), str(staging),
+                               str(target), url))
+
+            downloader.reconcile_promotions(db)
+
+            self.assertEqual(db.execute("SELECT status FROM downloads WHERE url=?", (url,))
+                             .fetchone()[0], "complete")
+            self.assertEqual(target.read_bytes(), payload)
+            self.assertFalse(staging.exists())
+            db.close()
+
     def test_reconcile_promotion_with_oversized_target_requires_review(self):
         url = "https://fixture.test/first/data/item.bin"
         with tempfile.TemporaryDirectory() as temporary:

@@ -1952,8 +1952,52 @@ class Downloader:
                     self.transition(db, url, "complete", "reconciled staging cleanup",
                                     cleanup_completed_at=now())
                 continue
+            if (target and digest and staging and self.is_safe_staging_path(staging)
+                    and self.is_promotable_final_path(target)):
+                try:
+                    staging_is_regular = stat.S_ISREG(staging.lstat().st_mode)
+                except OSError:
+                    staging_is_regular = False
+                if staging_is_regular:
+                    try:
+                        os.link(staging, target)
+                    except OSError as exc:
+                        self.transition(db, url, "review_required",
+                                        "promotion target could not be recreated",
+                                        last_error=f"promotion reconciliation failed: {exc}",
+                                        review_code=review_code_for_error(exc))
+                        continue
+                    self.flush_directory(target.parent)
+                    stored = stored_text or Path(target).relative_to(self.destination).as_posix()
+                    self.finalized_event(url, relative_text, stored, target.stat().st_size, digest)
+                    self.transition(db, url, "complete", "reconciled promotion intent",
+                                    bytes=target.stat().st_size, sha256=digest)
+                    os.unlink(staging)
+                    self.transition(db, url, "complete", "reconciled staging cleanup",
+                                    cleanup_completed_at=now())
+                    continue
             self.transition(db, url, "review_required", "incomplete or inconsistent promotion",
                             last_error="promotion reconciliation requires review")
+
+    def is_promotable_final_path(self, target: Path) -> bool:
+        """Return true only for a safe final path below destination with nothing at it yet."""
+        try:
+            relative = target.relative_to(self.destination)
+            if not relative.parts:
+                return False
+            current = self.destination
+            if os.path.islink(current):
+                return False
+            for part in relative.parts[:-1]:
+                current = current / part
+                if os.path.islink(current) or not current.is_dir():
+                    return False
+            target.lstat()
+            return False
+        except FileNotFoundError:
+            return True
+        except (OSError, ValueError):
+            return False
 
     def is_safe_final_path(self, target: Path) -> bool:
         """Return true only for a regular final below a non-symlink destination path."""
