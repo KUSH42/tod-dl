@@ -128,6 +128,7 @@ class ResponseScript:
     redirect_path: str | None = None
     terminate_after_bytes: int | None = None
     omit_validators: bool = False
+    body_override: bytes | None = None
 
     def validate(self) -> None:
         if self.status is not None and not 100 <= self.status <= 599:
@@ -432,6 +433,35 @@ class FixtureServer:
             concurrent = self.active_connections
         script = self._script(name, count)
         requested_range = handler.headers.get("Range")
+        if script.body_override is not None:
+            sent = 0
+            try:
+                if script.delay_seconds:
+                    time.sleep(script.delay_seconds)
+                body = script.body_override
+                handler.send_response(script.status or 200)
+                handler.send_header("Content-Type", fixture.content_type)
+                handler.send_header("Content-Length", str(len(body)))
+                handler.send_header("Accept-Ranges", "bytes")
+                if not script.omit_validators:
+                    handler.send_header("ETag", fixture.etag or "")
+                    handler.send_header("Last-Modified", "Mon, 01 Jan 2024 00:00:00 GMT")
+                handler.end_headers()
+                handler.wfile.write(body)
+                sent = len(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                self._record({
+                    "fixture": name,
+                    "range": requested_range,
+                    "status": script.status or 200,
+                    "transmitted_bytes": sent,
+                    "simultaneous_connections": concurrent,
+                })
+                with self._lock:
+                    self.active_connections -= 1
+            return
         status = script.status
         start, end = 0, fixture.length - 1
         range_value = self._parse_range(requested_range, fixture.length)

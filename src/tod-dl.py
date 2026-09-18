@@ -12,6 +12,7 @@ import hashlib
 import http.client
 import json
 import os
+import re
 import shutil
 import socket
 import sqlite3
@@ -32,7 +33,8 @@ from provenance import ProvenanceError, ProvenanceWriter, utc_now
 
 SCHEMA = """CREATE TABLE IF NOT EXISTS downloads (
 url TEXT PRIMARY KEY, relative_path TEXT NOT NULL, storage_path TEXT,
-staging_path TEXT, inventory_size TEXT, status TEXT NOT NULL DEFAULT 'pending',
+staging_path TEXT, inventory_size TEXT, expected_sha256 TEXT,
+status TEXT NOT NULL DEFAULT 'pending',
 attempts INTEGER NOT NULL DEFAULT 0, bytes INTEGER, sha256 TEXT,
 last_error TEXT, next_retry_at REAL NOT NULL DEFAULT 0, promotion_target TEXT,
 promotion_intent_at TEXT, cleanup_completed_at TEXT, review_code TEXT,
@@ -279,21 +281,55 @@ def legacy_relative_path(url: str) -> PurePosixPath | None:
         return None
 
 
+QUEUE_LINE_TOKEN_KEYS = {"size", "sha256"}
+SHA256_HEX_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def parse_queue_line_tokens(fields: list[str]) -> dict[str, str]:
+    """Parse a queue line's trailing ``key=value`` tokens.
+
+    Raises ``ValueError`` naming the problem so the caller can reject the
+    whole line with a reason, rather than silently ignoring a malformed
+    token.
+    """
+    tokens: dict[str, str] = {}
+    for field in fields:
+        key, sep, value = field.partition("=")
+        if not sep or key not in QUEUE_LINE_TOKEN_KEYS:
+            raise ValueError(f"unrecognized queue line token: {field!r}")
+        if key in tokens:
+            raise ValueError(f"duplicate queue line token: {key}")
+        if not value:
+            raise ValueError(f"empty value for queue line token: {key}")
+        if key == "sha256" and not SHA256_HEX_RE.match(value):
+            raise ValueError("sha256 token is not 64 hex characters")
+        tokens[key] = value.lower() if key == "sha256" else value
+    return tokens
+
+
 def read_queues(paths: list[Path], on_reject=None):
     seen: set[str] = set()
     for path in paths:
         with path.open(encoding="utf-8", errors="replace") as handle:
             for line in handle:
-                url = line.strip()
-                if not url or url.startswith("#"):
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
                     continue
+                fields = stripped.split()
+                url = fields[0]
                 if url in seen:
                     if on_reject:
                         on_reject(url, "duplicate URL")
                     continue
+                try:
+                    tokens = parse_queue_line_tokens(fields[1:])
+                except ValueError as exc:
+                    if on_reject:
+                        on_reject(url, str(exc))
+                    continue
                 seen.add(url)
                 try:
-                    yield url, relative_path(url)
+                    yield url, relative_path(url), tokens.get("size"), tokens.get("sha256")
                 except ValueError as exc:
                     if on_reject:
                         on_reject(url, str(exc))
@@ -627,14 +663,19 @@ class Downloader:
             db.commit()
 
     def finalized_event(self, url: str, logical: str, stored: str,
-                        byte_count: int, sha256: str) -> None:
+                        byte_count: int, sha256: str,
+                        expected_sha256: str | None = None) -> None:
         unavailable = {"available": False, "compared": False, "value": None}
+        expected_checksum = (
+            {"available": True, "compared": True, "value": expected_sha256}
+            if expected_sha256 else unavailable
+        )
         self.provenance_event(
             "finalized", item_id=self.item_id(url), source_url=url,
             logical_relative_path=logical, final_relative_path=stored,
             byte_count=byte_count, sha256=sha256, validation_method_version="1",
             finalized_at=utc_now(), expected_size=unavailable,
-            expected_checksum=unavailable, etag=unavailable, last_modified=unavailable,
+            expected_checksum=expected_checksum, etag=unavailable, last_modified=unavailable,
         )
 
     def candidate_event(self, url: str, staging: Path, candidate: Path | None,
@@ -1220,6 +1261,7 @@ class Downloader:
         db.executescript(RUN_SCHEMA)
         columns = {row[1] for row in db.execute("PRAGMA table_info(downloads)")}
         for column in ("storage_path", "staging_path", "inventory_size",
+                       "expected_sha256",
                        "promotion_target", "promotion_intent_at",
                        "cleanup_completed_at", "review_code",
                        "remediation_reason", "remediation_mapping_version",
@@ -1371,17 +1413,20 @@ class Downloader:
         def report_rejection(url: str, reason: str) -> None:
             print(f"[queue-rejected] {url}: {reason}", flush=True)
 
-        for url, rel in read_queues(self.args.queue, on_reject=report_rejection):
+        for url, rel, inventory_size, expected_sha256 in read_queues(
+                self.args.queue, on_reject=report_rejection):
             stored, _ = self.resolved_storage_target(rel, url)
             db.execute("INSERT OR IGNORE INTO downloads (url, relative_path, "
-                       "storage_path, staging_path, updated_at) VALUES (?, ?, ?, ?, ?)",
+                       "storage_path, staging_path, inventory_size, expected_sha256, "
+                       "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                        (url, rel.as_posix(), stored.as_posix(),
-                        str(self.staging_path(url)), now()))
+                        str(self.staging_path(url)), inventory_size, expected_sha256, now()))
             db.execute("UPDATE downloads SET storage_path=?, staging_path=?, "
-                       "updated_at=? WHERE url=? AND (storage_path IS NULL "
+                       "inventory_size=?, expected_sha256=?, updated_at=? "
+                       "WHERE url=? AND (storage_path IS NULL "
                        "OR storage_path != ? OR staging_path IS NULL)",
-                       (stored.as_posix(), str(self.staging_path(url)), now(), url,
-                        stored.as_posix()))
+                       (stored.as_posix(), str(self.staging_path(url)), inventory_size,
+                        expected_sha256, now(), url, stored.as_posix()))
             count += 1
         db.commit()
         return count
@@ -1401,7 +1446,7 @@ class Downloader:
             db.commit()
             return previous, 0
         selected = existing = 0
-        for url, rel in read_queues(self.args.queue):
+        for url, rel, _inventory_size, _expected_sha256 in read_queues(self.args.queue):
             if self.args.max_files and selected >= self.args.max_files:
                 break
             stored, target = self.resolved_storage_target(rel, url)
@@ -1423,7 +1468,7 @@ class Downloader:
 
     def dry_run(self) -> int:
         existing = missing = selected = 0
-        for url, rel in read_queues(self.args.queue):
+        for url, rel, _inventory_size, _expected_sha256 in read_queues(self.args.queue):
             if self.args.max_files and selected >= self.args.max_files:
                 break
             stored, target = self.resolved_storage_target(rel, url)
@@ -1438,7 +1483,8 @@ class Downloader:
         return 0
 
     def next_pending(self, db: sqlite3.Connection):
-        query = """SELECT downloads.url, relative_path, storage_path, staging_path, attempts
+        query = """SELECT downloads.url, relative_path, storage_path, staging_path, attempts,
+            expected_sha256
             FROM downloads JOIN run_items ON run_items.url = downloads.url
             WHERE status IN ('queued', 'retry_wait', 'pending', 'failed')
             AND run_items.run_id = ?
@@ -1796,7 +1842,7 @@ class Downloader:
         return candidate
 
     def transfer(self, row, db: sqlite3.Connection) -> str:
-        url, rel_text, stored_text, staging_text, attempts = row
+        url, rel_text, stored_text, staging_text, attempts, expected_sha256 = row
         rel = PurePosixPath(rel_text)
         stored_text = stored_text or storage_relative(rel, self.destination).as_posix()
         staging_text = staging_text or str(self.staging_path(url))
@@ -1899,6 +1945,16 @@ class Downloader:
             raise
         if self.telemetry:
             self.telemetry.clear_validation(url)
+        if expected_sha256 and digest.lower() != expected_sha256.lower():
+            self.attempt_event(db, url, attempts + 1, attempt_started_at, "validation_failed")
+            candidate = self.move_candidate(staging)
+            self.candidate_event(url, staging, candidate, digest, "checksum_mismatch")
+            self.transition(db, url, "review_required", "checksum mismatch", sha256=digest,
+                            bytes=candidate.stat().st_size, last_error="checksum mismatch",
+                            review_code="checksum_mismatch")
+            self.clear_transfer_telemetry(url)
+            print(f"[review] {rel}: checksum mismatch", flush=True)
+            return "review"
         self.attempt_event(db, url, attempts + 1, attempt_started_at, "success")
         try:
             self.ensure_safe_parent(target)
@@ -1935,7 +1991,8 @@ class Downloader:
             return "review"
         hit_failpoint("post_final_file_creation")
         self.flush_directory(target.parent)
-        self.finalized_event(url, rel.as_posix(), stored_text, target.stat().st_size, digest)
+        self.finalized_event(url, rel.as_posix(), stored_text, target.stat().st_size, digest,
+                             expected_sha256)
         self.clear_transfer_telemetry(url)
         self.transition(db, url, "complete", bytes=target.stat().st_size, sha256=digest)
         hit_failpoint("post_completion_commit")

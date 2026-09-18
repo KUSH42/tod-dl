@@ -205,51 +205,83 @@ def e07_existing_final(base: Path, torsocks_conf: Path) -> ScenarioResult:
 
 
 def e08_checksum_mismatch_review(base: Path, torsocks_conf: Path) -> ScenarioResult:
-    """Short body: a first EOF retries once (may be a resumable cut); only a
+    """Short body, HTML-200-error, and post-hash-mismatch, each a distinct E08 sub-case.
 
+    Short body: a first EOF retries once (may be a resumable cut); only a
     second, no-growth EOF gives up to review_required
     (is_incomplete_body_failure()'s retry-once-then-review rule, src/tod-dl.py). A
     genuinely short body never grows on retry, so drive two attempts, forcing
     the second's retry due now instead of waiting out RETRY_DELAYS[0] (60s).
+
+    HTML-200-error and post-hash-mismatch: the fixture server serves a
+    full-length substitute body (an HTML error page, and bit-corrupted bytes,
+    respectively) via ``ResponseScript.body_override``, while the queue line
+    carries the real fixture's expected sha256 token, so `transfer()`'s
+    digest-mismatch check (src/tod-dl.py) is what must catch each one.
     """
     root = scenario_root(base, "E08")
-    body = Fixture.create("e08.bin", "e08-body", 4096)
-    write_manifest(root / "fixture-manifest.json", [body])
-    events = root / "fixture-events.json"
-    destination, state = isolated_dirs(root)
-    scripts = {body.name: [ResponseScript(short_body_bytes=100)]}
-    with fixture_server([body], events, scripts=scripts) as server:
-        queue = write_queue_file(root / "queue.txt", [server.url(body.name)])
-        result1 = run_downloader(queue=queue, destination=destination, state=state,
+    details = []
+
+    short_root = root / "short_body"
+    short_root.mkdir(parents=True)
+    short_body_fixture = Fixture.create("e08-short.bin", "e08-short-body", 4096)
+    write_manifest(short_root / "fixture-manifest.json", [short_body_fixture])
+    short_events = short_root / "fixture-events.json"
+    short_destination, short_state = isolated_dirs(short_root)
+    short_scripts = {short_body_fixture.name: [ResponseScript(short_body_bytes=100)]}
+    with fixture_server([short_body_fixture], short_events, scripts=short_scripts) as server:
+        queue = write_queue_file(short_root / "queue.txt", [server.url(short_body_fixture.name)])
+        result1 = run_downloader(queue=queue, destination=short_destination, state=short_state,
                                  reserve_bytes=0, tor_control_address=TOR_CONTROL_ADDRESS,
                                  tor_control_cookie=TOR_CONTROL_COOKIE,
                                  torsocks_conf=torsocks_conf, time_limit=8, timeout=25)
-        with sqlite3.connect(state / "manifest.sqlite") as db:
+        with sqlite3.connect(short_state / "manifest.sqlite") as db:
             db.execute("UPDATE downloads SET next_retry_at=0")
             db.commit()
-        result = run_downloader(queue=queue, destination=destination, state=state,
-                                reserve_bytes=0, tor_control_address=TOR_CONTROL_ADDRESS,
-                                tor_control_cookie=TOR_CONTROL_COOKIE,
-                                torsocks_conf=torsocks_conf, time_limit=8, timeout=25)
-    rows = read_downloads(state)
-    row = next(iter(rows.values()), None)
-    detail = (f"exit1={result1.returncode} exit2={result.returncode} row={row} note='only "
-             f"the short-body sub-case was exercised this session, not the HTML-200-error "
-             f"or post-hash-mismatch cases'")
-    if row and row["status"] == "review_required":
-        return ScenarioResult("E08", "pass", "E08: block automatic promotion; retain review candidate",
-                              f"short body was not auto-promoted and was recorded as a "
-                              f"review candidate | {detail}", str(events))
-    if row and row["status"] == "complete":
+        result2 = run_downloader(queue=queue, destination=short_destination, state=short_state,
+                                 reserve_bytes=0, tor_control_address=TOR_CONTROL_ADDRESS,
+                                 tor_control_cookie=TOR_CONTROL_COOKIE,
+                                 torsocks_conf=torsocks_conf, time_limit=8, timeout=25)
+    row = next(iter(read_downloads(short_state).values()), None)
+    ok = bool(row and row["status"] == "review_required")
+    details.append(f"short_body: exit1={result1.returncode} exit2={result2.returncode} "
+                   f"row={row} ok={ok}")
+    if not ok:
         return ScenarioResult("E08", "fail", "E08: block automatic promotion; retain review candidate",
-                              f"short body was promoted despite an incomplete transfer | "
-                              f"{detail}", str(events))
-    return ScenarioResult("E08", "fail", "E08: block automatic promotion; retain review candidate",
-                          f"transfer was not promoted but also not classified as "
-                          f"review_required (status={row['status'] if row else None}); an "
-                          f"aria2-level short-read is treated as a retryable engine failure, "
-                          f"not a review candidate, in the current adapter/controller | "
-                          f"{detail}", str(events))
+                              f"short body was not classified as review_required | "
+                              f"{' | '.join(details)}", str(short_events))
+
+    for sub_case, override_bytes in (
+        ("html_200_error", b"<html><body>404 Not Found</body></html>"),
+        ("post_hash_mismatch", b"\x00" * 4096),
+    ):
+        sub_root = root / sub_case
+        sub_root.mkdir(parents=True)
+        fixture = Fixture.create(f"e08-{sub_case}.bin", f"e08-{sub_case}", 4096)
+        write_manifest(sub_root / "fixture-manifest.json", [fixture])
+        events = sub_root / "fixture-events.json"
+        destination, state = isolated_dirs(sub_root)
+        scripts = {fixture.name: [ResponseScript(body_override=override_bytes)]}
+        with fixture_server([fixture], events, scripts=scripts) as server:
+            queue = write_queue_file(
+                sub_root / "queue.txt", [f"{server.url(fixture.name)} sha256={fixture.sha256}"])
+            result = run_downloader(queue=queue, destination=destination, state=state,
+                                    reserve_bytes=0, tor_control_address=TOR_CONTROL_ADDRESS,
+                                    tor_control_cookie=TOR_CONTROL_COOKIE,
+                                    torsocks_conf=torsocks_conf, time_limit=8, timeout=25)
+        row = next(iter(read_downloads(state).values()), None)
+        ok = bool(row and row["status"] == "review_required"
+                 and row["review_code"] == "checksum_mismatch")
+        details.append(f"{sub_case}: exit={result.returncode} row={row} ok={ok}")
+        if not ok:
+            return ScenarioResult(
+                "E08", "fail", "E08: block automatic promotion; retain review candidate",
+                f"{sub_case} was not classified review_required/checksum_mismatch | "
+                f"{' | '.join(details)}", str(events))
+
+    return ScenarioResult("E08", "pass", "E08: block automatic promotion; retain review candidate",
+                          f"short body, HTML-200-error, and post-hash-mismatch were all blocked "
+                          f"and recorded as review candidates | {' | '.join(details)}", None)
 
 
 def e09_disk_exhaustion(base: Path, torsocks_conf: Path) -> ScenarioResult:

@@ -50,6 +50,19 @@ Each queue file contains one URL per line. Blank lines, comment lines,
 duplicate URLs, unsafe paths, URLs with credentials, and URLs with query
 values are ignored or rejected.
 
+A line can carry optional `key=value` tokens after the URL, separated by
+whitespace, in any order:
+
+- `size=<token>`: a rough, human-readable size estimate, for example `1.8M`
+  or `43K`. The downloader does not parse or validate this value beyond
+  rejecting an empty one; it stores the token as given.
+- `sha256=<hex>`: the expected 64-character hex SHA-256 digest. If the
+  downloaded file's digest does not match, the downloader moves the file to
+  a review candidate instead of promoting it.
+
+Example: `https://example.onion/data/case/file.bin size=1.8M
+sha256=9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08`
+
 Store queue files outside this source repository when they contain case data.
 
 ## Run an acquisition
