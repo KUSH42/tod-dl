@@ -14,3 +14,5 @@
 /.venv-monitor/
 /__pycache__/
 *.pyc
+# Backup copies of case-specific inventory policies.
+policy-ber-*.json.bak

@@ -2,4 +2,5 @@ urls.txt binary
 urls_1.txt binary
 urls_2.txt binary
 urls_3.txt binary
-dowloaded_files/**
+downloaded_files/** binary
+policy-ber-*.json.bak binary
