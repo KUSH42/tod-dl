@@ -101,6 +101,7 @@ def _request_id(value: Any) -> str | None:
     try:
         uuid.UUID(value)
     except ValueError:
+        # a value that is not a UUID is invalid; the caller treats None as invalid
         return None
     return value
 
@@ -132,6 +133,7 @@ def _source_url(value: str) -> str | None:
         parsed = urlsplit(value)
         port = parsed.port
     except ValueError:
+        # an unparsable URL or port is invalid; the caller treats None as invalid
         return None
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         return None
@@ -227,6 +229,7 @@ class InspectionServer:
             try:
                 connection, _ = self.listener.accept()
             except (OSError, TimeoutError):
+                # accept timeout or a listener closed by stop(); the loop re-checks stop_requested
                 continue
             threading.Thread(target=self._connection, args=(connection,), daemon=True).start()
 
@@ -240,6 +243,7 @@ class InspectionServer:
             try:
                 connection.sendall(encoded)
             except OSError:
+                # the client disconnected before the reply; nothing else can be sent
                 pass
             self._drain(connection)
 
@@ -251,6 +255,7 @@ class InspectionServer:
             while connection.recv(65536):
                 pass
         except OSError:
+            # the client closed the socket while the server drained it; the connection is done
             pass
 
     def _error(self, request_id: str | None, status: str, reason: str) -> dict[str, Any]:

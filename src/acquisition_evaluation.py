@@ -175,6 +175,7 @@ def process_tree_pids(root_pid: int) -> list[int]:
         try:
             status = (entry / "status").read_text(encoding="utf-8")
         except OSError:
+            # a /proc entry can vanish while the scan runs; skip it
             continue
         for line in status.splitlines():
             if line.startswith("PPid:"):
@@ -196,6 +197,7 @@ def process_command(pid: int) -> str:
     try:
         raw = (Path("/proc") / str(pid) / "cmdline").read_bytes()
     except OSError:
+        # the process already exited; an empty command line is the documented result
         return ""
     return raw.decode("utf-8", "replace").replace("\0", " ").strip()
 
@@ -205,6 +207,7 @@ def process_rss_bytes(pid: int) -> int:
     try:
         status = (Path("/proc") / str(pid) / "status").read_text(encoding="utf-8")
     except OSError:
+        # the process already exited; 0 bytes is the documented result
         return 0
     for line in status.splitlines():
         if line.startswith("VmRSS:"):
@@ -235,6 +238,7 @@ def wait_for_bytes_written(path: Path, threshold: int, timeout: float,
             if path.stat().st_size >= threshold:
                 return True
         except FileNotFoundError:
+            # the staging file is not created yet; keep polling
             pass
         time.sleep(poll_interval)
     return False
@@ -450,6 +454,7 @@ class FixtureServer:
                 handler.wfile.write(body)
                 sent = len(body)
             except (BrokenPipeError, ConnectionResetError):
+                # the client closed the connection; that is an expected fixture outcome
                 pass
             finally:
                 self._record({
@@ -521,6 +526,7 @@ class FixtureServer:
             if body_length < advertised_length:
                 handler.close_connection = True
         except (BrokenPipeError, ConnectionResetError):
+            # the client closed the connection; that is an expected fixture outcome
             pass
         finally:
             self._record({

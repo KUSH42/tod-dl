@@ -487,6 +487,7 @@ def e05_kill_injection(base: Path, torsocks_conf: Path) -> ScenarioResult:
             try:
                 process.wait(timeout=15)
             except subprocess.TimeoutExpired:
+                # the process ignored the wait; escalate to SIGKILL
                 process.kill()
                 process.wait(timeout=15)
             result2 = run_downloader(queue=queue, destination=destination, state=state,
@@ -594,6 +595,7 @@ def e10_million_row_admission_and_resources(base: Path, torsocks_conf: Path) -> 
         try:
             process.wait(timeout=30)
         except subprocess.TimeoutExpired:
+            # the process ignored SIGTERM; escalate to SIGKILL
             process.kill()
             process.wait(timeout=15)
         shutdown_seconds = time.monotonic() - shutdown_started

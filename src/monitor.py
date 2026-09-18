@@ -131,6 +131,7 @@ def published_age(snapshot: dict[str, Any], now: dt.datetime | None = None) -> f
     try:
         published = dt.datetime.fromisoformat(snapshot["published_at"])
     except ValueError:
+        # a malformed timestamp gives an unknown age; the caller shows an unknown marker
         return None
     if published.tzinfo is None:
         return None
@@ -158,6 +159,7 @@ def select_snapshot(state: Path, run_id: str | None) -> dict[str, Any]:
         try:
             snapshot = read_snapshot(path)
         except SnapshotError:
+            # an unreadable or partial snapshot is skipped; the next poll reads it again
             continue
         if snapshot["run"]["lifecycle"] not in FINAL_LIFECYCLES:
             candidates.append(snapshot)
@@ -257,6 +259,7 @@ def recorded_age(value: Any, snapshot: dict[str, Any]) -> str:
         recorded = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
         published = dt.datetime.fromisoformat(snapshot["published_at"].replace("Z", "+00:00"))
     except ValueError:
+        # a malformed timestamp gives an unknown age; the display shows '?'
         return "?"
     if recorded.tzinfo is None or published.tzinfo is None or recorded > published:
         return "?"
@@ -453,6 +456,7 @@ def event_timestamp(event: dict[str, Any]) -> str:
     try:
         recorded = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
+        # a malformed timestamp gives an unknown age; the display shows '--:--:--'
         return "--:--:--"
     if recorded.tzinfo is None:
         return "--:--:--"

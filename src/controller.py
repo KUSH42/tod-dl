@@ -167,6 +167,7 @@ class ControlServer:
             try:
                 connection, _ = self.listener.accept()
             except (OSError, TimeoutError):
+                # accept timeout or a listener closed by stop(); the loop re-checks stop_requested
                 continue
             with connection:
                 connection.settimeout(2)
@@ -175,6 +176,7 @@ class ControlServer:
                     connection.sendall((json.dumps(response, separators=(",", ":")) + "\n")
                                        .encode("utf-8"))
                 except OSError:
+                    # the client disconnected before the reply; the action already ran
                     pass
 
     def _handle(self, connection: socket.socket) -> dict[str, Any]:

@@ -135,6 +135,7 @@ def _write_atomic(path: Path, data: bytes, mode: int = 0o600) -> None:
         try:
             temporary.unlink()
         except FileNotFoundError:
+            # the temporary file is already gone; the original error re-raises below
             pass
         raise
 

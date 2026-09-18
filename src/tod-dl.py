@@ -146,6 +146,7 @@ def aria2_rpc_status(port: int, secret: str) -> dict | None:
         active = payload.get("result", [])
         return active[0] if active else None
     except (OSError, ValueError, http.client.HTTPException):
+        # an RPC failure means no answer; the caller polls again or uses the log fallback
         return None
     finally:
         connection.close()
@@ -161,6 +162,7 @@ def aria2_rpc_call(port: int, method: str, params: list) -> dict | None:
                            {"Content-Type": "application/json"})
         return json.loads(connection.getresponse().read())
     except (OSError, ValueError, http.client.HTTPException):
+        # an RPC failure means no answer; the caller decides whether to retry
         return None
     finally:
         connection.close()
@@ -196,6 +198,7 @@ def aria2_log_terminal_status(log_path: Path) -> str | None:
     try:
         lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
+        # an unreadable aria2 log gives no terminal status; the caller keeps waiting
         return None
     # The adapter sets --max-tries=1, so aria2's recorded errorCode is final
     # for this one-job process, not an intermediate retry.
@@ -240,6 +243,7 @@ def evaluate_aria2_rpc(args: argparse.Namespace) -> int:
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
+                # the process ignored SIGTERM; escalate to SIGKILL
                 process.kill()
                 process.wait()
 
@@ -282,6 +286,7 @@ def legacy_relative_path(url: str) -> PurePosixPath | None:
             return None
         return path
     except ValueError:
+        # an invalid path gives no relative path; the caller treats None as unmappable
         return None
 
 
@@ -417,11 +422,13 @@ def process_start_ticks(pid: int) -> int | None:
     try:
         stat_text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     except OSError:
+        # the process is gone, so its start time is unknown
         return None
     fields = stat_text.rsplit(")", 1)[-1].split()
     try:
         return int(fields[19])
     except (IndexError, ValueError):
+        # an unparsable /proc stat line gives no start time; the caller treats it as unknown
         return None
 
 
@@ -429,6 +436,7 @@ def storage_relative(path: PurePosixPath, destination: Path) -> PurePosixPath:
     try:
         name_max = os.pathconf(destination, "PC_NAME_MAX")
     except OSError:
+        # the file system reports no limit; use a conservative 240-byte limit
         name_max = 240
     safe_component_bytes = min(240, max(1, name_max - 1))
     parts = []
@@ -1481,6 +1489,7 @@ class Downloader:
             try:
                 mode = current.lstat().st_mode
             except FileNotFoundError:
+                # a missing parent directory is created below
                 current.mkdir()
                 continue
             if os.path.islink(current):
@@ -1661,6 +1670,7 @@ class Downloader:
         try:
             manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
+            # a missing or corrupt manifest means no surviving writer is known
             return None
         for entry in reversed(manifest.get("workers", [])):
             if entry.get("url") != url:
@@ -1686,6 +1696,7 @@ class Downloader:
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
+            # the writer already exited; nothing to stop
             return
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
@@ -1695,6 +1706,7 @@ class Downloader:
         try:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
+            # the writer exited after SIGTERM; nothing to kill
             pass
 
     def requeue_interrupted_transfers(self, db: sqlite3.Connection) -> None:
@@ -1973,12 +1985,14 @@ class Downloader:
             result = subprocess.run(command, capture_output=True, text=True,
                                     timeout=getattr(self.args, "connect_timeout", 30) + 30)
         except (subprocess.TimeoutExpired, OSError):
+            # the probe could not run; None means the representation is unverified
             return None
         if result.returncode != 0:
             return None
         try:
             payload = json.loads(result.stdout.strip().splitlines()[-1])
         except (ValueError, IndexError):
+            # malformed probe output; None means the representation is unverified
             return None
         if payload.get("status") not in (200, 206):
             return None
@@ -2060,6 +2074,7 @@ class Downloader:
                         try:
                             process.wait(timeout=10)
                         except subprocess.TimeoutExpired:
+                            # the process ignored SIGTERM; escalate to SIGKILL
                             process.kill()
                             process.wait()
                         break
@@ -2071,6 +2086,7 @@ class Downloader:
                     try:
                         process.wait(timeout=10)
                     except subprocess.TimeoutExpired:
+                        # the process ignored SIGTERM; escalate to SIGKILL
                         process.kill()
                         process.wait()
                     return False, "run time limit or stop requested"
@@ -2089,6 +2105,7 @@ class Downloader:
             try:
                 os.link(staging, candidate)
             except FileExistsError:
+                # the candidate name exists; retry with a new random name
                 continue
             break
         os.unlink(staging)
@@ -2231,6 +2248,7 @@ class Downloader:
         try:
             is_regular_staging = stat.S_ISREG(staging.lstat().st_mode)
         except FileNotFoundError:
+            # the staging file is missing, so it is not a regular file
             is_regular_staging = False
         if not is_regular_staging:
             self.attempt_event(db, url, attempts + 1, attempt_started_at, "validation_failed")
@@ -2363,6 +2381,7 @@ class Downloader:
                 try:
                     staging_is_regular = stat.S_ISREG(staging.lstat().st_mode)
                 except OSError:
+                    # an unreadable staging file is not promotable as a regular file
                     staging_is_regular = False
                 if staging_is_regular:
                     try:
@@ -2402,8 +2421,10 @@ class Downloader:
             target.lstat()
             return False
         except FileNotFoundError:
+            # the target does not exist, so it is free to promote
             return True
         except (OSError, ValueError):
+            # an unreadable or invalid path is not promotable; deny by default
             return False
 
     def is_safe_final_path(self, target: Path) -> bool:
@@ -2421,6 +2442,7 @@ class Downloader:
                     return False
             return stat.S_ISREG(target.lstat().st_mode)
         except (OSError, ValueError):
+            # an unreadable or invalid path is not a safe final file; deny by default
             return False
 
     def cleanup_completed_staging(self, db: sqlite3.Connection) -> None:
@@ -2442,6 +2464,7 @@ class Downloader:
                 try:
                     mode = staging.lstat().st_mode
                 except FileNotFoundError:
+                    # the staging file is already gone; nothing to remove
                     mode = None
                 if mode is not None:
                     if not stat.S_ISREG(mode):
@@ -2470,6 +2493,7 @@ class Downloader:
                     return False
             return True
         except (OSError, ValueError):
+            # an unreadable or invalid path is not a safe cleanup path; deny by default
             return False
 
     def committed_remaining_bytes(self) -> int:
