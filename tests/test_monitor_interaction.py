@@ -924,5 +924,73 @@ class QueueRowScopedActionInteractionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(commands[0]["parameters"]["item_ids"], [item_id_for(visible)])
 
 
+class QueueMarqueeInteractionTests(unittest.IsolatedAsyncioTestCase):
+    """Headless coverage for marquee scrolling on the selected queue row."""
+
+    def make_queue_app(self, root: Path, database: Path, fps: int = 20):
+        control = ControlServer(root, "run-one", "session-one", lambda: available_actions(),
+                                lambda request: {"outcome": "completed"})
+        control.start()
+        self.addCleanup(control.stop)
+        inspection = InspectionServer(root, "run-one", "session-one", database, 3)
+        inspection.start()
+        self.addCleanup(inspection.stop)
+        app_class = build_monitor_app(snapshot(), None, root, True, fps)
+        self.assertIsNotNone(app_class, "Textual is installed; build_monitor_app must succeed")
+        return app_class()
+
+    async def open_queue_tab(self, pilot, index: int = 0):
+        app = pilot.app
+        app.query_one("TabbedContent").active = "queue-tab"
+        await pilot.pause(0.3)
+        pane = app.query_one("#queue-pane")
+        table = app.query_one("#queue-table")
+        while not pane.rows:
+            await pilot.pause(0.1)
+        table.move_cursor(row=index)
+        await pilot.pause(0.05)
+        return pane
+
+    async def test_selected_row_basename_scrolls_over_time(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = build_item_database(root)
+            long_name = "a-very-long-filename-that-does-not-fit-the-column.bin"
+            url = "http://a.onion/long.bin"
+            insert_item(database, url, 1, long_name, status="queued")
+            app = self.make_queue_app(root, database)
+            async with app.run_test() as pilot:
+                pane = await self.open_queue_tab(pilot, 0)
+                table = app.query_one("#queue-table")
+                item_id = item_id_for(url)
+                first = table.get_cell(item_id, "basename")
+                await pilot.pause(0.6)
+                second = table.get_cell(item_id, "basename")
+                self.assertNotEqual(first, second)
+                self.assertEqual(len(str(first)), 32)
+
+    async def test_deselected_row_stops_scrolling(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = build_item_database(root)
+            long_name = "a-very-long-filename-that-does-not-fit-the-column.bin"
+            first_url = "http://a.onion/long.bin"
+            second_url = "http://a.onion/short.bin"
+            insert_item(database, first_url, 1, long_name, status="queued")
+            insert_item(database, second_url, 2, "short.bin", status="queued")
+            app = self.make_queue_app(root, database)
+            async with app.run_test() as pilot:
+                pane = await self.open_queue_tab(pilot, 0)
+                table = app.query_one("#queue-table")
+                first_item_id = item_id_for(first_url)
+                await pilot.pause(0.6)
+                table.move_cursor(row=1)
+                await pilot.pause(0.05)
+                reset_value = table.get_cell(first_item_id, "basename")
+                await pilot.pause(0.6)
+                self.assertEqual(table.get_cell(first_item_id, "basename"), reset_value)
+                self.assertIn("...", reset_value)
+
+
 if __name__ == "__main__":
     unittest.main()

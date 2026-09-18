@@ -1259,6 +1259,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             self.set_wide(self.size.width >= 100)
             self.reload(reset=True)
             self.set_interval(3, self.poll_revision)
+            self.set_interval(1 / 3, self.animate_marquee)
 
         def focus_default(self) -> None:
             """Move focus inside the pane so its own bindings receive keys."""
@@ -1423,7 +1424,32 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
         def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
             event.stop()
             if event.row_key and event.row_key.value:
+                previous_item_id = self.selected_item_id
                 self.selected_item_id = event.row_key.value
+                if previous_item_id and previous_item_id != self.selected_item_id:
+                    self.reset_marquee_cell(previous_item_id)
+
+        def reset_marquee_cell(self, item_id: str) -> None:
+            """Stop scrolling a basename cell that lost row selection."""
+            row = next((row for row in self.rows if row["item_id"] == item_id), None)
+            if row is None:
+                return
+            self.query_one("#queue-table", DataTable).update_cell(
+                item_id, "basename", truncate_filename(row.get("basename"), 32),
+                update_width=False)
+
+        def animate_marquee(self) -> None:
+            """Scroll the selected row's basename in place while it stays long."""
+            if not self.selected_item_id:
+                return
+            row = next((row for row in self.rows if row["item_id"] == self.selected_item_id),
+                      None)
+            if row is None or len(literal_text(row.get("basename"))) <= 32:
+                return
+            self.query_one("#queue-table", DataTable).update_cell(
+                self.selected_item_id, "basename",
+                marquee_filename(row.get("basename"), int(time.monotonic() * 3), width=32),
+                update_width=False)
 
         def action_focus_search(self) -> None:
             self.query_one("#queue-search", Input).focus()

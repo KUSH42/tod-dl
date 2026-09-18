@@ -10,7 +10,7 @@ The controller has durable selected-run state, no-overwrite finalization,
 recovery tests, signed provenance records, telemetry snapshots, and local
 confirmed controls for retry, Tor renewal, pause admission, resume
 admission, drain and stop, and checkpoint and stop. The repository test
-suite runs 167 local tests. These features do not establish compliance
+suite runs 169 local tests. These features do not establish compliance
 with every requirement in the related specifications.
 
 ## Remaining work
@@ -33,16 +33,20 @@ Complete telemetry integration. Use the read-only aria2 RPC interface for exact
 live transfer counters. Add tests for stale samples, snapshot failures, and all
 required metric-quality states.
 
-Complete the monitor and control UI. Add the planned dashboard and review
-views. 
+Complete the monitor and control UI. Add the planned Errors / review tab.
 
 Add inventory discovery last. Implement local snapshot parsing, reproducible
 manifest generation, and safe queue export. Add bounded network refresh and
 directory discovery only after the basic acquisition workflow is reliable.
 
-Enable marquee scrolling on long queue filenames on row select.
-Row select for list in Activity-view.
-Is Activity actually Dashboard, just misnamed?
+Add row select for the event list in the Activity tab.
+
+Activity and Dashboard are not the same view. `SPEC-console-ui.md` uses
+"dashboard" for the whole console screen: the worker table, disk lines, and
+the `[Activity] [Queue] [Errors / review]` tab bar. "Activity" is one tab
+inside that screen. `src/monitor.py` implements the dashboard screen and the
+Activity and Queue tabs. The Errors / review tab from the spec does not
+exist yet; that is the remaining "review view" work, not a dashboard rename.
 
 ## Specification status
 
