@@ -240,10 +240,38 @@ def relative_path(url: str) -> PurePosixPath:
     parts = parsed.path.lstrip("/").split("/", 2)
     if len(parts) != 3 or parts[1] != "data" or parts[2] in {"", "ALL_FILES"}:
         raise ValueError("URL is not a data-file URL")
-    path = PurePosixPath(parts[0]) / "data" / PurePosixPath(parts[2])
+    # Decode each URL path segment on its own, after splitting on literal "/",
+    # so a percent-encoded "/" cannot be mistaken for a path separator.
+    tail = [unquote(part) for part in PurePosixPath(parts[2]).parts]
+    path = PurePosixPath(unquote(parts[0])) / "data" / PurePosixPath(*tail)
     if any(part == ".." for part in path.parts):
         raise ValueError("unsafe URL path")
     return path
+
+
+def legacy_relative_path(url: str) -> PurePosixPath | None:
+    """Return the un-decoded path a pre-fix relative_path() would compute.
+
+    Multiple independent controllers can share one destination tree and
+    tell an already-acquired final apart from a missing one purely by
+    filesystem existence. Decoding percent-encoded segments changed the
+    computed path for evidence acquired before this fix; this reconstructs
+    the old path so that existing evidence is still found, regardless of
+    which controller's database (if any) recorded it.
+    """
+    try:
+        parsed = urlsplit(url)
+        if parsed.username or parsed.password or parsed.query:
+            return None
+        parts = parsed.path.lstrip("/").split("/", 2)
+        if len(parts) != 3 or parts[1] != "data" or parts[2] in {"", "ALL_FILES"}:
+            return None
+        path = PurePosixPath(parts[0]) / "data" / PurePosixPath(parts[2])
+        if any(part == ".." for part in path.parts):
+            return None
+        return path
+    except ValueError:
+        return None
 
 
 def read_queues(paths: list[Path]):
@@ -1283,10 +1311,31 @@ class Downloader:
         finally:
             os.close(descriptor)
 
+    def resolved_storage_target(self, rel: PurePosixPath, url: str) -> tuple[PurePosixPath, Path]:
+        """Return the storage path and destination target to use for url.
+
+        Independent controllers share one destination tree and tell an
+        already-acquired final apart from a missing one purely by filesystem
+        existence. Prefer the current (decoded) path; if nothing sits there,
+        fall back to where a pre-fix relative_path() would have placed it, so
+        evidence acquired before the decoding fix is still found instead of
+        being treated as missing.
+        """
+        stored = storage_relative(rel, self.destination)
+        target = self.destination / Path(stored)
+        if not target.exists():
+            legacy_rel = legacy_relative_path(url)
+            if legacy_rel is not None and legacy_rel != rel:
+                legacy_stored = storage_relative(legacy_rel, self.destination)
+                legacy_target = self.destination / Path(legacy_stored)
+                if legacy_target.exists():
+                    return legacy_stored, legacy_target
+        return stored, target
+
     def import_queues(self, db: sqlite3.Connection) -> int:
         count = 0
         for url, rel in read_queues(self.args.queue):
-            stored = storage_relative(rel, self.destination)
+            stored, _ = self.resolved_storage_target(rel, url)
             db.execute("INSERT OR IGNORE INTO downloads (url, relative_path, "
                        "storage_path, staging_path, updated_at) VALUES (?, ?, ?, ?, ?)",
                        (url, rel.as_posix(), stored.as_posix(),
@@ -1318,8 +1367,7 @@ class Downloader:
         for url, rel in read_queues(self.args.queue):
             if self.args.max_files and selected >= self.args.max_files:
                 break
-            stored = storage_relative(rel, self.destination)
-            target = self.destination / Path(stored)
+            stored, target = self.resolved_storage_target(rel, url)
             if target.exists():
                 existing += 1
                 self.transition(db, url, "existing_unverified", "final already exists",
@@ -1337,7 +1385,7 @@ class Downloader:
         for url, rel in read_queues(self.args.queue):
             if self.args.max_files and selected >= self.args.max_files:
                 break
-            target = self.destination / Path(storage_relative(rel, self.destination))
+            stored, target = self.resolved_storage_target(rel, url)
             if target.exists():
                 existing += 1
                 print(f"EXISTING  {target}")

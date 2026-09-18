@@ -30,8 +30,8 @@ module_spec.loader.exec_module(tod_dl)
 
 from tod_dl import (ADMISSION_POLL_SECONDS, Downloader, RETRY_DELAYS,
                     TelemetryStateProjection,
-                    aria2_log_terminal_status, aria2_rpc_job_status, sha256sum,
-                    storage_relative)
+                    aria2_log_terminal_status, aria2_rpc_job_status, relative_path,
+                    sha256sum, storage_relative)
 from download_telemetry import (PUBLISH_INTERVAL_SECONDS, TelemetryPublisher,
                                 estimate_eta_seconds, reduce_metrics)
 from provenance import ProvenanceWriter
@@ -124,6 +124,71 @@ class RunSelectionTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT status FROM downloads WHERE url=?",
                                         (urls[0],)).fetchone()[0], "existing_unverified")
             db.close()
+
+    def test_relative_path_decodes_percent_encoded_segments(self):
+        path = relative_path("https://example.invalid/RUN1/data/a%20b/c%24d.txt")
+        self.assertEqual(path.as_posix(), "RUN1/data/a b/c$d.txt")
+
+    def test_relative_path_decodes_prefix_segment(self):
+        path = relative_path("https://example.invalid/R%20UN1/data/file.txt")
+        self.assertEqual(path.as_posix(), "R UN1/data/file.txt")
+
+    def test_relative_path_rejects_encoded_traversal(self):
+        with self.assertRaises(ValueError):
+            relative_path("https://example.invalid/RUN1/data/a%2F%2E%2E%2Fb")
+
+    def test_relative_path_rejects_plain_traversal(self):
+        with self.assertRaises(ValueError):
+            relative_path("https://example.invalid/RUN1/data/../secret")
+
+    def test_reimport_does_not_remap_an_already_acquired_encoded_path(self):
+        """A corrected relative_path() must not orphan evidence already
+        acquired under the previous, un-decoded storage path."""
+        url = "https://fixture.test/first/data/a%20b.bin"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            queue = root / "queue.txt"
+            queue.write_text(url + "\n", encoding="utf-8")
+            downloader = Downloader(make_args(root, queue))
+            downloader.destination.mkdir()
+            downloader.state.mkdir()
+            acquired = downloader.destination / "first" / "data" / "a%20b.bin"
+            acquired.parent.mkdir(parents=True)
+            acquired.write_bytes(b"evidence")
+            db = downloader.open_db()
+            db.execute("INSERT INTO downloads (url, relative_path, storage_path, "
+                       "status, updated_at) VALUES (?, ?, ?, 'complete', ?)",
+                       (url, "first/data/a%20b.bin", "first/data/a%20b.bin", "now"))
+            db.commit()
+
+            downloader.import_queues(db)
+
+            self.assertEqual(db.execute("SELECT storage_path FROM downloads WHERE url=?",
+                                        (url,)).fetchone()[0], "first/data/a%20b.bin")
+            selected, existing = downloader.scope_run(db)
+            self.assertEqual((selected, existing), (0, 1))
+            self.assertEqual(db.execute("SELECT status FROM downloads WHERE url=?",
+                                        (url,)).fetchone()[0], "existing_unverified")
+            db.close()
+
+    def test_dry_run_does_not_report_an_already_acquired_encoded_path_as_missing(self):
+        url = "https://fixture.test/first/data/a%20b.bin"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            queue = root / "queue.txt"
+            queue.write_text(url + "\n", encoding="utf-8")
+            downloader = Downloader(make_args(root, queue))
+            downloader.destination.mkdir()
+            downloader.state.mkdir()
+            acquired = downloader.destination / "first" / "data" / "a%20b.bin"
+            acquired.parent.mkdir(parents=True)
+            acquired.write_bytes(b"evidence")
+
+            with redirect_stdout(StringIO()) as output:
+                downloader.dry_run()
+
+            self.assertIn("EXISTING", output.getvalue())
+            self.assertNotIn("MISSING", output.getvalue())
 
     def test_retry_backoff_is_capped_at_five_minutes(self):
         self.assertEqual(max(RETRY_DELAYS), 300)
