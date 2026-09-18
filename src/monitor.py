@@ -1259,7 +1259,6 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             self.set_wide(self.size.width >= 100)
             self.reload(reset=True)
             self.set_interval(3, self.poll_revision)
-            self.focus_default()
 
         def focus_default(self) -> None:
             """Move focus inside the pane so its own bindings receive keys."""
