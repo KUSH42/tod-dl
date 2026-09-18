@@ -1190,7 +1190,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             self.pane = pane
 
         def action_cancel(self) -> None:
-            self.value = self.pane.query
+            self.value = self.pane.search_text
             self.blur()
 
     class QueuePane(Vertical):
@@ -1227,7 +1227,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
         def __init__(self) -> None:
             super().__init__(id="queue-pane")
             self.bucket = "all"
-            self.query = ""
+            self.search_text = ""
             self.cursor_stack: list[str | None] = [None]
             self.page_index = 0
             self.next_cursor: str | None = None
@@ -1288,8 +1288,8 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             parts = []
             if self.bucket != "all":
                 parts.append(f"state={self.bucket}")
-            if self.query:
-                parts.append(f"search={self.query!r}")
+            if self.search_text:
+                parts.append(f"search={self.search_text!r}")
             return ", ".join(parts) if parts else "none"
 
         def update_header(self) -> None:
@@ -1321,7 +1321,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
                 return
             self.request_active = True
             run_id = self.app.current["run_id"]
-            parameters: dict[str, Any] = {"bucket": self.bucket, "query": self.query,
+            parameters: dict[str, Any] = {"bucket": self.bucket, "query": self.search_text,
                                           "page_size": 100}
             if cursor:
                 parameters["cursor"] = cursor
@@ -1410,7 +1410,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
         def on_input_submitted(self, event: Input.Submitted) -> None:
             if event.input.id != "queue-search":
                 return
-            self.query = event.value
+            self.search_text = event.value
             self.reload(reset=True)
 
         def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
@@ -1449,7 +1449,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             self.request_page(None)
 
         def action_clear_filters(self) -> None:
-            self.bucket, self.query = "all", ""
+            self.bucket, self.search_text = "all", ""
             self.query_one("#queue-bucket", Select).value = "all"
             self.query_one("#queue-search", Input).value = ""
             self.reload(reset=True)
@@ -1568,7 +1568,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             self.export_active = True
             self.export_path = path
             self.export_bucket = self.bucket
-            self.export_query = self.query
+            self.export_query = self.search_text
             self.export_collected: list[dict[str, Any]] = []
             self.refresh_bindings()
             self.export_scan(None)
@@ -1621,7 +1621,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
                 return None
             if action == "previous_page" and self.page_index == 0:
                 return None
-            if action == "clear_filters" and self.bucket == "all" and not self.query:
+            if action == "clear_filters" and self.bucket == "all" and not self.search_text:
                 return None
             if (action == "first_page" and self.page_index == 0
                     and self.cursor_stack[0] is None):
@@ -1648,7 +1648,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             if self.request_active or not self.rows:
                 return
             run_id = self.app.current["run_id"]
-            parameters: dict[str, Any] = {"bucket": self.bucket, "query": self.query,
+            parameters: dict[str, Any] = {"bucket": self.bucket, "query": self.search_text,
                                           "page_size": 100}
             cursor = self.cursor_stack[self.page_index]
             if cursor:
