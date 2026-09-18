@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -23,8 +24,8 @@ from urllib.parse import unquote
 from urllib.request import Request, urlopen
 
 
-GENERATOR_ALGORITHM = "blake2b-64-counter-v1"
-GENERATOR_BLOCK_SIZE = 64
+GENERATOR_ALGORITHM = "shake256-counter-v1"
+GENERATOR_BLOCK_SIZE = 1024 * 1024
 MANIFEST_VERSION = 1
 REPORT_VERSION = 1
 SCENARIO_STATES = frozenset({"pass", "fail", "blocked", "not run"})
@@ -33,6 +34,14 @@ REQUIRED_SCENARIOS = frozenset(f"E{number:02d}" for number in range(1, 15))
 
 class EvaluationError(ValueError):
     """Report invalid evaluation input without changing evidence files."""
+
+
+@lru_cache(maxsize=8)
+def _generate_block(seed: bytes, index: int) -> bytes:
+    """Derive one deterministic block. Cached because callers read sequentially
+    and each Fixture.generator access builds a fresh DeterministicBytes, so an
+    instance-level cache would never hit."""
+    return hashlib.shake_256(seed + index.to_bytes(16, "big")).digest(GENERATOR_BLOCK_SIZE)
 
 
 class DeterministicBytes:
@@ -47,9 +56,7 @@ class DeterministicBytes:
         self.length = length
 
     def _block(self, index: int) -> bytes:
-        return hashlib.blake2b(
-            self.seed + index.to_bytes(16, "big"), digest_size=GENERATOR_BLOCK_SIZE
-        ).digest()
+        return _generate_block(self.seed, index)
 
     def read(self, offset: int, length: int) -> bytes:
         """Return a bounded byte range from the generated representation."""

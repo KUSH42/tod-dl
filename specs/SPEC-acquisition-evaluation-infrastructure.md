@@ -41,6 +41,18 @@ confirmed working for E02's own requirement (resumed past the 256 MiB
 interrupt point in the partial run above) independent of the generator's
 throughput problem.
 
+A later session measured and fixed the generator throughput problem.
+`DeterministicBytes._block()` (`src/acquisition_evaluation.py`) hashed a
+64-byte `blake2b` digest per block, which needed 134 million hash calls to
+generate an 8 GiB fixture (~3.4 MB/s); separately, `Fixture.generator`
+returns a new `DeterministicBytes` instance on every access, so no
+per-instance block cache could ever hit. The fix switches to a `shake_256`
+digest producing 1 MiB blocks (8192 calls for an 8 GiB fixture) through a
+module-level `lru_cache` keyed on `(seed, block_index)`, which caches across
+`Fixture.generator` accesses. Measured: an 8 GiB fixture's `sha256()` pass
+now completes in ~16 s (>500 MB/s), well inside the 600 s per-attempt time
+limit. E02 has not yet been run to completion with the fixed generator.
+
 ## Outcome and scope
 
 Define the test infrastructure that

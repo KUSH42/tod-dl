@@ -667,15 +667,18 @@ def e13_concurrency_timing(base: Path, torsocks_conf: Path) -> ScenarioResult:
 
 
 NOT_RUN = {
-    "E02": "harness built and wired, but not run to completion this session: the "
-          "deterministic fixture generator (Section 1's unmeasured open question in "
-          "specs/SPEC-acquisition-evaluation-infrastructure.md) sustained only ~3.4 MB/s "
-          "for the first 1.25 GiB of the 8 GiB fixture, which would need 30+ minutes to "
-          "finish and risks exceeding each attempt's 600s time limit. The is_incomplete_body "
-          "fix itself is confirmed working (the staging file grew well past the 256 MiB "
-          "interrupt point, i.e. it resumed instead of routing to review_required); the "
-          "open question is generator throughput, not controller behavior. Measure and "
-          "speed up the generator before running E02 to completion.",
+    "E02": "harness built and wired, but not run to completion this session. The "
+          "deterministic fixture generator's throughput (Section 1's open question in "
+          "specs/SPEC-acquisition-evaluation-infrastructure.md) is now measured and "
+          "fixed: it used a 64-byte blake2b digest per block (134M hash calls for an "
+          "8 GiB fixture, ~3.4 MB/s) and, through Fixture.generator, created a fresh "
+          "DeterministicBytes instance per read, so no per-instance cache could ever "
+          "hit. It now uses a shake_256 digest producing 1 MiB blocks (8192 calls for "
+          "an 8 GiB fixture) via a module-level cache keyed on (seed, block index), "
+          "measured at 8 GiB in ~16 s (>500 MB/s), well inside the 600 s attempt limit. "
+          "The is_incomplete_body fix itself is confirmed working (the staging file "
+          "grew well past the 256 MiB interrupt point, i.e. it resumed instead of "
+          "routing to review_required). Run E02 to completion next.",
     "E11": "no harness built yet for a five-item run selected from a larger queue; "
           "see specs/SPEC-acquisition-tool-evaluation.md's scenario table.",
 }
