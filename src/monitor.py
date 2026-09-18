@@ -17,8 +17,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
-from controller import (ControlError, PRIORITY_MAX, PRIORITY_MIN, control_request,
-                        get_control_state)
+from controller import (COOLDOWN_OVERRIDE_MAX_S, COOLDOWN_OVERRIDE_MIN_S, ControlError,
+                        PRIORITY_MAX, PRIORITY_MIN, control_request, get_control_state)
 from inspection import InspectionError, inspection_request
 
 
@@ -530,6 +530,7 @@ QUEUE_STATE_FILTERS = ("all", "queued", "busy", "retry", "exhausted", "complete"
                       "existing_unverified", "review_required", "unavailable",
                       "excluded", "unknown")
 QUEUE_NOT_ELIGIBLE_BUCKETS = {"exhausted", "review_required", "excluded"}
+COOLDOWN_STEP_S = 30
 
 
 def queue_retry_status(bucket: Any, retry_at: Any, cooldown_active: bool = False,
@@ -1063,6 +1064,10 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                    "Raise priority", show=True),
             Binding("left_square_bracket", "prepare_lower_priority_selected",
                    "Lower priority", show=True),
+            Binding("right_curly_bracket", "prepare_raise_cooldown_selected",
+                   "Raise cooldown", show=True),
+            Binding("left_curly_bracket", "prepare_lower_cooldown_selected",
+                   "Lower cooldown", show=True),
             Binding("l", "logs", "Logs"),
             Binding("question_mark", "help", "Help", show=True),
         ]
@@ -1366,6 +1371,39 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                 return
             self.app.prepare_row_scoped_priority(self.selected_item_id, self.selected_priority() - 1)
 
+        def selected_cooldown_s(self) -> int:
+            row = next((row for row in self.rows if row["item_id"] == self.selected_item_id), None)
+            retry_at = row.get("retry_at") if row else None
+            if not isinstance(retry_at, (int, float)):
+                return 0
+            return max(0, int(retry_at - time.time()))
+
+        def cooldown_selected_eligible(self, delta: int) -> bool:
+            """Return whether the focused row's retry cooldown can move by `delta` seconds.
+
+            Eligibility is advisory only; the controller validates the item's
+            actual cooldown-eligible state and bounds at execution time.
+            """
+            if not (control and state and self.selected_item_id):
+                return False
+            row = next((row for row in self.rows if row["item_id"] == self.selected_item_id), None)
+            if not row or row.get("bucket") != "retry":
+                return False
+            current = self.selected_cooldown_s()
+            return COOLDOWN_OVERRIDE_MIN_S <= current + delta <= COOLDOWN_OVERRIDE_MAX_S
+
+        def action_prepare_raise_cooldown_selected(self) -> None:
+            if not self.cooldown_selected_eligible(COOLDOWN_STEP_S):
+                return
+            self.app.prepare_row_scoped_cooldown(
+                self.selected_item_id, self.selected_cooldown_s() + COOLDOWN_STEP_S)
+
+        def action_prepare_lower_cooldown_selected(self) -> None:
+            if not self.cooldown_selected_eligible(-COOLDOWN_STEP_S):
+                return
+            self.app.prepare_row_scoped_cooldown(
+                self.selected_item_id, self.selected_cooldown_s() - COOLDOWN_STEP_S)
+
         def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
             if action == "next_page" and not self.next_cursor:
                 return None
@@ -1383,6 +1421,12 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             if action == "prepare_raise_priority_selected" and not self.priority_selected_eligible(1):
                 return None
             if action == "prepare_lower_priority_selected" and not self.priority_selected_eligible(-1):
+                return None
+            if (action == "prepare_raise_cooldown_selected"
+                    and not self.cooldown_selected_eligible(COOLDOWN_STEP_S)):
+                return None
+            if (action == "prepare_lower_cooldown_selected"
+                    and not self.cooldown_selected_eligible(-COOLDOWN_STEP_S)):
                 return None
             return True
 
@@ -1765,6 +1809,13 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                 return
             self.pending_item_ids = [item_id]
             self.prepare_action("set_item_priority", {"item_ids": [item_id], "priority": priority})
+
+        def prepare_row_scoped_cooldown(self, item_id: str, cooldown_s: int) -> None:
+            if not (control and state):
+                return
+            self.pending_item_ids = [item_id]
+            self.prepare_action("set_retry_cooldown",
+                                {"item_ids": [item_id], "cooldown_s": cooldown_s})
 
         def prepare_action(self, action: str, parameters: dict[str, Any] | None = None) -> None:
             self.submit_control_request(

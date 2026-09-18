@@ -86,6 +86,8 @@ EXCLUDABLE_STATUSES = frozenset({"pending", "queued", "active", "admitted",
                                  "unavailable"})
 PRIORITIZABLE_STATUSES = EXCLUDABLE_STATUSES
 PRIORITY_MIN, PRIORITY_MAX = -5, 5
+COOLDOWN_ELIGIBLE_STATUSES = frozenset({"retry_wait", "failed"})
+COOLDOWN_OVERRIDE_MIN_S, COOLDOWN_OVERRIDE_MAX_S = 0, 3600
 ADMISSION_POLL_SECONDS = 0.25
 SAFE_PATH_MAPPING_VERSION = "v1"
 DISPLAY_BUCKETS = ("queued", "busy", "retry", "exhausted", "complete",
@@ -600,6 +602,7 @@ class Downloader:
                 "retry_now": "available",
                 "exclude_item": "available",
                 "set_item_priority": "available",
+                "set_retry_cooldown": "available",
                 "renew_tor_circuits": "available" if renewal_available else "unavailable",
             },
         }
@@ -613,6 +616,8 @@ class Downloader:
             return self.control_exclude_item(db, request)
         if request.get("action") == "set_item_priority":
             return self.control_set_item_priority(db, request)
+        if request.get("action") == "set_retry_cooldown":
+            return self.control_set_retry_cooldown(db, request)
         if request.get("action") == "renew_tor_circuits":
             return self.control_renew_tor_circuits(db, request)
         return {"outcome": "rejected", "reason": "action is unavailable"}
@@ -813,6 +818,82 @@ class Downloader:
             self.projection.set_revision(revision)
         if self.telemetry:
             self.telemetry.event("info", "control", "set item priority accepted")
+        return {"outcome": "completed", "reason": reason, "state_revision": revision,
+                "items": item_outcomes}
+
+    def control_set_retry_cooldown(self, db: sqlite3.Connection,
+                                   request: dict[str, object]) -> dict[str, object]:
+        """Durably override a selected item's retry-cooldown deadline."""
+        request_id = request["request_id"]
+        session_id = request["session_id"]
+        if not isinstance(request_id, str) or not isinstance(session_id, str):
+            return {"outcome": "rejected", "reason": "invalid control request"}
+        parameters = request.get("parameters")
+        item_ids = parameters.get("item_ids") if isinstance(parameters, dict) else None
+        cooldown_s = parameters.get("cooldown_s") if isinstance(parameters, dict) else None
+        if (not isinstance(item_ids, list) or not item_ids
+                or not all(isinstance(item_id, str) and item_id for item_id in item_ids)):
+            return {"outcome": "rejected", "reason": "item_ids must be a non-empty list of strings"}
+        if (isinstance(cooldown_s, bool) or not isinstance(cooldown_s, int)
+                or not COOLDOWN_OVERRIDE_MIN_S <= cooldown_s <= COOLDOWN_OVERRIDE_MAX_S):
+            return {"outcome": "rejected",
+                    "reason": (f"cooldown_s must be an integer between "
+                               f"{COOLDOWN_OVERRIDE_MIN_S} and {COOLDOWN_OVERRIDE_MAX_S}")}
+        with self.db_lock:
+            existing = db.execute("SELECT outcome, reason, state_revision FROM control_requests "
+                                  "WHERE request_id=?", (request_id,)).fetchone()
+            if existing:
+                outcome, reason, revision = existing
+                return {"outcome": outcome, "reason": reason, "state_revision": revision}
+            selected_rows = db.execute(
+                "SELECT downloads.url, downloads.status, downloads.attempts, downloads.bytes, "
+                "downloads.next_retry_at, downloads.last_error FROM downloads JOIN run_items "
+                "ON run_items.url=downloads.url WHERE run_items.run_id=?",
+                (self.run_id,),
+            ).fetchall()
+            by_id = {self.item_id(row[0]): row for row in selected_rows}
+            item_outcomes: dict[str, str] = {}
+            changed_rows = []
+            new_retry_at = time.time() + cooldown_s
+            for item_id in item_ids:
+                row = by_id.get(item_id)
+                if row is None:
+                    item_outcomes[item_id] = "rejected: item is outside the selected set"
+                elif row[1] not in COOLDOWN_ELIGIBLE_STATUSES:
+                    item_outcomes[item_id] = f"rejected: item is in {row[1]}, not cooldown-eligible"
+                else:
+                    item_outcomes[item_id] = "cooldown set"
+                    changed_rows.append(row)
+            urls = [row[0] for row in changed_rows]
+            if urls:
+                placeholders = ",".join("?" * len(urls))
+                db.execute(
+                    f"UPDATE downloads SET next_retry_at=?, updated_at=? "
+                    f"WHERE url IN ({placeholders})",
+                    (new_retry_at, now(), *urls),
+                )
+            reason = (f"set retry cooldown to {cooldown_s}s for {len(changed_rows)} of "
+                      f"{len(item_ids)} requested item(s)")
+            db.execute("INSERT INTO download_transitions "
+                       "(url, run_id, from_status, to_status, detail, recorded_at) "
+                       "VALUES (?, ?, ?, ?, ?, ?)",
+                       ("__control__", self.run_id, "control", "control", reason, now()))
+            revision = self.advance_telemetry_revision(db)
+            db.execute("INSERT INTO control_requests "
+                       "(request_id, run_id, session_id, action, outcome, reason, "
+                       "state_revision, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                       (request_id, self.run_id, session_id, "set_retry_cooldown", "completed",
+                        reason, revision, now()))
+            db.commit()
+        for url, status, attempts, byte_count, retry_at, error in changed_rows:
+            old = {"url": url, "status": status, "attempts": attempts,
+                   "bytes": byte_count, "next_retry_at": retry_at, "last_error": error}
+            new = dict(old, next_retry_at=new_retry_at)
+            self.apply_projection_change(old, new, revision)
+        if self.projection and not changed_rows:
+            self.projection.set_revision(revision)
+        if self.telemetry:
+            self.telemetry.event("info", "control", "set retry cooldown accepted")
         return {"outcome": "completed", "reason": reason, "state_revision": revision,
                 "items": item_outcomes}
 

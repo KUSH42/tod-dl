@@ -417,6 +417,80 @@ class RunSelectionTests(unittest.TestCase):
             self.assertIn("priority", response["reason"])
             db.close()
 
+    def test_control_set_retry_cooldown_overrides_deadline_and_is_audited(self):
+        first_url = "https://fixture.test/first/data/item.bin"
+        second_url = "https://fixture.test/first/data/other.bin"
+        with tempfile.TemporaryDirectory() as temporary:
+            downloader, db = self.prepare(Path(temporary), [first_url, second_url])
+            downloader.scope_run(db)
+            downloader.update(db, "UPDATE downloads SET status='retry_wait', "
+                              "next_retry_at=9999999999 WHERE url=?", (first_url,))
+            request = {"request_id": "request-one", "session_id": "session-one",
+                      "parameters": {"item_ids": [downloader.item_id(first_url)],
+                                    "cooldown_s": 120}}
+
+            first = downloader.control_set_retry_cooldown(db, request)
+            second = downloader.control_set_retry_cooldown(db, request)
+
+            self.assertEqual(first["outcome"], second["outcome"])
+            self.assertEqual(first["reason"], second["reason"])
+            self.assertEqual(first["state_revision"], second["state_revision"])
+            self.assertEqual(first["outcome"], "completed")
+            self.assertEqual(first["items"][downloader.item_id(first_url)], "cooldown set")
+            new_retry_at = db.execute("SELECT next_retry_at FROM downloads WHERE url=?",
+                                      (first_url,)).fetchone()[0]
+            self.assertLess(new_retry_at, 9999999999)
+            self.assertGreater(new_retry_at, time.time())
+            self.assertEqual(db.execute("SELECT next_retry_at FROM downloads WHERE url=?",
+                                        (second_url,)).fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM control_requests").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM download_transitions "
+                                        "WHERE url='__control__'").fetchone()[0], 1)
+            db.close()
+
+    def test_control_set_retry_cooldown_rejects_out_of_scope_and_inapplicable_ids(self):
+        first_url = "https://fixture.test/first/data/item.bin"
+        with tempfile.TemporaryDirectory() as temporary:
+            downloader, db = self.prepare(Path(temporary), [first_url])
+            downloader.scope_run(db)
+            downloader.update(db, "UPDATE downloads SET status='complete' WHERE url=?",
+                              (first_url,))
+            request = {"request_id": "request-one", "session_id": "session-one",
+                      "parameters": {"item_ids": [downloader.item_id(first_url), "missing-item"],
+                                    "cooldown_s": 60}}
+
+            response = downloader.control_set_retry_cooldown(db, request)
+
+            self.assertEqual(response["outcome"], "completed")
+            self.assertIn("not cooldown-eligible", response["items"][downloader.item_id(first_url)])
+            self.assertIn("outside the selected set", response["items"]["missing-item"])
+            self.assertEqual(db.execute("SELECT next_retry_at FROM downloads WHERE url=?",
+                                        (first_url,)).fetchone()[0], 0)
+            db.close()
+
+    def test_control_set_retry_cooldown_rejects_malformed_item_ids_and_bounds(self):
+        url = "https://fixture.test/first/data/item.bin"
+        with tempfile.TemporaryDirectory() as temporary:
+            downloader, db = self.prepare(Path(temporary), [url])
+            downloader.scope_run(db)
+            missing_ids = {"request_id": "request-one", "session_id": "session-one",
+                          "parameters": {"item_ids": [], "cooldown_s": 60}}
+
+            response = downloader.control_set_retry_cooldown(db, missing_ids)
+
+            self.assertEqual(response["outcome"], "rejected")
+            self.assertIn("item_ids", response["reason"])
+
+            out_of_bounds = {"request_id": "request-two", "session_id": "session-one",
+                             "parameters": {"item_ids": [downloader.item_id(url)],
+                                           "cooldown_s": 99999}}
+
+            response = downloader.control_set_retry_cooldown(db, out_of_bounds)
+
+            self.assertEqual(response["outcome"], "rejected")
+            self.assertIn("cooldown_s", response["reason"])
+            db.close()
+
     def test_control_wake_interrupts_active_transfer_wait(self):
         with tempfile.TemporaryDirectory() as temporary:
             queue = Path(temporary) / "queue.txt"

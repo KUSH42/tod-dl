@@ -68,9 +68,10 @@ replayed request returns the original result and cannot repeat a mutation.
 ## Command set and confirmation
 
 The implemented command set contains `get_control_state`,
-`prepare_confirmation`, `retry_now`, and `renew_tor_circuits`. The remaining
-actions below are deliberately deferred. The controller must validate every
-precondition at execution time; the UI state is advisory and can be stale.
+`prepare_confirmation`, `retry_now`, `exclude_item`, `set_item_priority`,
+`set_retry_cooldown`, and `renew_tor_circuits`. The remaining actions below
+are deliberately deferred. The controller must validate every precondition
+at execution time; the UI state is advisory and can be stale.
 
 | Action | Controller behavior | UI confirmation |
 | --- | --- | --- |

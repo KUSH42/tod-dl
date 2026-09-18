@@ -56,9 +56,19 @@ to the exact sections that define correct behavior.
   raise/lower the focused row's priority by one, each going through the
   standard confirmation flow; `list_queue` and the queue table now surface a
   `Priority` column.
+- Queue editing (step 4) is implemented: `control_set_retry_cooldown` in
+  `src/tod-dl.py` validates `item_ids` against `COOLDOWN_ELIGIBLE_STATUSES`
+  (`retry_wait`, `failed`) and a bounded `cooldown_s` parameter
+  (`COOLDOWN_OVERRIDE_MIN_S`/`COOLDOWN_OVERRIDE_MAX_S`, 0 to 3600 seconds in
+  `src/controller.py`), and sets `next_retry_at` to `time.time() + cooldown_s`; it
+  never touches the separate global/origin SOCKS cooldown gate
+  (`wait_for_cooldown`), so it cannot bypass that cooldown. `ControlServer`
+  binds both `item_ids` and `cooldown_s` to the confirmation nonce and
+  re-injects them at execution time. `QueuePane` binds `}`/`{` to raise/lower
+  the focused row's cooldown by 30 seconds, through the standard
+  confirmation flow.
 - `src/monitor.py`: `QueuePane`'s `BINDINGS` have no key bindings or actions
-  for export or queue editing.
-- No `set_retry_cooldown` handling exists anywhere in `src/`.
+  for export.
 
 ## Implementation order
 

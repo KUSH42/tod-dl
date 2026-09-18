@@ -263,6 +263,40 @@ class MonitorTests(unittest.TestCase):
             finally:
                 server.stop()
 
+    def test_set_retry_cooldown_requires_bounded_cooldown_and_confirms_scope(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            commands = []
+            server = ControlServer(root, "run-one", "session-one", lambda: {},
+                                   lambda request: commands.append(request) or {
+                                       "outcome": "completed", "reason": "cooldown set",
+                                       "state_revision": 6,
+                                   })
+            server.start()
+            try:
+                with self.assertRaisesRegex(ControlError, "item_ids must be"):
+                    control_request(root, "run-one", "prepare_confirmation",
+                                    {"action": "set_retry_cooldown", "cooldown_s": 60})
+                with self.assertRaisesRegex(ControlError, "cooldown_s must be"):
+                    control_request(root, "run-one", "prepare_confirmation",
+                                    {"action": "set_retry_cooldown", "item_ids": ["a"],
+                                     "cooldown_s": 99999})
+                prepared = control_request(
+                    root, "run-one", "prepare_confirmation",
+                    {"action": "set_retry_cooldown", "item_ids": ["a"], "cooldown_s": 90}
+                )["confirmation"]
+                self.assertIn("1 selected item(s)", prepared["scope"])
+                # The final request must not be able to widen scope or change the
+                # confirmed cooldown: the controller re-injects both regardless of
+                # what the client resends.
+                control_request(root, "run-one", "set_retry_cooldown",
+                                {"nonce": prepared["nonce"], "confirmation": "set_retry_cooldown",
+                                 "item_ids": ["b", "c"], "cooldown_s": 3})
+                self.assertEqual(commands[0]["parameters"]["item_ids"], ["a"])
+                self.assertEqual(commands[0]["parameters"]["cooldown_s"], 90)
+            finally:
+                server.stop()
+
     def test_tor_renewal_requires_confirmation_and_replays_request_id(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

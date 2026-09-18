@@ -21,6 +21,8 @@ PROTOCOL_VERSION = 1
 MAX_MESSAGE_BYTES = 64 * 1024
 PRIORITY_MIN = -5
 PRIORITY_MAX = 5
+COOLDOWN_OVERRIDE_MIN_S = 0
+COOLDOWN_OVERRIDE_MAX_S = 3600
 
 
 class ControlError(RuntimeError):
@@ -204,7 +206,7 @@ class ControlServer:
             if action == "prepare_confirmation":
                 return self._prepare_confirmation(request_id, request.get("parameters"))
             if (action not in {"retry_now", "exclude_item", "set_item_priority",
-                                "renew_tor_circuits"}
+                                "set_retry_cooldown", "renew_tor_circuits"}
                     or self.action_handler is None):
                 raise ControlError("action is unavailable")
             return self._confirmed_action(action, request_id, request.get("parameters"), request)
@@ -216,11 +218,13 @@ class ControlServer:
             raise ControlError("confirmation parameters must be an object")
         action = parameters.get("action")
         if action not in {"retry_now", "exclude_item", "set_item_priority",
-                          "renew_tor_circuits"}:
+                          "set_retry_cooldown", "renew_tor_circuits"}:
             raise ControlError("action is unavailable")
         item_ids: tuple[str, ...] | None = None
-        if action in {"retry_now", "exclude_item", "set_item_priority"} and (
-                action in {"exclude_item", "set_item_priority"} or "item_ids" in parameters):
+        if action in {"retry_now", "exclude_item", "set_item_priority",
+                      "set_retry_cooldown"} and (
+                action in {"exclude_item", "set_item_priority", "set_retry_cooldown"}
+                or "item_ids" in parameters):
             raw_item_ids = parameters.get("item_ids")
             if (not isinstance(raw_item_ids, list) or not raw_item_ids
                     or not all(isinstance(item_id, str) and item_id for item_id in raw_item_ids)):
@@ -233,16 +237,25 @@ class ControlServer:
                     or not PRIORITY_MIN <= priority <= PRIORITY_MAX):
                 raise ControlError(
                     f"priority must be an integer between {PRIORITY_MIN} and {PRIORITY_MAX}")
+        cooldown_s: int | None = None
+        if action == "set_retry_cooldown":
+            cooldown_s = parameters.get("cooldown_s")
+            if (isinstance(cooldown_s, bool) or not isinstance(cooldown_s, int)
+                    or not COOLDOWN_OVERRIDE_MIN_S <= cooldown_s <= COOLDOWN_OVERRIDE_MAX_S):
+                raise ControlError(
+                    f"cooldown_s must be an integer between {COOLDOWN_OVERRIDE_MIN_S} "
+                    f"and {COOLDOWN_OVERRIDE_MAX_S}")
         if action == "retry_now":
             scope = (f"{len(item_ids)} selected item(s) in the immutable selected run"
                       if item_ids else "retryable items in the immutable selected run")
-        elif action in {"exclude_item", "set_item_priority"}:
+        elif action in {"exclude_item", "set_item_priority", "set_retry_cooldown"}:
             scope = f"{len(item_ids)} selected item(s) in the immutable selected run"
         else:
             scope = "future Tor streams only"
         nonce = secrets.token_urlsafe(24)
         with self.command_lock:
-            self.confirmations[nonce] = (action, time.monotonic() + 60, item_ids, priority)
+            self.confirmations[nonce] = (action, time.monotonic() + 60, item_ids, priority,
+                                         cooldown_s)
         return {"request_id": request_id, "outcome": "completed", "confirmation": {
             "nonce": nonce, "action": action, "expires_in_s": 60, "scope": scope,
         }}
@@ -263,10 +276,13 @@ class ControlServer:
                 raise ControlError(f"{action} confirmation is invalid or expired")
             item_ids = prepared[2]
             priority = prepared[3]
+            cooldown_s = prepared[4]
             if item_ids is not None:
                 parameters = {**parameters, "item_ids": list(item_ids)}
             if priority is not None:
                 parameters = {**parameters, "priority": priority}
+            if cooldown_s is not None:
+                parameters = {**parameters, "cooldown_s": cooldown_s}
             request = {**request, "parameters": parameters}
             response = self.action_handler(request)
             if not isinstance(response, dict) or response.get("outcome") not in {
