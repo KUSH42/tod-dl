@@ -18,3 +18,4 @@
 policy-ber-*.json.bak
 # Case-specific inventory policies; never store them in Git.
 /inventory-policies/
+/tests/fixtures/inventory/
