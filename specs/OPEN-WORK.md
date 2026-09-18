@@ -40,6 +40,10 @@ Add inventory discovery last. Implement local snapshot parsing, reproducible
 manifest generation, and safe queue export. Add bounded network refresh and
 directory discovery only after the basic acquisition workflow is reliable.
 
+Enable marquee scrolling on long queue filenames on row select.
+Row select for list in Activity-view.
+Is Activity actually Dashboard, just misnamed?
+
 ## Specification status
 
 The current specification status is grouped below.
