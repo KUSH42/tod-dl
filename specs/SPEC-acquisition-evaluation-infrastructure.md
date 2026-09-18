@@ -17,19 +17,29 @@ generator and resource sampler for E10 (`generate_synthetic_queue_rows`,
 assertions for E13 (`e13_concurrency_timing`), reading admission and
 completion timestamps from `download_transitions` via `read_transitions`
 (`src/aria2_evaluation_adapter.py`). Per this specification's scope, none of
-E02, E05, E06, E10, or E13 was run as part of this work; a later evaluation
-report must run them, per
-[the acquisition tool evaluation specification](SPEC-acquisition-tool-evaluation.md).
-Section 1's `is_incomplete_body_failure()` gap is fixed outside this
-specification's scope, after this specification's implementation date:
-`Downloader.transfer()` (`src/tod-dl.py`) now retries a first
-"Got EOF from the server" failure through the normal `retry_wait` path
-instead of routing it straight to `review_required`, so a resumable
-mid-transfer cut can complete via `--continue=true` on the next attempt. It
-gives up to `review_required` only when a retry's incomplete-body failure
-shows no growth in staged bytes since the prior one, which is the signal for
-a genuinely short body. E02 is expected to pass as built; rerun it to
-confirm.
+E02, E05, E06, E10, or E13 was run as part of this work.
+
+A later session wired E05, E06, E10, and E13 into
+`src/run_acquisition_evaluation.py`'s `main()` and ran them, per
+`specs/reports/acquisition-tool-evaluation-2026-09-18b.md`: E10 and E13
+pass; E05 and E06 fail on two real, confirmed controller gaps (a
+`scope_run()`/`reconcile_promotions()` ordering bug, plus a related stale
+`.aria2`-control-file false-failure in `Downloader.transfer()`), not
+infrastructure gaps — see that report's "Remaining gaps" section. E02 did
+not run to completion: its fixture generator sustained only ~3.4 MB/s in a
+partial run, too slow to finish within the 600s per-attempt time limit,
+confirming Section 1's unmeasured open question was a real cost, not a
+false worry. Separately, Section 1's `is_incomplete_body_failure()` gap is
+fixed outside this specification's scope: `Downloader.transfer()`
+(`src/tod-dl.py`) now retries a first "Got EOF from the server" failure
+through the normal `retry_wait` path instead of routing it straight to
+`review_required`, so a resumable mid-transfer cut can complete via
+`--continue=true` on the next attempt; it gives up to `review_required`
+only when a retry's incomplete-body failure shows no growth in staged
+bytes, which is the signal for a genuinely short body. That fix is
+confirmed working for E02's own requirement (resumed past the 256 MiB
+interrupt point in the partial run above) independent of the generator's
+throughput problem.
 
 ## Outcome and scope
 

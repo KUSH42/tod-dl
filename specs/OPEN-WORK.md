@@ -17,28 +17,37 @@ with every requirement in the related specifications.
 
 Finish the acquisition tool evaluation. The local fixture harness and an
 adapter that drives the real per-URL aria2 process configuration are
-available. The September 18, 2026 evaluation report
-(`specs/reports/acquisition-tool-evaluation-2026-09-18.md`) ran 8 of 14
-scenarios: E01, E03, E04, E07, E09, and E14 passed; E08 and E12 failed on
-real gaps in `src/tod-dl.py`. Both gaps are fixed as of 2026-09-18, with a
-regression test each: `Downloader.transfer` now recognizes aria2's short-body
-"Got EOF from the server" failure, retains the partial bytes as a review
-candidate, and transitions the item to `review_required` instead of
-`retry_wait`; `read_queues()` now takes an `on_reject` callback, and
-`import_queues` uses it to print a `[queue-rejected] <url>: <reason>` line
-for an invalid URL and for a duplicate URL. The fixture-driven E08/E12
-scenarios in the evaluation report have not been rerun against the fix. The
-infrastructure for E02, E05, E06, E10, and E13 is now built
-(`specs/SPEC-acquisition-evaluation-infrastructure.md`), but none of the five
-has run yet. E02's own controller-side gap — `is_incomplete_body_failure()`
-routing a resumable mid-transfer cut straight to `review_required` — is also
-fixed: `Downloader.transfer()` now retries a first incomplete-body failure
-through `retry_wait` and gives up to `review_required` only when a retry
-shows no growth in staged bytes. Rerun E08 and E12 against the fixture
-harness, run E02, E05, E06, E10, and E13, and rerun all 14 before selecting a
-configuration. Add a long-lived RPC worker only when the
-results show a mandatory scheduling, recovery, or resource gap. Do not run a
-source pilot until the evaluation selects a configuration.
+available. A second evaluation report
+(`specs/reports/acquisition-tool-evaluation-2026-09-18b.md`) ran 12 of 14
+scenarios: E01, E03, E04, E07, E08, E09, E10, E12, E13, and E14 pass; E05 and
+E06 fail on two distinct, real, confirmed controller gaps. E02 (8 GiB
+interrupted transfer) did not run this session — the deterministic fixture
+generator sustained only ~3.4 MB/s, too slow to finish within the harness's
+600s per-attempt time limit; this is a still-unmeasured generator-throughput
+question, not a controller gap (the `is_incomplete_body_failure()` resume fix
+itself is confirmed working). E11 (five-item run from a larger queue) has no
+harness built yet. The two confirmed gaps:
+
+- **E05/E06 share a root-cause family in `scope_run()`/`reconcile_promotions()`
+  ordering.** `scope_run()` (`src/tod-dl.py`) runs before
+  `reconcile_promotions()` and unconditionally stamps `existing_unverified`
+  on any queued URL whose final path already exists on disk, regardless of
+  its durable status. This pre-empts `reconcile_promotions()`'s dedicated
+  handling of a `promoting`-status row left by a killed supervisor: that
+  branch only ever fires when the crash happens before the final file link
+  exists (E06's `post_validation_intent` failpoint), never after
+  (`post_final_file_creation`, `post_completion_commit`). E05's
+  engine-kill sub-case hits the same bug, plus a second, related one where a
+  fully-completed `--continue=true` retry can leave a stale `.aria2` control
+  file behind that `Downloader.transfer()` misreads as failure despite
+  `ok=True`. See the report's "Remaining gaps" section for the full trace.
+
+Rerun E02 and build E11's harness before selecting a configuration. Fix the
+`scope_run()`/`reconcile_promotions()` ordering gap (and the related stale
+`.aria2`-control-file false-failure) before re-running E05/E06. Add a
+long-lived RPC worker only when the results show a mandatory scheduling,
+recovery, or resource gap unrelated to the above. Do not run a source pilot
+until the evaluation selects a configuration.
 
 Complete the reliable-acquisition contract after tool selection. The remaining
 work includes full engine lifecycle checks, bounded large-queue admission,
@@ -81,6 +90,7 @@ The current specification status is grouped below.
 
 ## Next steps
 
-Rerun E08 and E12 against the fixture harness to confirm the 2026-09-18 fix,
-then build the infrastructure for E02, E05, E06, E10, and E13. Record the
-selected engine configuration before you expand acquisition behavior.
+Fix the `scope_run()`/`reconcile_promotions()` ordering gap behind E05 and
+E06's failures, measure and speed up E02's fixture generator, build E11's
+harness, and rerun all 14 scenarios. Record the selected engine
+configuration before you expand acquisition behavior.
