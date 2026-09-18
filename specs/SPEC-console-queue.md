@@ -105,6 +105,13 @@ the partial scan as a page. On this `unavailable` result, the UI must show
 visited page. Disable unavailable directions. The monitor must retain at most
 three pages and 100 cursor entries. If earlier navigation expires, offer
 **First page**. Filter changes must clear cursors and start at the first page.
+
+`QueuePane` in `src/monitor.py` binds **g** to a **First page** action that
+resets the cursor stack and page index and requests the first page again. The
+same fix corrected the cursor-stack cap, which previously deleted the
+just-visited cursor past the 100th page and raised on the next PageUp,
+PageDown, or revision poll; the cap now evicts the oldest entries and shifts
+`page_index` to match, so the current page always stays addressable.
 An exhaustion-confirmation request does not push a new entry onto the visited
 page history and must not change which page **PageUp** returns to.
 

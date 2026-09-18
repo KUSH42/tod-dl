@@ -1042,6 +1042,7 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             Binding("pageup", "previous_page", "Prev page", priority=True),
             Binding("c", "clear_filters", "Clear filters"),
             Binding("f", "refresh_results", "Refresh results", show=False),
+            Binding("g", "first_page", "First page", show=False),
             Binding("l", "logs", "Logs"),
             Binding("question_mark", "help", "Help", show=True),
         ]
@@ -1190,7 +1191,10 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                 self.cursor_stack.append(self.next_cursor)
             else:
                 self.cursor_stack[self.page_index + 1] = self.next_cursor
-            del self.cursor_stack[100:]
+            if len(self.cursor_stack) > 100:
+                excess = len(self.cursor_stack) - 100
+                del self.cursor_stack[:excess]
+                self.page_index -= excess
             self.set_banner("")
             self.update_header()
             self.render_rows()
@@ -1263,6 +1267,12 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             self.page_index -= 1
             self.request_page(self.cursor_stack[self.page_index])
 
+        def action_first_page(self) -> None:
+            self.page_index = 0
+            self.cursor_stack = [None]
+            self.next_cursor = None
+            self.request_page(None)
+
         def action_clear_filters(self) -> None:
             self.bucket, self.query = "all", ""
             self.query_one("#queue-bucket", Select).value = "all"
@@ -1278,7 +1288,8 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
         def action_help(self) -> None:
             self.app.notify(
                 "/ search   Enter apply   Escape cancel   PageUp/PageDown page   "
-                "Enter opens item details   l logs   c clear filters   f refresh results",
+                "Enter opens item details   l logs   c clear filters   f refresh results   "
+                "g first page",
                 title="Queue help")
 
         def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
@@ -1287,6 +1298,9 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             if action == "previous_page" and self.page_index == 0:
                 return None
             if action == "clear_filters" and self.bucket == "all" and not self.query:
+                return None
+            if (action == "first_page" and self.page_index == 0
+                    and self.cursor_stack[0] is None):
                 return None
             return True
 
