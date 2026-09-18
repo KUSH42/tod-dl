@@ -71,6 +71,14 @@ Add inventory discovery last. Implement local snapshot parsing, reproducible
 manifest generation, and safe queue export. Add bounded network refresh and
 directory discovery only after the basic acquisition workflow is reliable.
 
+Add on-demand target-directory rescan after inventory discovery. It
+reconciles files already in the target directory against the inventory
+manifest (path mapping plus checksum verification), from a manual command and
+a debounced file-system watch, and produces a dated report plus a candidate
+acquisition queue for missing and mismatched items. It depends on
+inventory discovery's manifest and on the `expected_checksum` field already
+added to acquisition; it does not define either.
+
 Add row select for the event list in the Activity tab.
 
 Activity and Dashboard are not the same view. `SPEC-console-ui.md` uses
@@ -90,7 +98,7 @@ The current specification status is grouped below.
   recovery, provenance, console UI, controller controls, download telemetry,
   reliable acquisition, queue view, console visual style, and console
   inspection.
-- Planned: inventory discovery.
+- Planned: inventory discovery and target-directory rescan.
 
 ## Next steps
 
