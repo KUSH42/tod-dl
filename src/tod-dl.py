@@ -511,6 +511,8 @@ class Downloader:
         self.next_newnym_at = 0.0
         self.next_worker_start = 0.0
         self.stop_requested = threading.Event()
+        self.admission_paused = threading.Event()
+        self.drain_requested = threading.Event()
         self.control_wake = threading.Event()
         self.deadline: float | None = None
         self.pending_remediation_events: list[tuple[str, str, str]] = []
@@ -592,10 +594,13 @@ class Downloader:
             active_workers = len(self.active)
         renewal_available = (self.args.tor_newnym_interval > 0
                              and not self.stop_requested.is_set())
+        stopping = self.stop_requested.is_set()
+        draining = self.drain_requested.is_set()
+        paused = self.admission_paused.is_set()
         return {
             "state_revision": (self.projection.copy()["revision"]
                                if self.projection else 0),
-            "lifecycle": "stopping" if self.stop_requested.is_set() else "running",
+            "lifecycle": "stopping" if stopping else "running",
             "active_workers": active_workers,
             "actions": {
                 "get_control_state": "available",
@@ -604,6 +609,12 @@ class Downloader:
                 "set_item_priority": "available",
                 "set_retry_cooldown": "available",
                 "renew_tor_circuits": "available" if renewal_available else "unavailable",
+                "pause_admission": ("available" if not stopping and not draining and not paused
+                                    else "unavailable"),
+                "resume_admission": ("available" if not stopping and not draining and paused
+                                     else "unavailable"),
+                "drain_and_stop": "available" if not stopping and not draining else "unavailable",
+                "checkpoint_stop": "available" if not stopping else "unavailable",
             },
         }
 
@@ -620,6 +631,14 @@ class Downloader:
             return self.control_set_retry_cooldown(db, request)
         if request.get("action") == "renew_tor_circuits":
             return self.control_renew_tor_circuits(db, request)
+        if request.get("action") == "pause_admission":
+            return self.control_pause_admission(db, request)
+        if request.get("action") == "resume_admission":
+            return self.control_resume_admission(db, request)
+        if request.get("action") == "drain_and_stop":
+            return self.control_drain_and_stop(db, request)
+        if request.get("action") == "checkpoint_stop":
+            return self.control_checkpoint_stop(db, request)
         return {"outcome": "rejected", "reason": "action is unavailable"}
 
     def control_retry_now(self, db: sqlite3.Connection,
@@ -935,6 +954,143 @@ class Downloader:
         if self.telemetry:
             self.telemetry.request_publish()
         return result
+
+    def control_pause_admission(self, db: sqlite3.Connection,
+                               request: dict[str, object]) -> dict[str, object]:
+        """Stop new admission after the current scheduler step; active transfers continue."""
+        request_id = request.get("request_id")
+        session_id = request.get("session_id")
+        if not isinstance(request_id, str) or not isinstance(session_id, str):
+            return {"outcome": "rejected", "reason": "invalid control request"}
+        with self.db_lock:
+            existing = db.execute("SELECT outcome, reason, state_revision FROM control_requests "
+                                  "WHERE request_id=?", (request_id,)).fetchone()
+            if existing:
+                outcome, reason, revision = existing
+                return {"outcome": outcome, "reason": reason, "state_revision": revision}
+            if self.stop_requested.is_set() or self.drain_requested.is_set():
+                outcome, reason = "rejected", "admission cannot be paused while the run is stopping"
+            elif self.admission_paused.is_set():
+                outcome, reason = "rejected", "admission is already paused"
+            else:
+                self.admission_paused.set()
+                outcome, reason = "completed", "admission paused; active transfers continue"
+            revision = self.advance_telemetry_revision(db)
+            db.execute("INSERT INTO control_requests "
+                       "(request_id, run_id, session_id, action, outcome, reason, "
+                       "state_revision, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                       (request_id, self.run_id, session_id, "pause_admission", outcome,
+                        reason, revision, now()))
+            db.commit()
+        if self.projection:
+            self.projection.set_revision(revision)
+        if outcome == "completed" and self.telemetry:
+            self.telemetry.event("info", "control", reason)
+        return {"outcome": outcome, "reason": reason, "state_revision": revision}
+
+    def control_resume_admission(self, db: sqlite3.Connection,
+                                 request: dict[str, object]) -> dict[str, object]:
+        """Reopen admission for the immutable selected run without a restart."""
+        request_id = request.get("request_id")
+        session_id = request.get("session_id")
+        if not isinstance(request_id, str) or not isinstance(session_id, str):
+            return {"outcome": "rejected", "reason": "invalid control request"}
+        with self.db_lock:
+            existing = db.execute("SELECT outcome, reason, state_revision FROM control_requests "
+                                  "WHERE request_id=?", (request_id,)).fetchone()
+            if existing:
+                outcome, reason, revision = existing
+                return {"outcome": outcome, "reason": reason, "state_revision": revision}
+            if not self.admission_paused.is_set():
+                outcome, reason = "rejected", "admission is not paused"
+            else:
+                self.admission_paused.clear()
+                outcome, reason = "completed", "admission resumed for the selected run"
+            revision = self.advance_telemetry_revision(db)
+            db.execute("INSERT INTO control_requests "
+                       "(request_id, run_id, session_id, action, outcome, reason, "
+                       "state_revision, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                       (request_id, self.run_id, session_id, "resume_admission", outcome,
+                        reason, revision, now()))
+            db.commit()
+        if self.projection:
+            self.projection.set_revision(revision)
+        if outcome == "completed":
+            if self.telemetry:
+                self.telemetry.event("info", "control", reason)
+            self.control_wake.set()
+        return {"outcome": outcome, "reason": reason, "state_revision": revision}
+
+    def control_drain_and_stop(self, db: sqlite3.Connection,
+                               request: dict[str, object]) -> dict[str, object]:
+        """Stop admission and let active transfers reach durable states before exit."""
+        request_id = request.get("request_id")
+        session_id = request.get("session_id")
+        if not isinstance(request_id, str) or not isinstance(session_id, str):
+            return {"outcome": "rejected", "reason": "invalid control request"}
+        with self.db_lock:
+            existing = db.execute("SELECT outcome, reason, state_revision FROM control_requests "
+                                  "WHERE request_id=?", (request_id,)).fetchone()
+            if existing:
+                outcome, reason, revision = existing
+                return {"outcome": outcome, "reason": reason, "state_revision": revision}
+            if self.stop_requested.is_set() or self.drain_requested.is_set():
+                outcome, reason = "rejected", "the run is already stopping"
+            else:
+                self.drain_requested.set()
+                self.admission_paused.clear()
+                outcome = "completed"
+                reason = "draining active transfers to durable states; admission stopped"
+            revision = self.advance_telemetry_revision(db)
+            db.execute("INSERT INTO control_requests "
+                       "(request_id, run_id, session_id, action, outcome, reason, "
+                       "state_revision, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                       (request_id, self.run_id, session_id, "drain_and_stop", outcome,
+                        reason, revision, now()))
+            db.commit()
+        if self.projection:
+            self.projection.set_revision(revision)
+        if outcome == "completed":
+            if self.telemetry:
+                self.telemetry.set_lifecycle("stopping", "drain and stop requested by operator")
+                self.telemetry.event("info", "control", reason)
+            self.control_wake.set()
+        return {"outcome": outcome, "reason": reason, "state_revision": revision}
+
+    def control_checkpoint_stop(self, db: sqlite3.Connection,
+                                request: dict[str, object]) -> dict[str, object]:
+        """Checkpoint and terminate active engines safely, then exit."""
+        request_id = request.get("request_id")
+        session_id = request.get("session_id")
+        if not isinstance(request_id, str) or not isinstance(session_id, str):
+            return {"outcome": "rejected", "reason": "invalid control request"}
+        with self.db_lock:
+            existing = db.execute("SELECT outcome, reason, state_revision FROM control_requests "
+                                  "WHERE request_id=?", (request_id,)).fetchone()
+            if existing:
+                outcome, reason, revision = existing
+                return {"outcome": outcome, "reason": reason, "state_revision": revision}
+            if self.stop_requested.is_set():
+                outcome, reason = "rejected", "the run is already stopping"
+            else:
+                self.stop_requested.set()
+                outcome = "completed"
+                reason = "checkpoint requested; terminating active transfers safely"
+            revision = self.advance_telemetry_revision(db)
+            db.execute("INSERT INTO control_requests "
+                       "(request_id, run_id, session_id, action, outcome, reason, "
+                       "state_revision, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                       (request_id, self.run_id, session_id, "checkpoint_stop", outcome,
+                        reason, revision, now()))
+            db.commit()
+        if self.projection:
+            self.projection.set_revision(revision)
+        if outcome == "completed":
+            if self.telemetry:
+                self.telemetry.set_lifecycle("stopping", "checkpoint and stop requested by operator")
+                self.telemetry.event("info", "control", reason)
+            self.control_wake.set()
+        return {"outcome": outcome, "reason": reason, "state_revision": revision}
 
     def request_newnym(self, db: sqlite3.Connection | None = None,
                        request_id: str | None = None, session_id: str | None = None) -> bool | dict[str, object]:
@@ -1882,7 +2038,9 @@ class Downloader:
                 ) as pool:
                     futures: set[concurrent.futures.Future[str]] = set()
                     while True:
-                        while not self.stop_requested.is_set() and len(futures) < self.args.workers:
+                        while (not self.stop_requested.is_set() and not self.drain_requested.is_set()
+                               and not self.admission_paused.is_set()
+                               and len(futures) < self.args.workers):
                             if self.deadline is not None and time.monotonic() >= self.deadline:
                                 self.stop_requested.set()
                                 self.telemetry.set_lifecycle("stopping", "run time limit reached")
@@ -1912,7 +2070,7 @@ class Downloader:
                                 status = future.result()
                                 results[status] = results.get(status, 0) + 1
                             continue
-                        if self.stop_requested.is_set():
+                        if self.stop_requested.is_set() or self.drain_requested.is_set():
                             break
                         wait = self.retry_wait(db)
                         if wait is None:

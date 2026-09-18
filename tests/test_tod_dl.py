@@ -280,6 +280,99 @@ class RunSelectionTests(unittest.TestCase):
             self.assertIn("item_ids", response["reason"])
             db.close()
 
+    def test_control_pause_and_resume_admission_toggle_the_gate_and_are_audited(self):
+        url = "https://fixture.test/first/data/item.bin"
+        with tempfile.TemporaryDirectory() as temporary:
+            downloader, db = self.prepare(Path(temporary), [url])
+            downloader.scope_run(db)
+            pause_request = {"request_id": "pause-1", "session_id": "session-1"}
+
+            first = downloader.control_pause_admission(db, pause_request)
+            second = downloader.control_pause_admission(db, pause_request)
+            again_paused = downloader.control_pause_admission(
+                db, {"request_id": "pause-2", "session_id": "session-1"})
+
+            self.assertEqual(first["outcome"], "completed")
+            self.assertEqual(first, second)
+            self.assertTrue(downloader.admission_paused.is_set())
+            self.assertEqual(again_paused["outcome"], "rejected")
+
+            resume_request = {"request_id": "resume-1", "session_id": "session-1"}
+            resumed = downloader.control_resume_admission(db, resume_request)
+            not_paused = downloader.control_resume_admission(
+                db, {"request_id": "resume-2", "session_id": "session-1"})
+
+            self.assertEqual(resumed["outcome"], "completed")
+            self.assertFalse(downloader.admission_paused.is_set())
+            self.assertTrue(downloader.control_wake.is_set())
+            self.assertEqual(not_paused["outcome"], "rejected")
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM control_requests "
+                                        "WHERE action='pause_admission'").fetchone()[0], 2)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM control_requests "
+                                        "WHERE action='resume_admission'").fetchone()[0], 2)
+            db.close()
+
+    def test_control_drain_and_stop_gates_admission_without_stopping_active_transfers(self):
+        url = "https://fixture.test/first/data/item.bin"
+        with tempfile.TemporaryDirectory() as temporary:
+            downloader, db = self.prepare(Path(temporary), [url])
+            downloader.scope_run(db)
+            request = {"request_id": "drain-1", "session_id": "session-1"}
+
+            first = downloader.control_drain_and_stop(db, request)
+            second = downloader.control_drain_and_stop(db, request)
+            rejected = downloader.control_drain_and_stop(
+                db, {"request_id": "drain-2", "session_id": "session-1"})
+
+            self.assertEqual(first["outcome"], "completed")
+            self.assertEqual(first, second)
+            self.assertTrue(downloader.drain_requested.is_set())
+            self.assertFalse(downloader.stop_requested.is_set())
+            self.assertEqual(rejected["outcome"], "rejected")
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM control_requests "
+                                        "WHERE action='drain_and_stop'").fetchone()[0], 2)
+            db.close()
+
+    def test_control_checkpoint_stop_sets_stop_requested_and_is_audited(self):
+        url = "https://fixture.test/first/data/item.bin"
+        with tempfile.TemporaryDirectory() as temporary:
+            downloader, db = self.prepare(Path(temporary), [url])
+            downloader.scope_run(db)
+            request = {"request_id": "checkpoint-1", "session_id": "session-1"}
+
+            first = downloader.control_checkpoint_stop(db, request)
+            second = downloader.control_checkpoint_stop(db, request)
+            rejected = downloader.control_checkpoint_stop(
+                db, {"request_id": "checkpoint-2", "session_id": "session-1"})
+
+            self.assertEqual(first["outcome"], "completed")
+            self.assertEqual(first, second)
+            self.assertTrue(downloader.stop_requested.is_set())
+            self.assertEqual(rejected["outcome"], "rejected")
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM control_requests "
+                                        "WHERE action='checkpoint_stop'").fetchone()[0], 2)
+            db.close()
+
+    def test_control_state_reports_run_wide_action_availability(self):
+        url = "https://fixture.test/first/data/item.bin"
+        with tempfile.TemporaryDirectory() as temporary:
+            downloader, db = self.prepare(Path(temporary), [url])
+            downloader.scope_run(db)
+            downloader.args.tor_newnym_interval = 60
+
+            actions = downloader.control_state()["actions"]
+            self.assertEqual(actions["pause_admission"], "available")
+            self.assertEqual(actions["resume_admission"], "unavailable")
+            self.assertEqual(actions["drain_and_stop"], "available")
+            self.assertEqual(actions["checkpoint_stop"], "available")
+
+            downloader.control_pause_admission(
+                db, {"request_id": "pause-1", "session_id": "session-1"})
+            paused_actions = downloader.control_state()["actions"]
+            self.assertEqual(paused_actions["pause_admission"], "unavailable")
+            self.assertEqual(paused_actions["resume_admission"], "available")
+            db.close()
+
     def test_control_exclude_item_moves_selected_items_and_is_audited(self):
         first_url = "https://fixture.test/first/data/item.bin"
         second_url = "https://fixture.test/first/data/other.bin"

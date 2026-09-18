@@ -206,7 +206,9 @@ class ControlServer:
             if action == "prepare_confirmation":
                 return self._prepare_confirmation(request_id, request.get("parameters"))
             if (action not in {"retry_now", "exclude_item", "set_item_priority",
-                                "set_retry_cooldown", "renew_tor_circuits"}
+                                "set_retry_cooldown", "renew_tor_circuits",
+                                "pause_admission", "resume_admission",
+                                "drain_and_stop", "checkpoint_stop"}
                     or self.action_handler is None):
                 raise ControlError("action is unavailable")
             return self._confirmed_action(action, request_id, request.get("parameters"), request)
@@ -218,7 +220,9 @@ class ControlServer:
             raise ControlError("confirmation parameters must be an object")
         action = parameters.get("action")
         if action not in {"retry_now", "exclude_item", "set_item_priority",
-                          "set_retry_cooldown", "renew_tor_circuits"}:
+                          "set_retry_cooldown", "renew_tor_circuits",
+                          "pause_admission", "resume_admission",
+                          "drain_and_stop", "checkpoint_stop"}:
             raise ControlError("action is unavailable")
         item_ids: tuple[str, ...] | None = None
         if action in {"retry_now", "exclude_item", "set_item_priority",
@@ -250,6 +254,9 @@ class ControlServer:
                       if item_ids else "retryable items in the immutable selected run")
         elif action in {"exclude_item", "set_item_priority", "set_retry_cooldown"}:
             scope = f"{len(item_ids)} selected item(s) in the immutable selected run"
+        elif action in {"pause_admission", "resume_admission", "drain_and_stop",
+                        "checkpoint_stop"}:
+            scope = "the immutable selected run's admission and active transfers"
         else:
             scope = "future Tor streams only"
         nonce = secrets.token_urlsafe(24)

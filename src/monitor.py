@@ -780,6 +780,21 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                 message = (f"Exclude {self.item_count} selected item(s)?\n"
                            "This stops future admission and retry for them. It cannot "
                            "be undone in this release and does not change queue rank.")
+            elif self.action == "pause_admission":
+                message = ("Pause admission of new transfers?\n"
+                           "Active transfers keep running; nothing new is admitted "
+                           "until admission is resumed.")
+            elif self.action == "resume_admission":
+                message = ("Resume admission for this run?\n"
+                           "This reopens admission only for the immutable selected run.")
+            elif self.action == "drain_and_stop":
+                message = ("Drain and stop this run?\n"
+                           "Admission stops now; active transfers run to a durable "
+                           "state, then the run exits. This cannot be undone.")
+            elif self.action == "checkpoint_stop":
+                message = ("Checkpoint and stop this run?\n"
+                           "Active transfers are checkpointed and terminated safely, "
+                           "then the run exits. This cannot be undone.")
             else:
                 message = ("Ask Tor to use new circuits for future streams?\n"
                            "This does not prove a new route or affect active transfers.")
@@ -834,7 +849,11 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
         BINDINGS = [("escape", "dismiss", "Back"), ("r", "reveal_source", "Reveal source"),
                     ("n", "next_attempts", "Next attempts"),
                     Binding("q", "disabled_control", show=False),
-                    Binding("t", "disabled_control", show=False)]
+                    Binding("t", "disabled_control", show=False),
+                    Binding("p", "disabled_control", show=False),
+                    Binding("u", "disabled_control", show=False),
+                    Binding("d", "disabled_control", show=False),
+                    Binding("k", "disabled_control", show=False)]
         CSS = "#item-details { height: 1fr; overflow-y: auto; }"
 
         def __init__(self, run_id: str, item_id: str) -> None:
@@ -944,7 +963,11 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
         BINDINGS = [("escape", "dismiss", "Back"), ("i", "item_details", "Item details"),
                     ("l", "logs", "Logs"), ("r", "reveal_source", "Reveal source"),
                     Binding("q", "disabled_control", show=False),
-                    Binding("t", "disabled_control", show=False)]
+                    Binding("t", "disabled_control", show=False),
+                    Binding("p", "disabled_control", show=False),
+                    Binding("u", "disabled_control", show=False),
+                    Binding("d", "disabled_control", show=False),
+                    Binding("k", "disabled_control", show=False)]
         CSS = "#worker-details { height: 1fr; overflow-y: auto; }"
 
         def __init__(self, run_id: str, session_id: str, worker_id: int,
@@ -1567,7 +1590,11 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
 
     class Monitor(App):
         BINDINGS = [("q", "quit", "Close"), ("r", "prepare_retry_now", "Retry now"),
-                    ("t", "prepare_renew_tor_circuits", "Renew Tor")]
+                    ("t", "prepare_renew_tor_circuits", "Renew Tor"),
+                    ("p", "prepare_pause_admission", "Pause admission"),
+                    ("u", "prepare_resume_admission", "Resume admission"),
+                    ("d", "prepare_drain_and_stop", "Drain and stop"),
+                    ("k", "prepare_checkpoint_stop", "Checkpoint and stop")]
 
         def __init__(self) -> None:
             super().__init__()
@@ -1845,10 +1872,26 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                         and self.control_state.get("actions", {}).get(
                             "renew_tor_circuits") == "available")
 
+        def control_action_eligible(self, action: str) -> bool:
+            return bool(control and state and self.control_state
+                        and self.control_state.get("actions", {}).get(action) == "available")
+
         def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
             if action == "prepare_retry_now" and not self.retry_now_eligible():
                 return None
             if action == "prepare_renew_tor_circuits" and not self.tor_renewal_eligible():
+                return None
+            if action == "prepare_pause_admission" and not self.control_action_eligible(
+                    "pause_admission"):
+                return None
+            if action == "prepare_resume_admission" and not self.control_action_eligible(
+                    "resume_admission"):
+                return None
+            if action == "prepare_drain_and_stop" and not self.control_action_eligible(
+                    "drain_and_stop"):
+                return None
+            if action == "prepare_checkpoint_stop" and not self.control_action_eligible(
+                    "checkpoint_stop"):
                 return None
             return True
 
@@ -1906,6 +1949,30 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                 return
             self.pending_item_ids = None
             self.prepare_action("renew_tor_circuits")
+
+        def action_prepare_pause_admission(self) -> None:
+            if not self.control_action_eligible("pause_admission"):
+                return
+            self.pending_item_ids = None
+            self.prepare_action("pause_admission")
+
+        def action_prepare_resume_admission(self) -> None:
+            if not self.control_action_eligible("resume_admission"):
+                return
+            self.pending_item_ids = None
+            self.prepare_action("resume_admission")
+
+        def action_prepare_drain_and_stop(self) -> None:
+            if not self.control_action_eligible("drain_and_stop"):
+                return
+            self.pending_item_ids = None
+            self.prepare_action("drain_and_stop")
+
+        def action_prepare_checkpoint_stop(self) -> None:
+            if not self.control_action_eligible("checkpoint_stop"):
+                return
+            self.pending_item_ids = None
+            self.prepare_action("checkpoint_stop")
 
         def prepare_row_scoped_retry(self, item_id: str) -> None:
             if not (control and state):

@@ -2,10 +2,10 @@
 
 Status: partially implemented, September 18, 2026. `get_control_state`,
 `retry_now` (including its row-scoped `item_ids` parameter), `exclude_item`,
-and `renew_tor_circuits` are implemented. This specification extends the
+`renew_tor_circuits`, `pause_admission`, `resume_admission`, `drain_and_stop`,
+and `checkpoint_stop` are implemented. This specification extends the
 read-only [acquisition console UI](SPEC-console-ui.md) with a local,
-controller-owned command channel. The remaining mutating actions are
-planned.
+controller-owned command channel.
 
 ## Outcome and authority boundary
 
@@ -69,8 +69,9 @@ replayed request returns the original result and cannot repeat a mutation.
 
 The implemented command set contains `get_control_state`,
 `prepare_confirmation`, `retry_now`, `exclude_item`, `set_item_priority`,
-`set_retry_cooldown`, and `renew_tor_circuits`. The remaining actions below
-are deliberately deferred. The controller must validate every precondition
+`set_retry_cooldown`, `renew_tor_circuits`, `pause_admission`,
+`resume_admission`, `drain_and_stop`, and `checkpoint_stop`. The controller
+must validate every precondition
 at execution time; the UI state is advisory and can be stale.
 
 | Action | Controller behavior | UI confirmation |
@@ -196,6 +197,9 @@ not contact a source, Tor, or aria2.
 
 ## Next steps
 
-The controller socket, `get_control_state`, and `retry_now` are complete. Next,
-add one mutating action at a time with its confirmation, audit, telemetry,
-failure, and headless-Textual tests before exposing it in the **Control** view.
+Every command in "Command set and confirmation" is implemented with its
+confirmation, audit, and telemetry event, following the pattern
+`retry_now` and `renew_tor_circuits` established. No mutating action remains
+to add. The headless-Textual interaction tests in "Verification and
+delivery" (30-FPS render loop, reconnect, resize) remain unwritten for the
+whole command set; only controller-side contract tests exist today.
