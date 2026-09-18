@@ -1412,6 +1412,28 @@ class AcquisitionFaultRecoveryTests(unittest.TestCase):
         downloader.scope_run(db)
         return downloader, db
 
+    def test_access_denied_item_pauses_only_its_own_origin_until_it_is_retried(self):
+        denied = "https://denied.test/first/data/a.bin"
+        same_origin = "https://denied.test/first/data/b.bin"
+        other_origin = "https://open.test/first/data/c.bin"
+        with FaultRoot() as root:
+            downloader, db, queue = self.make_controller(
+                root, [denied, same_origin, other_origin], max_files=3)
+            downloader.update(db, "UPDATE downloads SET status='review_required', "
+                              "review_code='access_denied' WHERE url=?", (denied,))
+            db.commit()
+            self.assertEqual(downloader.next_pending(db)[0], other_origin)
+            downloader.update(db, "UPDATE downloads SET status='complete' WHERE url=?",
+                              (other_origin,))
+            db.commit()
+            self.assertIsNone(downloader.next_pending(db))
+            self.assertIsNone(downloader.retry_wait(db))
+            downloader.update(db, "UPDATE downloads SET status='queued', review_code=NULL "
+                              "WHERE url=?", (denied,))
+            db.commit()
+            self.assertEqual(downloader.next_pending(db)[0], denied)
+            db.close()
+
     def selected_urls(self, db):
         return [row[0] for row in db.execute(
             "SELECT url FROM run_items WHERE run_id='test-run' ORDER BY queue_rank"
@@ -2761,11 +2783,34 @@ class ProvenanceControllerTests(unittest.TestCase):
             self.assertEqual(finalized["etag"], {"available": True, "compared": False,
                                                  "value": '"v1"'})
             self.assertEqual(finalized["expected_size"],
-                             {"available": True, "compared": False, "value": len(self.payload)})
+                             {"available": True, "compared": True, "value": len(self.payload)})
             self.assertEqual(finalized["last_modified"]["value"], "Wed, 01 Jan 2025 00:00:00 GMT")
             downloader.provenance.close([], {"max_files": 1}, 1, {"complete": 1}, "finished")
             self.assertEqual(verify(downloader.provenance.directory, downloader.destination,
                                     self.public_key(root, downloader), None), [])
+            db.close()
+
+    def test_announced_size_that_differs_from_the_staged_bytes_blocks_promotion(self):
+        with FaultRoot() as root:
+            downloader, db, engine, staging = self.make_controller(root)
+
+            def run(*_):
+                downloader.attempt_responses[self.url] = {
+                    "http_status": 200, "response_content_length": str(len(self.payload) + 1)}
+                return engine.complete(staging)
+            downloader.run_aria2 = run
+            with redirect_stdout(StringIO()):
+                self.assertEqual(downloader.transfer(downloader.next_pending(db), db), "review")
+            status, code = db.execute("SELECT status, review_code FROM downloads WHERE url=?",
+                                      (self.url,)).fetchone()
+            self.assertEqual((status, code), ("review_required", "size_mismatch"))
+            self.assertFalse((downloader.destination / "first" / "data" / "item.bin").exists())
+            self.assertFalse(staging.exists())
+            candidates = [p for p in downloader.candidates.rglob("*") if p.is_file()]
+            self.assertEqual([p.read_bytes() for p in candidates], [self.payload])
+            events = self.events(downloader)
+            self.assertEqual(events[-2]["outcome"], "validation_failed")
+            self.assertEqual(events[-1]["finalization_failure_reason"], "validation_failed")
             db.close()
 
     def test_finalized_event_marks_the_etag_compared_only_after_a_confirmed_resume(self):

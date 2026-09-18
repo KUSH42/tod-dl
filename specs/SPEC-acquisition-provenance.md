@@ -124,8 +124,11 @@ final attempt. `etag.compared` is true only when a resume check confirmed the
 stored ETag against the source. `expected_size.value` is the exact full size
 that the final response announced: `Content-Length` of a 200 response, or the
 total in `Content-Range` of a 206 response. An inventory size token is never an
-expected size. `expected_size.compared` and `last_modified.compared` stay false
-until the controller compares them.
+expected size. `expected_size.compared` is true when the controller compared this
+value with the staged byte count before promotion. A mismatch blocks promotion:
+the item moves to `review_required` with review code `size_mismatch`, and the
+candidate reason is `validation_failed`. `last_modified.compared` stays false
+until the controller compares it.
 
 `candidate_created` must include `item_id`, `staging_relative_path`,
 `candidate_relative_path`, `sha256`, and `finalization_failure_reason`.

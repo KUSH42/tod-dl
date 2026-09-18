@@ -90,6 +90,7 @@ RETRY_DELAYS = (60, 120, 240, 300, 300, 300)
 CANDIDATE_EVENT_REASONS = {
     "incomplete_body": "validation_failed",
     "checksum_mismatch": "validation_failed",
+    "size_mismatch": "validation_failed",
     "changed_remote_representation": "recovery_review",
     "no_reliable_version_protection": "recovery_review",
 }
@@ -818,7 +819,8 @@ class Downloader:
 
     def finalized_event(self, db: sqlite3.Connection, url: str, logical: str, stored: str,
                         byte_count: int, sha256: str,
-                        expected_sha256: str | None = None) -> None:
+                        expected_sha256: str | None = None,
+                        size_compared: bool = False) -> None:
         unavailable = {"available": False, "compared": False, "value": None}
         response = self.attempt_responses.pop(url, {})
         resume_confirmed = url in self.resume_confirmed
@@ -843,7 +845,8 @@ class Downloader:
             "finalized", item_id=self.item_id(url), source_url=url,
             logical_relative_path=logical, final_relative_path=stored,
             byte_count=byte_count, sha256=sha256, validation_method_version="1",
-            finalized_at=utc_now(), expected_size=validator(expected_size),
+            finalized_at=utc_now(),
+            expected_size=validator(expected_size, compared=size_compared),
             expected_checksum=expected_checksum,
             etag=validator(etag, compared=resume_confirmed),
             last_modified=validator(last_modified),
@@ -1803,16 +1806,40 @@ class Downloader:
         print(f"Dry run: {existing} existing, {missing} missing")
         return 0
 
+    def access_denied_scope_clause(self, db: sqlite3.Connection) -> tuple[str, list[str]]:
+        """Return SQL that excludes every origin with an unresolved access denial.
+
+        Spec: HTTP 401/403 pauses the affected scope. The scope is the source
+        origin (scheme and authority). An origin stays paused while any item of
+        this run is `review_required` with review code `access_denied`, so the
+        pause survives a restart and ends when the operator retries or excludes
+        that item.
+        """
+        denied = db.execute(
+            "SELECT downloads.url FROM downloads JOIN run_items "
+            "ON run_items.url = downloads.url WHERE run_items.run_id=? "
+            "AND status='review_required' AND review_code='access_denied'",
+            (self.run_id,)).fetchall()
+        prefixes = set()
+        for (denied_url,) in denied:
+            parts = urlsplit(denied_url)
+            prefixes.add(f"{parts.scheme}://{parts.netloc}/")
+        clause = " AND downloads.url NOT LIKE ? ESCAPE '\\'" * len(prefixes)
+        params = [prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+                  for prefix in sorted(prefixes)]
+        return clause, params
+
     def next_pending(self, db: sqlite3.Connection):
-        query = """SELECT downloads.url, relative_path, storage_path, staging_path, attempts,
+        scope_clause, scope_params = self.access_denied_scope_clause(db)
+        query = f"""SELECT downloads.url, relative_path, storage_path, staging_path, attempts,
             expected_sha256, etag, last_modified, staging_generation
             FROM downloads JOIN run_items ON run_items.url = downloads.url
             WHERE status IN ('queued', 'retry_wait', 'failed')
             AND run_items.run_id = ?
             AND (? = 0 OR attempts < ?)
-            AND next_retry_at <= ? ORDER BY run_items.queue_rank LIMIT 1"""
+            AND next_retry_at <= ?{scope_clause} ORDER BY run_items.queue_rank LIMIT 1"""
         return db.execute(query, (self.run_id, self.args.max_attempts, self.args.max_attempts,
-                                  time.time())).fetchone()
+                                  time.time(), *scope_params)).fetchone()
 
     def next_recheck(self, db: sqlite3.Connection):
         """Return the next selected `unavailable` item whose daily recheck is due."""
@@ -1874,12 +1901,13 @@ class Downloader:
         return "recheck_available"
 
     def retry_wait(self, db: sqlite3.Connection) -> float | None:
+        scope_clause, scope_params = self.access_denied_scope_clause(db)
         row = db.execute(
             "SELECT MIN(next_retry_at) FROM downloads JOIN run_items "
             "ON run_items.url = downloads.url WHERE run_items.run_id=? "
             "AND status IN ('queued', 'retry_wait', 'failed') "
-            "AND (? = 0 OR attempts < ?)",
-            (self.run_id, self.args.max_attempts, self.args.max_attempts),
+            "AND (? = 0 OR attempts < ?)" + scope_clause,
+            (self.run_id, self.args.max_attempts, self.args.max_attempts, *scope_params),
         ).fetchone()
         if row[0] is None:
             return None
@@ -2585,6 +2613,19 @@ class Downloader:
             self.clear_transfer_telemetry(url)
             print(f"[review] {rel}: checksum mismatch", flush=True)
             return "review"
+        staged_size = staging.stat().st_size
+        expected_size = expected_size_from_response(self.attempt_responses.get(url, {}))
+        if expected_size is not None and staged_size != expected_size:
+            detail = f"size mismatch: expected {expected_size} bytes, staged {staged_size}"
+            self.attempt_event(db, url, attempts + 1, attempt_started_at, "validation_failed")
+            candidate = self.move_candidate(staging)
+            self.candidate_event(url, staging, candidate, digest, "size_mismatch")
+            self.transition(db, url, "review_required", detail, sha256=digest,
+                            bytes=candidate.stat().st_size, last_error=detail,
+                            review_code="size_mismatch")
+            self.clear_transfer_telemetry(url)
+            print(f"[review] {rel}: {detail}", flush=True)
+            return "review"
         self.attempt_event(db, url, attempts + 1, attempt_started_at, "success")
         try:
             self.ensure_safe_parent(target)
@@ -2622,7 +2663,8 @@ class Downloader:
         hit_failpoint("post_final_file_creation")
         self.flush_directory(target.parent)
         self.finalized_event(db, url, rel.as_posix(), stored_text, target.stat().st_size,
-                             digest, expected_sha256)
+                             digest, expected_sha256,
+                             size_compared=expected_size is not None)
         self.clear_transfer_telemetry(url)
         self.transition(db, url, "complete", bytes=target.stat().st_size, sha256=digest)
         hit_failpoint("post_completion_commit")

@@ -106,11 +106,8 @@ a staging-cleanup error moved a completed item to `review_required`.
 
 Still open before the two specs can become `implemented`:
 
-- The controller does not compare `expected_size` with the staged byte count.
-  The specification requires an exact size match when the size is available.
-- HTTP 401 and 403 now move the single item to `review_required` with review
-  code `access_denied`. The specification also says to pause the affected
-  scope. The scope is undefined, and no code pauses other items.
+- No controller action returns an `access_denied` item to `queued`. The origin
+  pause therefore ends only when the operator excludes the item.
 - `candidate_created` never records `unsafe_path` or `promotion_error`.
 - The writer rejects user-info URLs only. Queue import does not reject them,
   and no rule exists for query values that grant access.
