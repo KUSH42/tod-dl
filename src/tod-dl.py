@@ -2021,9 +2021,10 @@ class Downloader:
 
     def reconcile_promotions(self, db: sqlite3.Connection) -> None:
         """Resolve a durable promotion intent left by a killed supervisor."""
-        rows = db.execute("SELECT url, relative_path, storage_path, staging_path, promotion_target, sha256 "
+        rows = db.execute("SELECT url, relative_path, storage_path, staging_path, promotion_target, sha256, "
+                          "expected_sha256 "
                           "FROM downloads WHERE status='promoting'").fetchall()
-        for url, relative_text, stored_text, staging_text, target_text, digest in rows:
+        for url, relative_text, stored_text, staging_text, target_text, digest, expected_sha256 in rows:
             staging = Path(staging_text) if staging_text else None
             target = Path(target_text) if target_text else None
             try:
@@ -2037,7 +2038,8 @@ class Downloader:
                 continue
             if target_matches:
                 stored = stored_text or Path(target).relative_to(self.destination).as_posix()
-                self.finalized_event(url, relative_text, stored, target.stat().st_size, digest)
+                self.finalized_event(url, relative_text, stored, target.stat().st_size, digest,
+                                     expected_sha256)
                 self.transition(db, url, "complete", "reconciled promotion intent",
                                 bytes=target.stat().st_size, sha256=digest)
                 if staging and staging.exists() and staging.is_file():
@@ -2062,7 +2064,8 @@ class Downloader:
                         continue
                     self.flush_directory(target.parent)
                     stored = stored_text or Path(target).relative_to(self.destination).as_posix()
-                    self.finalized_event(url, relative_text, stored, target.stat().st_size, digest)
+                    self.finalized_event(url, relative_text, stored, target.stat().st_size, digest,
+                                         expected_sha256)
                     self.transition(db, url, "complete", "reconciled promotion intent",
                                     bytes=target.stat().st_size, sha256=digest)
                     os.unlink(staging)
