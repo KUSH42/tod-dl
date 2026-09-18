@@ -1,6 +1,9 @@
 # Specification: reliable evidence acquisition
 
-Status: partially implemented, September 16, 2026. The downloader implements
+Status: partially implemented, September 18, 2026. The source pilot for one
+queue and three resume tests passed
+([report](reports/source-pilot-2026-09-18.md)); queues B and C and a bounded
+production run remain. The downloader implements
 selected safety, state, finalization, and recovery behavior. This specification
 defines the remaining contract for large downloads from an intermittent source.
 Complete the [tool evaluation](SPEC-acquisition-tool-evaluation.md) before you

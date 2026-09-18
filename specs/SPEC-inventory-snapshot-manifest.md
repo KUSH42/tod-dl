@@ -303,5 +303,7 @@ Tests use synthetic fixtures only. They must show these conditions:
 ## Remaining work
 
 Network refresh and directory crawling are not implemented. They stay in the
-parent specification, and they wait for a reliable acquisition workflow and
-the source pilot.
+parent specification, and they wait for a reliable acquisition workflow. The
+queue A source pilot and the resume tests are done
+(`reports/source-pilot-2026-09-18.md`); queues B and C and a bounded
+production run are open.

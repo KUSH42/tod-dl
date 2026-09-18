@@ -169,6 +169,12 @@ python3 src/tod-dl.py \
     --run-id RUN_ID --max-files 5 --retry-now
 ```
 
+A stop that you request (SIGTERM, SIGINT, a control-UI stop, or `--time-limit`)
+keeps the partial file and schedules no retry delay. The resumed run continues
+the item at once, and the source answers the resume with an HTTP 206 range
+response. A source failure still waits 1, 2, 4, then more minutes. The
+`--retry-now` flag ends that wait early.
+
 Use `--status` to read persisted state without starting transfers.
 
 ## Monitor and control a run
@@ -298,10 +304,12 @@ The [console UI specification](specs/SPEC-console-ui.md) defines planned
 The current monitor does not implement these views.
 
 The acquisition-engine evaluation is local-only. It needs no onion target and
-does not permit a source pilot. Read the
+does not permit a source request. Read the
 [acquisition-tool evaluation specification]
 (specs/SPEC-acquisition-tool-evaluation.md) before you implement or run the
-evaluation.
+evaluation. A separate source pilot ran on 2026-09-18 with an explicit
+operator instruction. Its results are in
+[the source pilot report](specs/reports/source-pilot-2026-09-18.md).
 
 ## Portfolio project
 
