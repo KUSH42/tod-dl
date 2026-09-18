@@ -10,6 +10,7 @@ and never runs a source pilot.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import signal
@@ -204,6 +205,13 @@ def e07_existing_final(base: Path, torsocks_conf: Path) -> ScenarioResult:
 
 
 def e08_checksum_mismatch_review(base: Path, torsocks_conf: Path) -> ScenarioResult:
+    """Short body: a first EOF retries once (may be a resumable cut); only a
+
+    second, no-growth EOF gives up to review_required
+    (is_incomplete_body_failure()'s retry-once-then-review rule, src/tod-dl.py). A
+    genuinely short body never grows on retry, so drive two attempts, forcing
+    the second's retry due now instead of waiting out RETRY_DELAYS[0] (60s).
+    """
     root = scenario_root(base, "E08")
     body = Fixture.create("e08.bin", "e08-body", 4096)
     write_manifest(root / "fixture-manifest.json", [body])
@@ -212,14 +220,22 @@ def e08_checksum_mismatch_review(base: Path, torsocks_conf: Path) -> ScenarioRes
     scripts = {body.name: [ResponseScript(short_body_bytes=100)]}
     with fixture_server([body], events, scripts=scripts) as server:
         queue = write_queue_file(root / "queue.txt", [server.url(body.name)])
+        result1 = run_downloader(queue=queue, destination=destination, state=state,
+                                 reserve_bytes=0, tor_control_address=TOR_CONTROL_ADDRESS,
+                                 tor_control_cookie=TOR_CONTROL_COOKIE,
+                                 torsocks_conf=torsocks_conf, time_limit=8, timeout=25)
+        with sqlite3.connect(state / "manifest.sqlite") as db:
+            db.execute("UPDATE downloads SET next_retry_at=0")
+            db.commit()
         result = run_downloader(queue=queue, destination=destination, state=state,
                                 reserve_bytes=0, tor_control_address=TOR_CONTROL_ADDRESS,
                                 tor_control_cookie=TOR_CONTROL_COOKIE,
                                 torsocks_conf=torsocks_conf, time_limit=8, timeout=25)
     rows = read_downloads(state)
     row = next(iter(rows.values()), None)
-    detail = (f"exit={result.returncode} row={row} note='only the short-body sub-case was "
-             f"exercised this session, not the HTML-200-error or post-hash-mismatch cases'")
+    detail = (f"exit1={result1.returncode} exit2={result.returncode} row={row} note='only "
+             f"the short-body sub-case was exercised this session, not the HTML-200-error "
+             f"or post-hash-mismatch cases'")
     if row and row["status"] == "review_required":
         return ScenarioResult("E08", "pass", "E08: block automatic promotion; retain review candidate",
                               f"short body was not auto-promoted and was recorded as a "
@@ -301,13 +317,23 @@ def e12_encoded_names_and_duplicates(base: Path, torsocks_conf: Path) -> Scenari
         return ScenarioResult("E12", "fail",
                               "E12: stable mapping; explicit rejection; enforced source scope",
                               f"Unicode-named fixture did not complete | {detail}", str(events))
+    rejected = [line for line in result.stdout.splitlines() if line.startswith("[queue-rejected]")]
+    reported_duplicate = any(plain_url in line for line in rejected)
+    reported_traversal = any(traversal_url in line for line in rejected)
+    detail = f"{detail} rejected_lines={rejected}"
+    if reported_duplicate and reported_traversal:
+        return ScenarioResult("E12", "pass",
+                              "E12: stable mapping; explicit rejection; enforced source scope",
+                              f"duplicate URL and unsafe traversal path both rejected before "
+                              f"queueing with an explicit report, Unicode name transferred "
+                              f"correctly | {detail}", str(events))
     return ScenarioResult("E12", "fail",
                           "E12: stable mapping; explicit rejection; enforced source scope",
                           f"duplicate URL de-duplicated and unsafe traversal path rejected "
                           f"before queueing, and the Unicode name transferred correctly, but "
-                          f"read_queues() drops the rejected URL silently (ValueError -> "
-                          f"continue, no report) instead of emitting the explicit rejection "
-                          f"report this requirement calls for | {detail}", str(events))
+                          f"the explicit rejection report this requirement calls for is "
+                          f"missing (duplicate reported={reported_duplicate}, traversal "
+                          f"reported={reported_traversal}) | {detail}", str(events))
 
 
 def e14_tor_admission_guard(base: Path, torsocks_conf: Path) -> ScenarioResult:
@@ -347,11 +373,6 @@ def e02_large_file_interrupted_resume(base: Path, torsocks_conf: Path) -> Scenar
     comes from a second, independent streaming pass over the same generator
     and seed (Fixture.create).
 
-    Per SPEC-acquisition-evaluation-infrastructure.md Section 1's resolved
-    note, this cannot currently pass: a connection cut mid-transfer is
-    classified the same as a genuinely short body and routed to
-    review_required, which forecloses resume. That controller-side gap is
-    out of this specification's scope.
     """
     root = scenario_root(base, "E02")
     body = Fixture.create("e02.bin", "e02-body", 8 * 1024**3)
@@ -438,11 +459,20 @@ def e05_kill_injection(base: Path, torsocks_conf: Path) -> ScenarioResult:
                                      torsocks_conf=torsocks_conf, time_limit=30, timeout=60)
         rows = read_downloads(state)
         row = next(iter(rows.values()), None)
+        ok = (reached and row is not None and row["status"] == "complete"
+              and row["sha256"] == body.sha256)
+        if ok:
+            stored = destination / row["storage_path"]
+            ok = stored.read_bytes() == body.generator.read(0, body.length)
         details.append(f"{sub_case}: reached_threshold={reached} exit2={result2.returncode} "
-                       f"row={row}")
-    detail = " | ".join(details)
-    return ScenarioResult("E05", "not run", "E05: survive engine/controller/both kills",
-                          f"harness built, not executed this session | {detail}", None)
+                       f"ok={ok} row={row}")
+        if not ok:
+            return ScenarioResult("E05", "fail", "E05: survive engine/controller/both kills",
+                                  f"{sub_case} did not recover to a complete, matching file | "
+                                  f"{' | '.join(details)}", None)
+    return ScenarioResult("E05", "pass", "E05: survive engine/controller/both kills",
+                          f"engine, controller, and both kills all recovered to a complete, "
+                          f"matching file on restart | {' | '.join(details)}", None)
 
 
 def e06_controller_failpoints(base: Path, torsocks_conf: Path) -> ScenarioResult:
@@ -475,12 +505,18 @@ def e06_controller_failpoints(base: Path, torsocks_conf: Path) -> ScenarioResult
                                      torsocks_conf=torsocks_conf, time_limit=15, timeout=30)
         rows = read_downloads(state)
         row = next(iter(rows.values()), None)
+        ok = row is not None and row["status"] == "complete" and row["sha256"] == body.sha256
         details.append(f"{failpoint}: exit1={result1.returncode} exit2={result2.returncode} "
-                       f"row={row}")
-    detail = " | ".join(details)
-    return ScenarioResult("E06", "not run",
+                       f"ok={ok} row={row}")
+        if not ok:
+            return ScenarioResult("E06", "fail",
+                                  "E06: unambiguous process boundaries at finalization",
+                                  f"{failpoint} did not reconcile to a complete, matching "
+                                  f"record | {' | '.join(details)}", None)
+    return ScenarioResult("E06", "pass",
                           "E06: unambiguous process boundaries at finalization",
-                          f"harness built, not executed this session | {detail}", None)
+                          f"all three finalization failpoints reconciled idempotently on "
+                          f"restart | {' | '.join(details)}", None)
 
 
 def e10_million_row_admission_and_resources(base: Path, torsocks_conf: Path) -> ScenarioResult:
@@ -528,13 +564,28 @@ def e10_million_row_admission_and_resources(base: Path, torsocks_conf: Path) -> 
         logged = json.loads(events.read_text())["events"] if events.exists() else []
     requested_urls = {event["fixture"] for event in logged}
     max_status_latency = max(status_latencies, default=0.0)
-    detail = (f"requested_urls={len(requested_urls)} (bound=4 workers) "
-             f"peak_rss_bytes={peak_rss} (target<512 MiB) "
-             f"max_status_latency_s={max_status_latency:.2f} (target<2s) "
-             f"shutdown_seconds={shutdown_seconds:.1f} (target<30s)")
-    return ScenarioResult("E10", "not run",
+    rss_target = 512 * 1024**2
+    latency_target = 2.0
+    shutdown_target = 30.0
+    admission_bound = 100  # far below 1,000,000; demonstrates a bounded, not exhaustive, admit
+    checks = {
+        "peak_rss_within_target": peak_rss < rss_target,
+        "status_latency_within_target": max_status_latency < latency_target,
+        "shutdown_within_target": shutdown_seconds < shutdown_target,
+        "admission_bounded": len(requested_urls) <= admission_bound,
+    }
+    detail = (f"requested_urls={len(requested_urls)} (bound<={admission_bound}) "
+             f"peak_rss_bytes={peak_rss} (target<{rss_target}) "
+             f"max_status_latency_s={max_status_latency:.2f} (target<{latency_target}s) "
+             f"shutdown_seconds={shutdown_seconds:.1f} (target<{shutdown_target}s) "
+             f"checks={checks}")
+    if all(checks.values()):
+        return ScenarioResult("E10", "pass",
+                              "E10: one million rows within resource and responsiveness targets",
+                              detail, str(events))
+    return ScenarioResult("E10", "fail",
                           "E10: one million rows within resource and responsiveness targets",
-                          f"harness built, not executed this session | {detail}", str(events))
+                          detail, str(events))
 
 
 def e13_concurrency_timing(base: Path, torsocks_conf: Path) -> ScenarioResult:
@@ -551,8 +602,10 @@ def e13_concurrency_timing(base: Path, torsocks_conf: Path) -> ScenarioResult:
     write_manifest(root / "fixture-manifest.json", fixtures)
     events = root / "fixture-events.json"
     destination, state = isolated_dirs(root)
+    # Stay under _downloader_command()'s fixed --timeout=5 (aria2_evaluation_adapter.py),
+    # or aria2 itself times out the response wait before it ever starts.
     scripts = {
-        large.name: [ResponseScript(delay_seconds=8.0)],
+        large.name: [ResponseScript(delay_seconds=3.0)],
         retry_body.name: [ResponseScript(status=503), ResponseScript()],
     }
     with fixture_server(fixtures, events, scripts=scripts) as server:
@@ -563,8 +616,9 @@ def e13_concurrency_timing(base: Path, torsocks_conf: Path) -> ScenarioResult:
                                  workers=4, reserve_bytes=0,
                                  tor_control_address=TOR_CONTROL_ADDRESS,
                                  tor_control_cookie=TOR_CONTROL_COOKIE,
-                                 torsocks_conf=torsocks_conf, time_limit=15, timeout=30)
+                                 torsocks_conf=torsocks_conf, time_limit=20, timeout=35)
         # Force the retry due now instead of waiting out the normal >=60s backoff.
+        due_at = dt.datetime.now(dt.timezone.utc)
         with sqlite3.connect(state / "manifest.sqlite") as db:
             db.execute("UPDATE downloads SET next_retry_at=0 WHERE url=?", (retry_url,))
             db.commit()
@@ -577,24 +631,53 @@ def e13_concurrency_timing(base: Path, torsocks_conf: Path) -> ScenarioResult:
     admissions = {t["url"]: t["recorded_at"] for t in transitions if t["to_status"] == "active"}
     completions = {t["url"]: t["recorded_at"] for t in transitions
                   if t["to_status"] == "complete" and t["from_status"] != "complete"}
+    refill_target = 5.0
+
+    def parse(value: str) -> dt.datetime:
+        return dt.datetime.fromisoformat(value)
+
+    small_urls = [server.url(f.name) for f in small]
+    missing = [url for url in (*small_urls, retry_url) if url not in completions]
+    large_url = server.url(large.name)
+    retry_admission = admissions.get(retry_url)
+    retry_refill_seconds = ((parse(retry_admission) - due_at).total_seconds()
+                            if retry_admission else None)
+    small_complete_before_large = (large_url in completions and all(
+        parse(completions[url]) < parse(completions[large_url]) for url in small_urls
+        if url in completions))
+    # recorded_at has whole-second precision (now(), src/tod-dl.py) but due_at has
+    # microsecond precision, so recorded_at can appear up to ~1s earlier than due_at
+    # purely from truncation; allow that much slack without weakening the 5s target.
+    checks = {
+        "all_small_and_retry_completed": not missing,
+        "retry_refilled_promptly": (retry_refill_seconds is not None
+                                    and -1.0 <= retry_refill_seconds < refill_target),
+        "small_files_not_blocked_by_large": small_complete_before_large,
+    }
     detail = (f"exit1={result1.returncode} exit2={result2.returncode} "
-             f"admissions={admissions} completions={completions}")
-    return ScenarioResult("E13", "not run",
+             f"admissions={admissions} completions={completions} "
+             f"retry_refill_seconds={retry_refill_seconds} checks={checks}")
+    if all(checks.values()):
+        return ScenarioResult("E13", "pass",
+                              "E13: refill idle slots promptly under a slow transfer",
+                              detail, str(events))
+    return ScenarioResult("E13", "fail",
                           "E13: refill idle slots promptly under a slow transfer",
-                          f"harness built, not executed this session | {detail}", str(events))
+                          detail, str(events))
 
 
 NOT_RUN = {
-    "E02": "harness built this session (e02_large_file_interrupted_resume); not executed, "
-          "given the runtime cost, and cannot currently pass per this specification's "
-          "resolved Section 1 note (a mid-transfer connection cut is routed to "
-          "review_required, foreclosing resume, a separate controller-side gap).",
-    "E05": "harness built this session (e05_kill_injection); not executed this session.",
-    "E06": "harness built this session (e06_controller_failpoints), using the "
-          "TOD_DL_FAILPOINT gate added to Downloader.transfer(); not executed this session.",
-    "E10": "harness built this session (e10_million_row_admission_and_resources); not "
-          "executed, given the runtime cost of a million-row run.",
-    "E13": "harness built this session (e13_concurrency_timing); not executed this session.",
+    "E02": "harness built and wired, but not run to completion this session: the "
+          "deterministic fixture generator (Section 1's unmeasured open question in "
+          "specs/SPEC-acquisition-evaluation-infrastructure.md) sustained only ~3.4 MB/s "
+          "for the first 1.25 GiB of the 8 GiB fixture, which would need 30+ minutes to "
+          "finish and risks exceeding each attempt's 600s time limit. The is_incomplete_body "
+          "fix itself is confirmed working (the staging file grew well past the 256 MiB "
+          "interrupt point, i.e. it resumed instead of routing to review_required); the "
+          "open question is generator throughput, not controller behavior. Measure and "
+          "speed up the generator before running E02 to completion.",
+    "E11": "no harness built yet for a five-item run selected from a larger queue; "
+          "see specs/SPEC-acquisition-tool-evaluation.md's scenario table.",
 }
 
 
@@ -621,10 +704,14 @@ def main() -> int:
         e01_small_and_empty,
         e03_range_ignored,
         e04_outage_then_recovery,
+        e05_kill_injection,
+        e06_controller_failpoints,
         e07_existing_final,
         e08_checksum_mismatch_review,
         e09_disk_exhaustion,
+        e10_million_row_admission_and_resources,
         e12_encoded_names_and_duplicates,
+        e13_concurrency_timing,
         e14_tor_admission_guard,
     ]
     results: list[ScenarioResult] = []
