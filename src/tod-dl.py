@@ -2134,19 +2134,19 @@ class Downloader:
             self.write_manifest()
             db = self.open_db()
             print(f"Imported {self.import_queues(db):,} queue entries")
+            self.provenance = ProvenanceWriter(
+                self.state, self.run_id, getattr(self.args, "provenance_signing_key", None)
+            )
+            self.reconcile_promotions(db)
             selected, existing = self.scope_run(db)
             self.selected_item_count = selected
             print(f"Scoped this run to {selected:,} transfer entries; "
                   f"skipped {existing:,} existing finals")
-            self.provenance = ProvenanceWriter(
-                self.state, self.run_id, getattr(self.args, "provenance_signing_key", None)
-            )
             self.provenance_event(
                 "run_started", queue_input_digests=queue_inputs,
                 selection_settings={"max_files": self.args.max_files},
                 selected_item_count=selected,
             )
-            self.reconcile_promotions(db)
             self.cleanup_completed_staging(db)
             resolved = self.remediate_safe_paths(db)
             if resolved:
