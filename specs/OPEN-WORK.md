@@ -10,8 +10,17 @@ The controller has durable selected-run state, no-overwrite finalization,
 recovery tests, signed provenance records, telemetry snapshots, and local
 confirmed controls for retry, Tor renewal, pause admission, resume
 admission, drain and stop, and checkpoint and stop. The repository test
-suite runs 176 local tests. These features do not establish compliance
+suite runs 198 local tests. These features do not establish compliance
 with every requirement in the related specifications.
+
+A process-ownership review closed five gaps in this session and the four
+before it: the exclusive ownership lock now scopes to the destination and
+treats SIGTERM as a clean stop; a requeue terminates a surviving writer by
+PID and start time before resetting an interrupted transfer; free-space
+admission subtracts known in-flight remaining bytes from the reserve
+check; disk-full stops admission and resets attempts instead of consuming
+a retry; and hashing now serializes to one file at a time, so a lagging
+hash holds its worker slot and backs off new admission.
 
 ## Remaining work
 

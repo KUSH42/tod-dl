@@ -633,6 +633,7 @@ class Downloader:
         self.projection: TelemetryStateProjection | None = None
         self.cooldown_lock = threading.Lock()
         self.cooldown_until = 0.0
+        self.hash_lock = threading.Lock()
         self.newnym_lock = threading.Lock()
         self.next_newnym_at = 0.0
         self.next_worker_start = 0.0
@@ -2060,11 +2061,14 @@ class Downloader:
             self.telemetry.set_active(url, worker_id, attempts + 1, "hashing")
             self.telemetry.set_validation(url, 0, staging.stat().st_size)
         try:
-            digest = sha256sum(
-                staging,
-                (lambda processed: self.telemetry.set_validation(
-                    url, processed, staging.stat().st_size)) if self.telemetry else None,
-            )
+            # Spec: hash one file at a time; a lagging hash serializes here
+            # and holds the worker's admission slot, pausing new admission.
+            with self.hash_lock:
+                digest = sha256sum(
+                    staging,
+                    (lambda processed: self.telemetry.set_validation(
+                        url, processed, staging.stat().st_size)) if self.telemetry else None,
+                )
         except BaseException:
             self.clear_transfer_telemetry(url)
             raise

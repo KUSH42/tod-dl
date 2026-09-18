@@ -64,7 +64,9 @@ add a later queue item to the selected set.
 
 The destination and state directories must use the same filesystem. The
 controller keeps a 10 GiB free-space reserve by default. Do not lower the
-reserve unless an operator has assessed the storage risk.
+reserve unless an operator has assessed the storage risk. The controller
+hashes one staged file at a time; keep new admission bound by validation and
+storage capacity, not only by the worker count.
 
 Treat each final file as read-only evidence. Do not replace an existing final.
 Store a suspect replacement under `download-state/redownload-candidates/`.

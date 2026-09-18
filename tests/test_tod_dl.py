@@ -13,6 +13,7 @@ import json
 import shutil
 import signal
 import sys
+import threading
 import time
 from contextlib import redirect_stdout
 from io import StringIO
@@ -1659,6 +1660,50 @@ class AcquisitionFaultRecoveryTests(unittest.TestCase):
             self.assertEqual(engine.calls, 1)
             self.assertEqual(db.execute("SELECT status FROM downloads WHERE url=?", (self.url,))
                              .fetchone()[0], "retry_wait")
+            db.close()
+
+    def test_hashing_serializes_across_concurrent_workers(self):
+        """Spec: hash one file at a time; concurrent workers must not overlap hashing."""
+        first_url = "https://fixture.test/first/data/one.bin"
+        second_url = "https://fixture.test/second/data/two.bin"
+        with FaultRoot() as root:
+            downloader, db, _ = self.make_controller(
+                root, urls=[first_url, second_url], max_files=2)
+            engine = LocalFakeTransferEngine(self.payload)
+            downloader.run_aria2 = lambda url, staging, attempt: engine.complete(staging)
+            active = 0
+            peak = 0
+            guard = threading.Lock()
+
+            def tracking_sha256sum(path, progress=None):
+                nonlocal active, peak
+                with guard:
+                    active += 1
+                    peak = max(peak, active)
+                time.sleep(0.05)
+                digest = tod_dl.hashlib.sha256(path.read_bytes()).hexdigest()
+                with guard:
+                    active -= 1
+                return digest
+
+            original_sha256sum = tod_dl.sha256sum
+            tod_dl.sha256sum = tracking_sha256sum
+            try:
+                first_row = downloader.next_pending(db)
+                downloader.transition(db, first_row[0], "admitted", "transfer admitted")
+                second_row = downloader.next_pending(db)
+                rows = [first_row, second_row]
+                results = []
+                workers = [threading.Thread(target=lambda r=row: results.append(
+                    downloader.transfer(r, db))) for row in rows]
+                for worker in workers:
+                    worker.start()
+                for worker in workers:
+                    worker.join()
+            finally:
+                tod_dl.sha256sum = original_sha256sum
+            self.assertEqual(results, ["complete", "complete"])
+            self.assertEqual(peak, 1)
             db.close()
 
 

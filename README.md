@@ -91,7 +91,9 @@ python3 src/tod-dl.py \
 The destination and state directories must use the same filesystem. The
 controller keeps a 10 GiB free-space reserve by default. It never replaces an
 existing final. A collision creates a review item and preserves incoming bytes
-under `download-state/redownload-candidates/`.
+under `download-state/redownload-candidates/`. The controller hashes one
+staged file at a time; a lagging hash holds its worker slot and pauses new
+admission until the hash finishes.
 
 ## Resume a run
 
