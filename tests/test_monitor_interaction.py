@@ -240,6 +240,34 @@ class MonitorInteractionTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(app.screen.__class__.__name__, "WorkerDetails")
             self.assertEqual(commands, [])
 
+    async def test_stale_source_response_cannot_replace_a_newer_selection(self):
+        # A source-reveal reply that arrives after the worker moved on to a
+        # different item must be discarded, not applied to the screen -- a
+        # late race here would show one item's revealed source under
+        # another item's row, a real information-leak vector.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            app, _server = self.make_app(
+                root, lambda: available_actions(), lambda request: {},
+                snapshot_value=snapshot_with_worker(),
+            )
+            async with app.run_test() as pilot:
+                await pilot.pause(0.3)
+                app.open_worker_details("1")
+                await pilot.pause(0.1)
+                screen = app.screen
+                self.assertEqual(screen.__class__.__name__, "WorkerDetails")
+                screen.displayed_item_id = "item-2"
+                screen.revealed = True
+                screen.source = None
+                screen.source_label = "Source hidden"
+                stale_response = {"data": {"item": {
+                    "source": "http://a.onion/should-not-appear",
+                    "source_label": "Source redacted"}}}
+                screen.apply_source("item-1", stale_response, None)
+                self.assertIsNone(screen.source)
+                self.assertEqual(screen.source_label, "Source hidden")
+
     async def test_control_state_polling_is_throttled_to_twice_per_second(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

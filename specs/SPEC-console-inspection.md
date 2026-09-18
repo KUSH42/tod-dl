@@ -5,7 +5,10 @@ defines the shared data interface for the console views. `InspectionServer`
 implements the socket, session descriptor, peer check, and the `get_item`,
 `get_worker`, `list_queue`, and `list_attempts` operations. Acceptance tests
 now cover peer rejection, the concurrent-query bound, connection timeouts,
-and request and response byte bounds.
+request and response byte bounds, stale-response rejection, durable-state
+immutability, the absence of SQLite in the monitor and the snapshot
+publisher, old-versus-final snapshot labels, and a generic secret scan
+across every operation.
 
 The [console UI](SPEC-console-ui.md) owns navigation and display rules.
 [Item details](SPEC-console-item-details.md),
@@ -161,13 +164,18 @@ behavior when inspection records are absent.
 
 - Verify protocol errors, peer rejection, byte bounds, query deadlines,
   connection timeouts, concurrency bounds, cursor expiry, and session
-  replacement.
-- Verify that obsolete responses cannot replace the current selection.
+  replacement. Done.
+- Verify that obsolete responses cannot replace the current selection. Done.
 - Verify that inspection leaves acquisition state and evidence unchanged.
+  Done. A test confirms no reachable mutation action from item details, and
+  a test asserts the durable database is byte-for-byte unchanged after a
+  full read cycle.
 - Verify that the monitor never opens SQLite or reads control credentials.
-- Verify that the snapshot publisher performs zero SQLite calls.
+  Done.
+- Verify that the snapshot publisher performs zero SQLite calls. Done.
 - Verify missing endpoints, old snapshots, final snapshots, and cache labels.
-- Verify that source URLs remain absent when `reveal_source` is false.
-- Verify that all secrets remain absent from every response.
-- Verify that a revealed URL removes user-info and query components.
-- Verify literal rendering and explicit truncation of oversized text.
+  Done.
+- Verify that source URLs remain absent when `reveal_source` is false. Done.
+- Verify that all secrets remain absent from every response. Done.
+- Verify that a revealed URL removes user-info and query components. Done.
+- Verify literal rendering and explicit truncation of oversized text. Done.

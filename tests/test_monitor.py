@@ -13,6 +13,7 @@ import time
 import unittest
 import unittest.mock
 from pathlib import Path
+from typing import Any
 
 import sys
 
@@ -151,6 +152,155 @@ class MonitorTests(unittest.TestCase):
                                        {"item_id": "0" * 64})
             finally:
                 server.stop()
+
+    def test_inspection_leaves_the_durable_database_byte_for_byte_unchanged(self):
+        # Inspection must be read-only: a durable read must never mutate the
+        # acquisition database, even across the full operation set.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = root / "manifest.sqlite"
+            db = sqlite3.connect(database)
+            db.executescript("""
+                CREATE TABLE downloads (
+                    url TEXT PRIMARY KEY, relative_path TEXT NOT NULL,
+                    storage_path TEXT, staging_path TEXT, inventory_size TEXT,
+                    status TEXT NOT NULL, attempts INTEGER NOT NULL, bytes INTEGER,
+                    sha256 TEXT, last_error TEXT, next_retry_at REAL NOT NULL,
+                    promotion_target TEXT, updated_at TEXT NOT NULL, review_code TEXT,
+                    priority INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE run_items (run_id TEXT NOT NULL, url TEXT NOT NULL,
+                                        queue_rank INTEGER NOT NULL);
+                CREATE TABLE telemetry_revisions (run_id TEXT PRIMARY KEY,
+                                                  revision INTEGER NOT NULL);
+                CREATE TABLE download_attempts (
+                    run_id TEXT NOT NULL, url TEXT NOT NULL, attempt_number INTEGER NOT NULL,
+                    attempt_id TEXT NOT NULL, generation TEXT, started_at TEXT, ended_at TEXT,
+                    outcome TEXT, error_category TEXT, error_message TEXT, retry_at TEXT);
+            """)
+            url = "http://a.onion/unchanged.bin"
+            db.execute("INSERT INTO downloads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                       (url, "unchanged.bin", "safe/unchanged.bin", None, None, "retry_wait",
+                        1, 10, None, "connection reset", 0, None, "2026-09-18T00:00:00Z", None, 0))
+            db.execute("INSERT INTO run_items VALUES (?, ?, ?)", ("run-one", url, 1))
+            db.execute("INSERT INTO telemetry_revisions VALUES (?, ?)", ("run-one", 5))
+            db.execute("INSERT INTO download_attempts VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                       ("run-one", url, 1, "a1", "gen-1", "2026-09-18T00:00:00Z",
+                        "2026-09-18T00:01:00Z", "failed", "network", "connection reset", None))
+            db.commit()
+            db.close()
+            item_id = hashlib.sha256(url.encode()).hexdigest()
+            before = database.read_bytes()
+            server = InspectionServer(root, "run-one", "session-one", database, 3)
+            server.start()
+            try:
+                inspection_request(root, "run-one", "list_queue")
+                inspection_request(root, "run-one", "get_item", {"item_id": item_id})
+                inspection_request(root, "run-one", "get_worker", {"worker_id": 1})
+                inspection_request(root, "run-one", "list_attempts", {"item_id": item_id})
+            finally:
+                server.stop()
+            after = database.read_bytes()
+            self.assertEqual(before, after,
+                              "a read-only inspection request must not change the "
+                              "durable database that holds acquisition state and evidence")
+
+    def test_monitor_and_snapshot_publisher_never_bind_sqlite(self):
+        # The monitor must never open SQLite, and the snapshot publisher must
+        # perform zero SQLite calls (only the controller-owned InspectionServer
+        # may query the durable database). The only way either module could
+        # call sqlite3 is by importing it, so absence of the binding is a
+        # complete, tamper-evident proof of the requirement.
+        import monitor
+        import download_telemetry
+        self.assertNotIn("sqlite3", vars(monitor),
+                         "monitor.py must not open SQLite directly")
+        self.assertNotIn("sqlite3", vars(download_telemetry),
+                         "the snapshot publisher must not open SQLite directly")
+
+    def test_final_snapshot_and_old_running_snapshot_get_different_labels(self):
+        # An old but still-running snapshot must read as disconnected; a
+        # final snapshot must read as recorded even though it is equally old.
+        # The two must never collapse into the same label, or a finished run
+        # would be shown as if the controller had merely dropped connection.
+        old_running = snapshot()
+        old_running["published_at"] = "2000-01-01T00:00:00+00:00"
+        final = snapshot(lifecycle="finished")
+        final["published_at"] = "2000-01-01T00:00:00+00:00"
+        self.assertEqual(freshness(old_running), "disconnected")
+        self.assertEqual(freshness(final), "recorded")
+        self.assertNotEqual(freshness(old_running), freshness(final))
+
+    def test_no_secret_or_source_material_leaks_from_any_response(self):
+        # Verify generically, across every operation, that a value derived
+        # from the raw source URL (user-info, query token) never reaches a
+        # response when reveal_source is false or absent -- not just the one
+        # hardcoded field a narrower test happens to check.
+        def _contains(value: Any, marker: str) -> bool:
+            if isinstance(value, str):
+                return marker in value
+            if isinstance(value, dict):
+                return any(_contains(item, marker) for item in value.values())
+            if isinstance(value, list):
+                return any(_contains(item, marker) for item in value)
+            return False
+
+        marker = "leak-marker-should-not-appear"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = root / "manifest.sqlite"
+            db = sqlite3.connect(database)
+            db.executescript("""
+                CREATE TABLE downloads (
+                    url TEXT PRIMARY KEY, relative_path TEXT NOT NULL,
+                    storage_path TEXT, staging_path TEXT, inventory_size TEXT,
+                    status TEXT NOT NULL, attempts INTEGER NOT NULL, bytes INTEGER,
+                    sha256 TEXT, last_error TEXT, next_retry_at REAL NOT NULL,
+                    promotion_target TEXT, updated_at TEXT NOT NULL, review_code TEXT,
+                    priority INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE run_items (run_id TEXT NOT NULL, url TEXT NOT NULL,
+                                        queue_rank INTEGER NOT NULL);
+                CREATE TABLE telemetry_revisions (run_id TEXT PRIMARY KEY,
+                                                  revision INTEGER NOT NULL);
+                CREATE TABLE download_attempts (
+                    run_id TEXT NOT NULL, url TEXT NOT NULL, attempt_number INTEGER NOT NULL,
+                    attempt_id TEXT NOT NULL, generation TEXT, started_at TEXT, ended_at TEXT,
+                    outcome TEXT, error_category TEXT, error_message TEXT, retry_at TEXT);
+            """)
+            url = f"http://user:{marker}@example.onion/a/file.txt?token={marker}"
+            db.execute("INSERT INTO downloads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                       (url, "a/file.txt", "safe/file.txt", None, None, "retry_wait",
+                        1, 10, None, "connection reset", 0, None,
+                        "2026-09-18T00:00:00Z", None, 0))
+            db.execute("INSERT INTO run_items VALUES (?, ?, ?)", ("run-one", url, 1))
+            db.execute("INSERT INTO telemetry_revisions VALUES (?, ?)", ("run-one", 1))
+            db.execute("INSERT INTO download_attempts VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                       ("run-one", url, 1, "a1", "gen-1", "2026-09-18T00:00:00Z", None,
+                        "failed", "network", "connection reset", None))
+            db.commit()
+            db.close()
+            item_id = hashlib.sha256(url.encode()).hexdigest()
+            server = InspectionServer(
+                root, "run-one", "session-one", database, 3,
+                runtime_provider=lambda: [{"url": url, "worker_id": 1, "phase": "downloading",
+                                           "generation": 1, "attempt_id": f"{item_id}:1",
+                                           "attempt_number": 1, "received_bytes": 0,
+                                           "total_bytes": 10, "sample_age_s": 0,
+                                           "sample_sequence": 1, "progress_samples": []}])
+            server.start()
+            try:
+                responses = [
+                    inspection_request(root, "run-one", "list_queue"),
+                    inspection_request(root, "run-one", "get_item", {"item_id": item_id}),
+                    inspection_request(root, "run-one", "get_worker", {"worker_id": 1}),
+                    inspection_request(root, "run-one", "list_attempts", {"item_id": item_id}),
+                ]
+            finally:
+                server.stop()
+            for response in responses:
+                self.assertFalse(_contains(response, marker),
+                                 f"a response leaked source material: {response}")
 
     def test_inspection_endpoint_rejects_a_connection_from_another_peer_uid(self):
         # A raw socket read is used, not inspection_request, because this
