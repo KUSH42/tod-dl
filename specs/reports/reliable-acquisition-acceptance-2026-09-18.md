@@ -70,3 +70,23 @@ the spec is already satisfied (or was overtaken by an earlier edit).
 - The 404/410 daily-recheck path (SPEC-reliable-acquisition.md:190-217) is
   still greenfield, per
   `project_representation_change_handling_implemented.md`.
+
+## Addendum: follow-up run (same day, commit `80d83af`)
+
+- E01 through E14 all pass on the current tree. See
+  `acquisition-tool-evaluation-2026-09-18d.md`. The earlier "not rerun" item
+  is closed.
+- The 404/410 daily-recheck path is implemented, with an early recheck on a
+  changed source generation. The "still greenfield" item is closed.
+- Full suite: 239 tests, all pass. Compile, `bash -n ./run.sh`,
+  `git diff --check`, and a one-item dry run all pass. The one-item dry run
+  reported one missing file and wrote no file.
+- The `pending` status no longer exists (merged into `queued`). The
+  `EXCLUDABLE_STATUSES` list above therefore names 7 states now. The
+  exclusion test covers every state in the set.
+- Correction: the "Required checks" block shows 186 tests, and the text above
+  it says 188. Both counts are stale. Use 239.
+- Still open: the source pilot and its before/after byte-hash comparison.
+  E07 checks only the fixture case. The pilot needs an explicit operator
+  instruction.
+

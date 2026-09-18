@@ -10,7 +10,7 @@ The controller has durable selected-run state, no-overwrite finalization,
 recovery tests, signed provenance records, telemetry snapshots, and local
 confirmed controls for retry, Tor renewal, pause admission, resume
 admission, drain and stop, and checkpoint and stop. The repository test
-suite runs 204 local tests. These features do not establish compliance
+suite runs 239 local tests. These features do not establish compliance
 with every requirement in the related specifications.
 
 A process-ownership review closed five gaps in this session and the four
@@ -89,12 +89,10 @@ existing row when a later queue changes them.
 
 Acceptance evidence is partly done: `exclude_item` is now verified from all
 8 reachable source states (`tests/test_tod_dl.py`), and the runbook covers
-storage recovery and candidate review (`README.md`). Still open: rerun
-E01 through E14 against the current tree (the latest report,
-`acquisition-tool-evaluation-2026-09-18c.md`, predates the SIGINT,
-disk-full, hashing-backpressure, reserve-accounting, and
-representation-change changes), and the isolated-test/pilot byte-hash
-comparison, which requires an actual transfer run. See
+storage recovery and candidate review (`README.md`). E01 through E14 were rerun against
+the current tree and all pass
+(`specs/reports/acquisition-tool-evaluation-2026-09-18d.md`). Still open:
+the pilot byte-hash comparison, which requires an actual transfer run. See
 `specs/reports/reliable-acquisition-acceptance-2026-09-18.md`.
 
 Provenance and fault-recovery acceptance suites, updated 2026-09-18: every
@@ -157,8 +155,7 @@ The current specification status is grouped below.
 
 ## Next steps
 
-Write a fresh dated evaluation report reflecting the closed E08 gap, then
-run the separately scheduled source pilot (at most five URLs, separate
+Run the separately scheduled source pilot (at most five URLs, separate
 state, verified SOCKS routing evidence) before treating the aria2 candidate
 as validated for production use. Do not run the pilot without an explicit
 instruction to do so.
