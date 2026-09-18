@@ -394,6 +394,24 @@ def legacy_name_too_long_error(error: str | None) -> bool:
     return bool(error and "Errno 36" in error and "File name too long" in error)
 
 
+def process_start_ticks(pid: int) -> int | None:
+    """Return pid's kernel start time, or None if it cannot be read.
+
+    A bare PID can be reused by an unrelated process after the original
+    exits. The start time field from ``/proc`` disambiguates the two, as
+    required to identify a surviving writer rather than a stale PID.
+    """
+    try:
+        stat_text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    fields = stat_text.rsplit(")", 1)[-1].split()
+    try:
+        return int(fields[19])
+    except (IndexError, ValueError):
+        return None
+
+
 def storage_relative(path: PurePosixPath, destination: Path) -> PurePosixPath:
     try:
         name_max = os.pathconf(destination, "PC_NAME_MAX")
@@ -1542,8 +1560,58 @@ class Downloader:
                    "('queued', 'retry_wait', 'pending', 'failed') AND url IN "
                    "(SELECT url FROM run_items WHERE run_id=?)", (self.run_id,))
 
+    def surviving_writer_pid(self, url: str) -> int | None:
+        """Return the pid of a writer from a prior crashed controller, if
+        it is still running under the same start time recorded for it."""
+        try:
+            manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        for entry in reversed(manifest.get("workers", [])):
+            if entry.get("url") != url:
+                continue
+            pid = entry.get("torsocks_pid")
+            started_ticks = entry.get("started_ticks")
+            if (pid and started_ticks is not None
+                    and process_start_ticks(pid) == started_ticks):
+                return pid
+            return None
+        return None
+
+    def terminate_surviving_writer(self, url: str) -> None:
+        """Stop a writer process a prior controller crash left running.
+
+        Requeuing without this check could start a second writer against
+        the same staging partial while the first one is still writing it.
+        """
+        pid = self.surviving_writer_pid(url)
+        if pid is None:
+            return
+        started_ticks = process_start_ticks(pid)
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if process_start_ticks(pid) != started_ticks:
+                return
+            time.sleep(0.2)
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
     def requeue_interrupted_transfers(self, db: sqlite3.Connection) -> None:
         """Return non-terminal selected work from a prior controller to queue."""
+        rows = db.execute(
+            "SELECT downloads.url FROM downloads JOIN run_items "
+            "ON run_items.url = downloads.url WHERE run_items.run_id=? "
+            "AND downloads.status IN ('active', 'running', 'admitted')",
+            (self.run_id,),
+        ).fetchall()
+        for (url,) in rows:
+            self.terminate_surviving_writer(url)
         db.execute("UPDATE downloads SET status='queued', next_retry_at=0, "
                    "updated_at=? WHERE status IN ('active', 'running', 'admitted') "
                    "AND url IN (SELECT url FROM run_items WHERE run_id=?)",
@@ -1650,7 +1718,9 @@ class Downloader:
 
     def record_worker(self, url: str, pid: int) -> None:
         with self.active_lock:
-            self.manifest["workers"].append({"url": url, "torsocks_pid": pid})
+            self.manifest["workers"].append(
+                {"url": url, "torsocks_pid": pid,
+                 "started_ticks": process_start_ticks(pid)})
             self.write_manifest()
         if self.telemetry:
             self.telemetry.set_active(url, self.worker_ids[url],

@@ -748,6 +748,57 @@ class RunSelectionTests(unittest.TestCase):
                              .fetchone()[0], "queued")
             db.close()
 
+    def test_resume_terminates_a_surviving_writer_before_requeuing(self):
+        """A crashed controller can leave an orphaned aria2 writer running.
+
+        Requeuing the item without checking for it would let a new worker
+        start a second writer against the same staging partial.
+        """
+        import subprocess
+        url = "https://fixture.test/first/data/item.bin"
+        with tempfile.TemporaryDirectory() as temporary:
+            downloader, db = self.prepare(Path(temporary), [url])
+            downloader.scope_run(db)
+            downloader.update(db, "UPDATE downloads SET status='active', next_retry_at=99 "
+                              "WHERE url=?", (url,))
+            downloader.run_dir.mkdir(parents=True)
+            downloader.manifest = {"workers": []}
+            survivor = subprocess.Popen(["sleep", "5"])
+            try:
+                downloader.record_worker(url, survivor.pid)
+
+                downloader.requeue_interrupted_transfers(db)
+                db.commit()
+
+                survivor.wait(timeout=5)
+                self.assertEqual(survivor.returncode, -signal.SIGTERM)
+                self.assertEqual(db.execute("SELECT status FROM downloads WHERE url=?",
+                                            (url,)).fetchone()[0], "queued")
+            finally:
+                if survivor.poll() is None:
+                    survivor.kill()
+                    survivor.wait()
+            db.close()
+
+    def test_resume_does_not_treat_a_recycled_pid_as_a_survivor(self):
+        url = "https://fixture.test/first/data/item.bin"
+        with tempfile.TemporaryDirectory() as temporary:
+            downloader, db = self.prepare(Path(temporary), [url])
+            downloader.scope_run(db)
+            downloader.update(db, "UPDATE downloads SET status='active', next_retry_at=99 "
+                              "WHERE url=?", (url,))
+            downloader.run_dir.mkdir(parents=True)
+            downloader.manifest = {"workers": [
+                {"url": url, "torsocks_pid": os.getpid(), "started_ticks": -1}]}
+            downloader.write_manifest()
+
+            downloader.requeue_interrupted_transfers(db)
+            db.commit()
+
+            self.assertEqual(db.execute("SELECT status FROM downloads WHERE url=?",
+                                        (url,)).fetchone()[0], "queued")
+            db.close()
+
     def test_existing_run_id_does_not_expand_when_queue_changes(self):
         initial = ["https://fixture.test/first/data/one.bin"]
         expanded = initial + ["https://fixture.test/second/data/two.bin"]
