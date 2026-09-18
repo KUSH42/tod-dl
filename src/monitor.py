@@ -745,16 +745,21 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
         }
         """
 
-        def __init__(self, action: str) -> None:
+        def __init__(self, action: str, item_count: int | None = None) -> None:
             super().__init__()
             self.action = action
+            self.item_count = item_count
 
         def compose(self) -> ComposeResult:
-            message = ("Make all retryable selected items eligible now?\n"
-                       "This does not add files or expand the selected run."
-                       if self.action == "retry_now" else
-                       "Ask Tor to use new circuits for future streams?\n"
-                       "This does not prove a new route or affect active transfers.")
+            if self.action == "retry_now":
+                message = (f"Make {self.item_count} selected item(s) eligible now?\n"
+                           "This does not add files or expand the selected run."
+                           if self.item_count is not None else
+                           "Make all retryable selected items eligible now?\n"
+                           "This does not add files or expand the selected run.")
+            else:
+                message = ("Ask Tor to use new circuits for future streams?\n"
+                           "This does not prove a new route or affect active transfers.")
             with Vertical(id="retry-confirmation"):
                 yield Static(message)
                 with Horizontal(id="retry-confirmation-buttons"):
@@ -1043,6 +1048,7 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             Binding("c", "clear_filters", "Clear filters"),
             Binding("f", "refresh_results", "Refresh results", show=False),
             Binding("g", "first_page", "First page", show=False),
+            Binding("R", "prepare_retry_selected", "Retry row", show=True),
             Binding("l", "logs", "Logs"),
             Binding("question_mark", "help", "Help", show=True),
         ]
@@ -1288,9 +1294,22 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
         def action_help(self) -> None:
             self.app.notify(
                 "/ search   Enter apply   Escape cancel   PageUp/PageDown page   "
-                "Enter opens item details   l logs   c clear filters   f refresh results   "
-                "g first page",
+                "Enter opens item details   R retry row   l logs   c clear filters   "
+                "f refresh results   g first page",
                 title="Queue help")
+
+        def retry_selected_eligible(self) -> bool:
+            """Return whether the focused row can be offered for row-scoped retry.
+
+            Eligibility is advisory only; the controller validates the item's
+            actual retryable state at execution time.
+            """
+            return bool(control and state and self.selected_item_id)
+
+        def action_prepare_retry_selected(self) -> None:
+            if not self.retry_selected_eligible():
+                return
+            self.app.prepare_row_scoped_retry(self.selected_item_id)
 
         def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
             if action == "next_page" and not self.next_cursor:
@@ -1301,6 +1320,8 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                 return None
             if (action == "first_page" and self.page_index == 0
                     and self.cursor_stack[0] is None):
+                return None
+            if action == "prepare_retry_selected" and not self.retry_selected_eligible():
                 return None
             return True
 
@@ -1498,6 +1519,7 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             self.control_state: dict[str, Any] | None = None
             self.control_error: str | None = None
             self.action_confirmation: dict[str, Any] | None = None
+            self.pending_item_ids: list[str] | None = None
             self.control_request_active = False
             self.inspection_request_active = False
             self.populate(snapshot, force=True)
@@ -1656,36 +1678,49 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
         def action_prepare_retry_now(self) -> None:
             if not self.retry_now_eligible():
                 return
+            self.pending_item_ids = None
             self.prepare_action("retry_now")
 
         def action_prepare_renew_tor_circuits(self) -> None:
             if not self.tor_renewal_eligible():
                 return
+            self.pending_item_ids = None
             self.prepare_action("renew_tor_circuits")
 
-        def prepare_action(self, action: str) -> None:
+        def prepare_row_scoped_retry(self, item_id: str) -> None:
+            if not (control and state):
+                return
+            self.pending_item_ids = [item_id]
+            self.prepare_action("retry_now", {"item_ids": [item_id]})
+
+        def prepare_action(self, action: str, parameters: dict[str, Any] | None = None) -> None:
             self.submit_control_request(
                 lambda: control_request(state, self.current["run_id"], "prepare_confirmation",
-                                        {"action": action}),
+                                        {"action": action, **(parameters or {})}),
                 self.apply_action_preparation,
             )
 
         def apply_action_preparation(self, payload, error) -> None:
             if error:
                 self.control_request_active = False
+                self.pending_item_ids = None
                 self.notify("Control action unavailable: " + literal_text(error), severity="error")
                 return
             confirmation = payload.get("confirmation") if isinstance(payload, dict) else None
             if not isinstance(confirmation, dict):
                 self.control_request_active = False
+                self.pending_item_ids = None
                 self.notify("Control action unavailable: invalid controller response", severity="error")
                 return
             self.control_request_active = False
             self.action_confirmation = confirmation
-            self.push_screen(ActionConfirmation(str(confirmation.get("action"))),
+            item_count = len(self.pending_item_ids) if self.pending_item_ids else None
+            self.push_screen(ActionConfirmation(str(confirmation.get("action")), item_count),
                              self.action_confirmation_complete)
 
         def action_confirmation_complete(self, confirmed: bool | None) -> None:
+            item_ids = self.pending_item_ids
+            self.pending_item_ids = None
             if not confirmed or not self.action_confirmation or not state:
                 self.action_confirmation = None
                 return
@@ -1695,11 +1730,11 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             if not isinstance(action, str):
                 self.notify("Control action unavailable: invalid controller response", severity="error")
                 return
+            parameters = {"nonce": confirmation.get("nonce"), "confirmation": action}
+            if item_ids:
+                parameters["item_ids"] = item_ids
             self.submit_control_request(
-                lambda: control_request(
-                    state, self.current["run_id"], action,
-                    {"nonce": confirmation.get("nonce"), "confirmation": action},
-                ),
+                lambda: control_request(state, self.current["run_id"], action, parameters),
                 self.apply_action_result,
             )
 

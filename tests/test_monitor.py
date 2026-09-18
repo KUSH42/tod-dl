@@ -171,6 +171,34 @@ class MonitorTests(unittest.TestCase):
             finally:
                 server.stop()
 
+    def test_row_scoped_retry_confirms_item_ids_and_reports_count(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            commands = []
+            server = ControlServer(root, "run-one", "session-one", lambda: {},
+                                   lambda request: commands.append(request) or {
+                                       "outcome": "completed", "reason": "accepted",
+                                       "state_revision": 3,
+                                   })
+            server.start()
+            try:
+                prepared = control_request(
+                    root, "run-one", "prepare_confirmation",
+                    {"action": "retry_now", "item_ids": ["a", "b"]})["confirmation"]
+                self.assertIn("2 selected item(s)", prepared["scope"])
+                with self.assertRaisesRegex(ControlError, "item_ids must be"):
+                    control_request(root, "run-one", "prepare_confirmation",
+                                    {"action": "retry_now", "item_ids": []})
+                # The final request must not be able to widen or replace the
+                # scope the operator confirmed: the controller re-injects the
+                # confirmed item_ids regardless of what the client resends.
+                control_request(root, "run-one", "retry_now",
+                                {"nonce": prepared["nonce"], "confirmation": "retry_now",
+                                 "item_ids": ["c", "d", "e"]})
+                self.assertEqual(commands[0]["parameters"]["item_ids"], ["a", "b"])
+            finally:
+                server.stop()
+
     def test_tor_renewal_requires_confirmation_and_replays_request_id(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

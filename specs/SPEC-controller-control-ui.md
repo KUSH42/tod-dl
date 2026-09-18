@@ -1,9 +1,10 @@
 # Specification: controller command channel and interactive UI
 
-Status: partially implemented, September 16, 2026. `get_control_state`,
-`retry_now`, and `renew_tor_circuits` are implemented. This specification
-extends the read-only [acquisition console UI](SPEC-console-ui.md) with a
-local, controller-owned command channel. The remaining mutating actions are
+Status: partially implemented, September 18, 2026. `get_control_state`,
+`retry_now` (including its row-scoped `item_ids` parameter), and
+`renew_tor_circuits` are implemented. This specification extends the
+read-only [acquisition console UI](SPEC-console-ui.md) with a local,
+controller-owned command channel. The remaining mutating actions are
 planned.
 
 ## Outcome and authority boundary

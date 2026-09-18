@@ -612,24 +612,40 @@ class Downloader:
         session_id = request["session_id"]
         if not isinstance(request_id, str) or not isinstance(session_id, str):
             return {"outcome": "rejected", "reason": "invalid control request"}
+        parameters = request.get("parameters")
+        item_ids = parameters.get("item_ids") if isinstance(parameters, dict) else None
+        if item_ids is not None and (
+                not isinstance(item_ids, list) or not item_ids
+                or not all(isinstance(item_id, str) and item_id for item_id in item_ids)):
+            return {"outcome": "rejected", "reason": "item_ids must be a non-empty list of strings"}
         with self.db_lock:
             existing = db.execute("SELECT outcome, reason, state_revision FROM control_requests "
                                   "WHERE request_id=?", (request_id,)).fetchone()
             if existing:
                 outcome, reason, revision = existing
                 return {"outcome": outcome, "reason": reason, "state_revision": revision}
-            changed_rows = db.execute(
+            candidate_rows = db.execute(
                 "SELECT downloads.url, downloads.status, downloads.attempts, downloads.bytes, "
                 "downloads.next_retry_at, downloads.last_error FROM downloads JOIN run_items "
                 "ON run_items.url=downloads.url WHERE run_items.run_id=? AND "
                 "downloads.status IN ('queued', 'retry_wait', 'pending', 'failed')",
                 (self.run_id,),
             ).fetchall()
-            changed = db.execute("UPDATE downloads SET next_retry_at=0, updated_at=? "
-                                 "WHERE status IN ('queued', 'retry_wait', 'pending', 'failed') "
-                                 "AND url IN "
-                                 "(SELECT url FROM run_items WHERE run_id=?)",
-                                 (now(), self.run_id)).rowcount
+            if item_ids is not None:
+                wanted = set(item_ids)
+                changed_rows = [row for row in candidate_rows if self.item_id(row[0]) in wanted]
+            else:
+                changed_rows = candidate_rows
+            urls = [row[0] for row in changed_rows]
+            if urls:
+                placeholders = ",".join("?" * len(urls))
+                changed = db.execute(
+                    f"UPDATE downloads SET next_retry_at=0, updated_at=? "
+                    f"WHERE url IN ({placeholders})",
+                    (now(), *urls),
+                ).rowcount
+            else:
+                changed = 0
             reason = f"made {changed} selected retryable item(s) eligible now"
             db.execute("INSERT INTO download_transitions "
                        "(url, run_id, from_status, to_status, detail, recorded_at) "

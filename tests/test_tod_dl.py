@@ -245,6 +245,41 @@ class RunSelectionTests(unittest.TestCase):
                                         "WHERE url='__control__'").fetchone()[0], 1)
             db.close()
 
+    def test_control_retry_now_scopes_to_requested_item_ids(self):
+        first_url = "https://fixture.test/first/data/item.bin"
+        second_url = "https://fixture.test/first/data/other.bin"
+        with tempfile.TemporaryDirectory() as temporary:
+            downloader, db = self.prepare(Path(temporary), [first_url, second_url])
+            downloader.scope_run(db)
+            downloader.update(db, "UPDATE downloads SET status='retry_wait', "
+                              "next_retry_at=9999999999", ())
+            request = {"request_id": "request-one", "session_id": "session-one",
+                      "parameters": {"item_ids": [downloader.item_id(first_url)]}}
+
+            response = downloader.control_retry_now(db, request)
+
+            self.assertEqual(response["outcome"], "completed")
+            self.assertIn("made 1 selected", response["reason"])
+            self.assertEqual(db.execute("SELECT next_retry_at FROM downloads WHERE url=?",
+                                        (first_url,)).fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT next_retry_at FROM downloads WHERE url=?",
+                                        (second_url,)).fetchone()[0], 9999999999)
+            db.close()
+
+    def test_control_retry_now_rejects_malformed_item_ids(self):
+        url = "https://fixture.test/first/data/item.bin"
+        with tempfile.TemporaryDirectory() as temporary:
+            downloader, db = self.prepare(Path(temporary), [url])
+            downloader.scope_run(db)
+            request = {"request_id": "request-one", "session_id": "session-one",
+                      "parameters": {"item_ids": []}}
+
+            response = downloader.control_retry_now(db, request)
+
+            self.assertEqual(response["outcome"], "rejected")
+            self.assertIn("item_ids", response["reason"])
+            db.close()
+
     def test_control_wake_interrupts_active_transfer_wait(self):
         with tempfile.TemporaryDirectory() as temporary:
             queue = Path(temporary) / "queue.txt"

@@ -115,7 +115,7 @@ class ControlServer:
         self.token = secrets.token_urlsafe(32)
         self.state_provider = state_provider
         self.action_handler = action_handler
-        self.confirmations: dict[str, tuple[str, float]] = {}
+        self.confirmations: dict[str, tuple[str, float, tuple[str, ...] | None]] = {}
         self.completed: dict[str, dict[str, Any]] = {}
         self.command_lock = threading.Lock()
         self.listener: socket.socket | None = None
@@ -213,13 +213,23 @@ class ControlServer:
         action = parameters.get("action")
         if action not in {"retry_now", "renew_tor_circuits"}:
             raise ControlError("action is unavailable")
+        item_ids: tuple[str, ...] | None = None
+        if action == "retry_now" and "item_ids" in parameters:
+            raw_item_ids = parameters.get("item_ids")
+            if (not isinstance(raw_item_ids, list) or not raw_item_ids
+                    or not all(isinstance(item_id, str) and item_id for item_id in raw_item_ids)):
+                raise ControlError("item_ids must be a non-empty list of strings")
+            item_ids = tuple(raw_item_ids)
         nonce = secrets.token_urlsafe(24)
         with self.command_lock:
-            self.confirmations[nonce] = (action, time.monotonic() + 60)
+            self.confirmations[nonce] = (action, time.monotonic() + 60, item_ids)
+        if action == "retry_now":
+            scope = (f"{len(item_ids)} selected item(s) in the immutable selected run"
+                      if item_ids else "retryable items in the immutable selected run")
+        else:
+            scope = "future Tor streams only"
         return {"request_id": request_id, "outcome": "completed", "confirmation": {
-            "nonce": nonce, "action": action, "expires_in_s": 60,
-            "scope": ("retryable items in the immutable selected run"
-                      if action == "retry_now" else "future Tor streams only"),
+            "nonce": nonce, "action": action, "expires_in_s": 60, "scope": scope,
         }}
 
     def _confirmed_action(self, action: str, request_id: str, parameters: Any,
@@ -236,6 +246,9 @@ class ControlServer:
             if (not prepared or prepared[0] != action or time.monotonic() > prepared[1]
                     or confirmation != action):
                 raise ControlError(f"{action} confirmation is invalid or expired")
+            item_ids = prepared[2]
+            if item_ids is not None:
+                request = {**request, "parameters": {**parameters, "item_ids": list(item_ids)}}
             response = self.action_handler(request)
             if not isinstance(response, dict) or response.get("outcome") not in {
                     "completed", "rejected", "failed"}:

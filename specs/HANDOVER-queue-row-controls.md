@@ -23,16 +23,18 @@ to the exact sections that define correct behavior.
 
 ## Current baseline in code
 
-- `src/controller.py`: `ControlServer._handle` (line 176) accepts only
+- Row-scoped retry (step 1 below) is implemented: `ControlServer` binds an
+  `item_ids` scope to the confirmation nonce and re-injects it at execution
+  time so a client cannot widen scope after confirming; `control_retry_now`
+  in `src/tod-dl.py` filters to the requested item IDs; `QueuePane` binds
+  `R` to `action_prepare_retry_selected`, distinct from the run-wide `r`
+  control.
+- `src/controller.py`: `ControlServer._handle` accepts only
   `get_control_state`, `prepare_confirmation`, `retry_now`, and
-  `renew_tor_circuits` (line 204). `_prepare_confirmation` (line 210)
-  restricts confirmation to the same two mutating actions (line 214).
-- `src/controller.py`: `retry_now` has no `item_ids` scoping path yet; it
-  acts run-wide only. Row-scoped retry needs an `item_ids` parameter here.
-- `src/monitor.py`: `QueuePane` (line 1037) and its `BINDINGS` (line 1039)
-  have no key bindings or actions for reordering, removal, export, or queue
-  editing. Row-scoped retry has no binding distinct from the existing
-  run-wide `r` control (`action_prepare_retry_now`, line 1656).
+  `renew_tor_circuits`. `_prepare_confirmation` restricts confirmation to
+  the same two mutating actions.
+- `src/monitor.py`: `QueuePane`'s `BINDINGS` have no key bindings or actions
+  for reordering, removal, export, or queue editing.
 - No `excluded` state, `set_item_priority`, or `set_retry_cooldown` handling
   exists anywhere in `src/`.
 

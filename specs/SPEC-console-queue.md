@@ -1,6 +1,6 @@
 # Specification: console queue view
 
-Status: partially implemented, September 17, 2026. This view shows the
+Status: partially implemented, September 18, 2026. This view shows the
 immutable selected set, remaining work, and retry deadlines without changing
 acquisition order.
 
@@ -207,8 +207,9 @@ Selection and filtering must never submit a retry command. The existing `r`
 control must retain the controller-confirmed scope defined in
 [SPEC-controller-control-ui.md](SPEC-controller-control-ui.md). A filtered queue must not imply that a
 run-scoped action applies only to visible rows.
-Row-scoped retry, reordering, removal, export, and queue editing are planned,
-scoped as follows.
+Row-scoped retry is implemented, bound to `R` in the queue pane. Reordering,
+removal, export, and queue editing remain planned. All five are scoped as
+follows.
 
 Row-scoped retry sends the existing `retry_now` action with an `item_ids`
 parameter limited to the focused or multi-selected rows, instead of every
