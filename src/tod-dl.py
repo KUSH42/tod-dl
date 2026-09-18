@@ -639,6 +639,7 @@ class Downloader:
         self.next_worker_start = 0.0
         self.stop_requested = threading.Event()
         self.sigterm_received = threading.Event()
+        self.sigint_received = threading.Event()
         self.admission_paused = threading.Event()
         self.drain_requested = threading.Event()
         self.control_wake = threading.Event()
@@ -2325,7 +2326,13 @@ class Downloader:
             self.stop_requested.set()
             self.control_wake.set()
 
+        def handle_sigint(signum, frame) -> None:
+            self.sigint_received.set()
+            self.stop_requested.set()
+            self.control_wake.set()
+
         previous_sigterm = signal.signal(signal.SIGTERM, handle_sigterm)
+        previous_sigint = signal.signal(signal.SIGINT, handle_sigint)
         try:
             ports = verify_tor_isolation(self.args.tor_control_address,
                                          self.args.tor_control_cookie)
@@ -2471,6 +2478,7 @@ class Downloader:
                     ).fetchall()
                 durable_outcomes = {status: count for status, count in outcome_rows}
                 close_reason = ("sigterm" if self.sigterm_received.is_set()
+                                else "sigint" if self.sigint_received.is_set()
                                 else "time_limit" if self.deadline is not None and self.stop_requested.is_set()
                                 else "finished" if not unresolved else "stopped")
                 if self.provenance:
@@ -2492,9 +2500,12 @@ class Downloader:
                 f"{key}={value}" for key, value in sorted(results.items())))
             if self.sigterm_received.is_set():
                 return 143
+            if self.sigint_received.is_set():
+                return 130
             return 1 if unresolved else 0
         finally:
             signal.signal(signal.SIGTERM, previous_sigterm)
+            signal.signal(signal.SIGINT, previous_sigint)
             fcntl.flock(lock, fcntl.LOCK_UN)
             lock.close()
 

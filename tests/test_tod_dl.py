@@ -1898,6 +1898,39 @@ class ShutdownSignalTests(unittest.TestCase):
             closed = [json.loads(line) for line in events if '"run_closed"' in line][0]
             self.assertEqual(closed["close_reason"], "sigterm")
 
+    def test_sigint_during_run_exits_130_and_records_close_reason(self):
+        url = "https://fixture.test/first/data/item.bin"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            queue = root / "queue.txt"
+            queue.write_text(url + "\n", encoding="utf-8")
+            args = make_args(root, queue)
+            args.tor_control_address = "127.0.0.1:9051"
+            args.tor_control_cookie = root / "control.authcookie"
+            args.retry_now = False
+            args.time_limit = 0
+            args.progress_interval = 30
+            args.reserve_bytes = 0
+            downloader = Downloader(args)
+
+            original_verify = tod_dl.verify_tor_isolation
+
+            def raise_sigint_then_verify(address, cookie):
+                os.kill(os.getpid(), signal.SIGINT)
+                return ["9050"]
+
+            tod_dl.verify_tor_isolation = raise_sigint_then_verify
+            try:
+                exit_code = downloader.run()
+            finally:
+                tod_dl.verify_tor_isolation = original_verify
+
+            self.assertEqual(exit_code, 130)
+            self.assertEqual(signal.getsignal(signal.SIGINT), signal.default_int_handler)
+            events = downloader.provenance.events_path.read_text(encoding="utf-8").splitlines()
+            closed = [json.loads(line) for line in events if '"run_closed"' in line][0]
+            self.assertEqual(closed["close_reason"], "sigint")
+
     def test_exclusive_ownership_conflicts_across_state_dirs_sharing_destination(self):
         url = "https://fixture.test/first/data/item.bin"
         with tempfile.TemporaryDirectory() as temporary:
