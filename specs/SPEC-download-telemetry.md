@@ -182,7 +182,7 @@ Display phases refine durable states; they do not redefine completion.
 | Retry wait or retryable failure | Retry, with persisted eligibility countdown. |
 | Attempt ceiling reached | Exhausted; retain the underlying recorded status. |
 | Complete | Complete only after the durable completion commit. |
-| Existing unverified, review required, unavailable | Separate unresolved buckets. |
+| Existing unverified, review required, unavailable | Separate unresolved buckets. The `unavailable` bucket's durable-status trigger, and its resume transition to `active`, `review_required`, or `queued`, are defined in [SPEC-reliable-acquisition.md](SPEC-reliable-acquisition.md), not here. |
 | Unrecognized legacy state | Unknown state, visible and unresolved. |
 
 Every selected item belongs to exactly one display bucket. Their sum must

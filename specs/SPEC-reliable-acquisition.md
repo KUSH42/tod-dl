@@ -102,8 +102,8 @@ review_required causes below stay distinguishable in that field.
 | `review_required` — validation mismatch | Retain the value. |
 | `review_required` — changed remote representation | Clear the value on entry to this state. Detecting the change enters this state directly, per the outage/retry table below. A recorded restart decision is needed only to leave this state and resume under a new staging generation, not to enter it. The cleared value described a representation the record no longer promotes. |
 | `review_required` — no reliable version protection or expected checksum | Clear the value on entry to this state. Unlike the row above, the representation is not known to have changed; it is only unconfirmed. Treat that uncertainty the same as a confirmed change for this field. |
-| `unavailable`, with a staging generation already recorded | Retain the value. A routine recheck alone never changes the staging generation. How an `unavailable` item resumes staging once it becomes available again is not defined here; whatever transition governs that resume must apply the generation-change and `review_required` clearing rules above, the same as any other resume. |
-| `unavailable`, with no staging generation recorded | The field has no value to clear, since it was never staged. A later recheck that admits the item as fresh work follows the ordinary capture rule above. |
+| `unavailable`, with a staging generation already recorded | Retain the value. A routine recheck alone never changes the staging generation. The resume transition below states what happens once the item becomes available again. |
+| `unavailable`, with no staging generation recorded | The field has no value to clear, since it was never staged. A later recheck that admits the item as fresh work follows the same admission rule as any newly selected item, in Selection and resource controls below. |
 
 No other terminal state or cause clears the field.
 
@@ -152,6 +152,35 @@ Use one engine attempt per adapter attempt when the adapter owns backoff.
 | Disk full, database write failure, permission error | Stop admission and report local failure; don't consume network retry attempts. |
 | Validation mismatch or changed remote representation | Move the item to `review_required` and preserve its staging file as a review candidate; no blind retry into the same bytes. |
 
+A recheck request is a normal request, evaluated against the 404/410 row
+first: a repeated 404 or 410 leaves the item `unavailable`, still waiting a
+full day for the next attempt, the same cadence as any other recheck. A
+connection or Tor failure, timeout, transient 5xx, 429/503, or 401/403
+during the recheck does not end `unavailable` and does not additionally
+retry within that day under that condition's own row above; the item stays
+`unavailable` and still waits the same full day for its next recheck
+attempt, an extension of the rule that an early-triggered recheck above
+still counts as that day's one recheck. Only a response indicating the item
+exists again — neither a repeated 404/410 nor one of those other conditions
+— ends `unavailable` immediately. It does not by itself return the item to
+`queued` or `active`. Feed that response's validators into the resume
+decision in Resume and representation integrity below, exactly as for any
+other resumed transfer; recheck success
+does not exempt the item from that decision, and does not bypass the
+`review_required`-first rule that already governs a detected representation
+change. If a staging generation was already recorded: a confirmed-unchanged
+representation resumes directly under the existing generation into `active`,
+the same as any other confirmed-unchanged resume; a confirmed or unconfirmed
+change enters `review_required` directly, the same as any other detected or
+suspected change, and only a later recorded restart decision moves it to a
+new staging generation and `active`. Entering `review_required` or a new
+staging generation this way still applies the field-clearing rules in the
+table above; the recheck path does not change what those rules clear. If no
+staging generation was recorded, the item was never staged, so Resume and
+representation integrity's checks do not apply; the recheck admits it as
+fresh work under the same admission rule as any newly selected item, in
+Selection and resource controls above, entering `queued` directly.
+
 An outage must not mark the remaining million items failed one by one. Probe
 only an in-scope item, through Tor, without writing into an active partial.
 One successful probe permits a staggered recovery; repeated failure keeps the
@@ -173,6 +202,10 @@ Prefer a strong ETag with conditional resume or a trusted expected checksum.
 Size and Last-Modified alone are weaker evidence. If a resumed transfer has
 neither reliable version protection nor an expected checksum, move it to
 `review_required` instead of asserting that mixed versions were ruled out.
+If the newly returned strong ETag, or a trusted expected checksum, matches
+the value already recorded for the item, the representation is confirmed
+unchanged: resume under the existing staging generation directly, without a
+restart decision and without moving through `review_required`.
 
 Resume and hashing must use bounded memory independent of file size. A slow
 but progressing file must not hit a total-transfer timeout merely because it

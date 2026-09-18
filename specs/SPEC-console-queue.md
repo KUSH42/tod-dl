@@ -206,9 +206,9 @@ Row-scoped retry, reordering, removal, export, and queue editing are deferred.
 Tests must use temporary manifests and synthetic pages, without source access.
 
 - Verify manifest order, stable ranks, duplicate names, and every bucket that
-  [SPEC-download-telemetry.md](SPEC-download-telemetry.md) can produce. The
-  `unavailable` bucket has no defined durable-status trigger there yet; this
-  view cannot test it until that spec defines one.
+  [SPEC-download-telemetry.md](SPEC-download-telemetry.md) can produce,
+  including `unavailable`, whose trigger and resume transition are defined in
+  [SPEC-reliable-acquisition.md](SPEC-reliable-acquisition.md).
 - Verify literal search, combined filters, search cancellation, and clearing.
 - Verify page boundaries with 0, 1, 100, 200, and 201 selected items.
 - Verify no duplicate or missing rows across pages at one stable revision.
