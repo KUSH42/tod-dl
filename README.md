@@ -59,6 +59,14 @@ whitespace, in any order:
 - `sha256=<hex>`: the expected 64-character hex SHA-256 digest. If the
   downloaded file's digest does not match, the downloader moves the file to
   a review candidate instead of promoting it.
+  A later queue that gives an existing item a different `size=` or `sha256=`
+  value replaces the stored value.
+- `generation=<id>`: an opaque source-generation identifier that the queue
+  producer sets, for example the inventory snapshot hash. The downloader
+  stores it per item. If a later run gives an `unavailable` item a different
+  identifier, the item's daily recheck runs early. The early recheck counts as
+  that day's recheck. Unless a later run gives another differing identifier,
+  the next recheck waits a full day after it.
 
 Example: `https://example.onion/data/case/file.bin size=1.8M
 sha256=9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08`

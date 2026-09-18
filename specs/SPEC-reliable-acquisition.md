@@ -40,6 +40,9 @@ unavailable metadata:
 
 - Stable item ID, exact source URL, original path, destination mapping,
   inventory snapshot hash, queue rank, and source-generation identifier.
+  The queue producer supplies the source-generation identifier as an opaque
+  string in the queue line's `generation=` token. It is null when the queue
+  line has no token.
 - Inventory display-size token, exact expected size if actually available,
   expected checksum and its origin, and available remote validators.
 - State, engine job ID, engine instance ID, staging path, staging generation,
@@ -182,7 +185,7 @@ attempt count either.
 | Connection or Tor failure, timeout, transient 5xx | Retry after 1, 2, 4, 8, 16, then 30 minutes, with up to 20% added jitter. |
 | Three consecutive connectivity failures for one origin | Pause new transfers for that origin; allow one recovery probe after backoff, increasing to 30 minutes. |
 | HTTP 429 or 503 with valid Retry-After | Wait at least the server's requested interval; persist the deadline. |
-| HTTP 404 or 410 | Record unavailable. Recheck at most once per day since the last recheck. A differing source-generation identifier in a new run's manifest may trigger that day's recheck early, instead of waiting out the rest of the day. It still counts as that day's one recheck. The next recheck, for any reason, still waits a full day after it. Compare before overwriting the stored identifier with the new run's value. |
+| HTTP 404 or 410 | Record unavailable. Recheck at most once per day since the last recheck. A differing source-generation identifier in a new run's manifest may trigger that day's recheck early, instead of waiting out the rest of the day. It still counts as that day's one recheck. Unless a later differing identifier triggers again, the next recheck waits a full day after it. Compare before overwriting the stored identifier with the new run's value. Only two known, differing identifiers trigger it; a null on either side does not. It applies only while the daily recheck is not yet due. A later identifier that differs from the stored one always triggers, also after an earlier early recheck. An unchanged identifier never repeats it. |
 | HTTP 401 or 403 | Pause affected scope for review; don't loop or attempt to bypass access controls. |
 | Disk full, database write failure, permission error | Stop admission and report local failure; don't consume network retry attempts. |
 | Validation mismatch or changed remote representation | Move the item to `review_required` and preserve its staging file as a review candidate; no blind retry into the same bytes. |

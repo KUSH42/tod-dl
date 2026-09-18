@@ -131,6 +131,20 @@ class RunSelectionTests(unittest.TestCase):
             self.assertIn(f"[queue-rejected] {good}: duplicate URL", output)
             db.close()
 
+    def test_later_queue_refreshes_size_and_checksum_of_an_existing_row(self):
+        url = "https://fixture.test/first/data/item.bin"
+        first, second = "a" * 64, "b" * 64
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            downloader, db = self.prepare(root, [f"{url} size=1K sha256={first}"])
+            queue = root / "queue.txt"
+            query = "SELECT inventory_size, expected_sha256 FROM downloads WHERE url=?"
+            self.assertEqual(db.execute(query, (url,)).fetchone(), ("1K", first))
+            queue.write_text(f"{url} size=2K sha256={second}\n", encoding="utf-8")
+            downloader.import_queues(db)
+            self.assertEqual(db.execute(query, (url,)).fetchone(), ("2K", second))
+            db.close()
+
     def test_selection_skips_existing_before_applying_limit(self):
         urls = [
             "https://fixture.test/first/data/existing.bin",
@@ -1537,6 +1551,341 @@ class AcquisitionFaultRecoveryTests(unittest.TestCase):
                 "SELECT status, review_code, etag, last_modified, staging_generation "
                 "FROM downloads WHERE url=?", (self.url,)).fetchone()
             self.assertEqual(row, ("queued", None, None, None, 2))
+            db.close()
+
+    not_found_error = ("[HttpSkipResponseCommand.cc:218] errorCode=3 Resource not found")
+    gone_error = ("[HttpSkipResponseCommand.cc:239] errorCode=22 "
+                  "The response status is not successful. status=410")
+
+    def make_unavailable(self, downloader, db, partial=True, **fields):
+        if partial:
+            LocalFakeTransferEngine(self.payload).partial(downloader.staging_path(self.url))
+        downloader.transition(db, self.url, "unavailable", "HTTP 404",
+                              recheck_at=time.time() - 1, **fields)
+
+    def recheck(self, downloader, db, response):
+        downloader.head_request = lambda url: response
+        row = downloader.next_recheck(db)
+        self.assertIsNotNone(row)
+        with redirect_stdout(StringIO()):
+            return downloader.recheck_unavailable(row, db)
+
+    def test_404_and_410_error_lines_are_recognised_and_other_errors_are_not(self):
+        self.assertTrue(tod_dl.is_unavailable_failure(self.not_found_error))
+        self.assertTrue(tod_dl.is_unavailable_failure(self.gone_error))
+        self.assertFalse(tod_dl.is_unavailable_failure(
+            "errorCode=22 The response status is not successful. status=4040"))
+        self.assertFalse(tod_dl.is_unavailable_failure(
+            "errorCode=22 The response status is not successful. status=503"))
+
+    def test_404_on_transfer_records_unavailable_and_keeps_the_partial(self):
+        for error in (self.not_found_error, self.gone_error):
+            with FaultRoot() as root:
+                downloader, db, _ = self.make_controller(root)
+                engine = LocalFakeTransferEngine(self.payload)
+                staging = downloader.staging_path(self.url)
+                engine.partial(staging)
+                downloader.run_aria2 = lambda *_: (False, error)
+                downloader.probe_representation = lambda url: None
+                before = time.time()
+
+                with redirect_stdout(StringIO()):
+                    self.assertEqual(downloader.transfer(downloader.next_pending(db), db),
+                                     "unavailable")
+                status, attempts, recheck_at, last_error = db.execute(
+                    "SELECT status, attempts, recheck_at, last_error FROM downloads WHERE url=?",
+                    (self.url,)).fetchone()
+                self.assertEqual((status, attempts, last_error), ("unavailable", 1, error))
+                self.assertAlmostEqual(recheck_at - before, 86400, delta=60)
+                self.assertTrue(staging.exists())
+                self.assertIsNone(downloader.next_pending(db))
+                self.assertIsNone(downloader.next_recheck(db))
+                db.close()
+
+    def test_recheck_is_claimed_for_a_full_day_before_the_request_runs(self):
+        with FaultRoot() as root:
+            downloader, db, _ = self.make_controller(root)
+            self.make_unavailable(downloader, db)
+            due = downloader.next_recheck(db)
+            self.assertEqual(due[0], self.url)
+            before = time.time()
+            downloader.claim_recheck(db, self.url)
+            self.assertIsNone(downloader.next_recheck(db))
+            recheck_at = db.execute("SELECT recheck_at FROM downloads WHERE url=?",
+                                    (self.url,)).fetchone()[0]
+            self.assertAlmostEqual(recheck_at - before, 86400, delta=60)
+            db.close()
+
+    def make_generation_item(self, root, generation, recheck_in=3600):
+        downloader, db, queue = self.make_controller(
+            root, urls=[f"{self.url} generation={generation}"])
+        downloader.transition(db, self.url, "unavailable", "HTTP 404",
+                              recheck_at=time.time() + recheck_in, early_recheck=0)
+        return downloader, db, queue
+
+    def import_generation(self, downloader, db, queue, generation):
+        queue.write_text(f"{self.url} generation={generation}\n", encoding="utf-8")
+        with redirect_stdout(StringIO()):
+            downloader.import_queues(db)
+
+    def recheck_state(self, db):
+        return db.execute("SELECT source_generation, early_recheck, recheck_at "
+                          "FROM downloads WHERE url=?", (self.url,)).fetchone()
+
+    def test_queue_line_generation_token_is_stored_and_a_repeated_one_is_rejected(self):
+        with FaultRoot() as root:
+            downloader, db, queue = self.make_controller(
+                root, urls=[f"{self.url} size=1K generation=Gen-7"])
+            self.assertEqual(self.recheck_state(db)[0], "Gen-7")
+            self.assertEqual(list(tod_dl.read_queues([queue]))[0][4], "Gen-7")
+            queue.write_text(f"{self.url} generation=a generation=b\n", encoding="utf-8")
+            rejected = []
+            self.assertEqual(list(tod_dl.read_queues(
+                [queue], on_reject=lambda url, reason: rejected.append(reason))), [])
+            self.assertEqual(rejected, ["duplicate queue line token: generation"])
+            db.close()
+
+    def test_differing_source_generation_makes_a_not_yet_due_recheck_due_early(self):
+        with FaultRoot() as root:
+            downloader, db, queue = self.make_generation_item(root, "g1")
+            self.assertIsNone(downloader.next_recheck(db))
+            self.import_generation(downloader, db, queue, "g2")
+            self.assertEqual(self.recheck_state(db)[:2], ("g2", 1))
+            self.assertEqual(downloader.next_recheck(db)[0], self.url)
+            db.close()
+
+    def test_early_recheck_counts_as_the_days_recheck_and_only_a_later_differing_id_repeats_it(self):
+        with FaultRoot() as root:
+            downloader, db, queue = self.make_generation_item(root, "g1")
+            self.import_generation(downloader, db, queue, "g2")
+            before = time.time()
+            downloader.claim_recheck(db, self.url)
+            generation, early, recheck_at = self.recheck_state(db)
+            self.assertEqual(early, 2)
+            self.assertAlmostEqual(recheck_at - before, 86400, delta=60)
+            self.assertIsNone(downloader.next_recheck(db))
+            self.import_generation(downloader, db, queue, "g2")
+            self.assertEqual(self.recheck_state(db)[:2], ("g2", 2))
+            self.assertIsNone(downloader.next_recheck(db))
+            self.import_generation(downloader, db, queue, "g3")
+            self.assertEqual(self.recheck_state(db)[:2], ("g3", 1))
+            self.assertEqual(downloader.next_recheck(db)[0], self.url)
+            downloader.claim_recheck(db, self.url)
+            self.assertEqual(self.recheck_state(db)[1], 2)
+            db.execute("UPDATE downloads SET recheck_at=?", (time.time() - 1,))
+            downloader.claim_recheck(db, self.url)
+            self.assertEqual(self.recheck_state(db)[1], 0)
+            downloader.transition(db, self.url, "unavailable", "HTTP 404",
+                                  recheck_at=time.time() + 3600)
+            self.import_generation(downloader, db, queue, "g4")
+            self.assertEqual(self.recheck_state(db)[1], 1)
+            db.close()
+
+    def test_source_generation_does_not_trigger_when_unknown_equal_or_already_due(self):
+        with FaultRoot() as root:
+            downloader, db, queue = self.make_generation_item(root, "g1")
+            self.import_generation(downloader, db, queue, "g1")
+            self.assertEqual(self.recheck_state(db)[:2], ("g1", 0))
+            queue.write_text(self.url + "\n", encoding="utf-8")
+            with redirect_stdout(StringIO()):
+                downloader.import_queues(db)
+            self.assertEqual(self.recheck_state(db)[:2], (None, 0))
+            self.import_generation(downloader, db, queue, "g5")
+            self.assertEqual(self.recheck_state(db)[:2], ("g5", 0))
+            self.assertIsNone(downloader.next_recheck(db))
+            db.execute("UPDATE downloads SET recheck_at=?", (time.time() - 1,))
+            self.import_generation(downloader, db, queue, "g6")
+            self.assertEqual(self.recheck_state(db)[:2], ("g6", 0))
+            db.close()
+
+    def test_source_generation_does_not_trigger_a_recheck_for_an_available_item(self):
+        with FaultRoot() as root:
+            downloader, db, queue = self.make_controller(
+                root, urls=[f"{self.url} generation=g1"])
+            self.import_generation(downloader, db, queue, "g2")
+            self.assertEqual(self.recheck_state(db)[:2], ("g2", 0))
+            self.assertIsNone(downloader.next_recheck(db))
+            db.close()
+
+    def test_recheck_that_is_not_a_success_leaves_the_item_unavailable(self):
+        for response in ({"status": 404, "etag": None, "last_modified": None},
+                         {"status": 410, "etag": None, "last_modified": None},
+                         {"status": 503, "etag": None, "last_modified": None},
+                         {"status": 403, "etag": None, "last_modified": None},
+                         None):
+            with FaultRoot() as root:
+                downloader, db, _ = self.make_controller(root)
+                self.make_unavailable(downloader, db, etag='"e"', staging_generation=1)
+                self.assertEqual(self.recheck(downloader, db, response), "still_unavailable")
+                self.assertEqual(db.execute("SELECT status FROM downloads WHERE url=?",
+                                            (self.url,)).fetchone()[0], "unavailable")
+                self.assertTrue(downloader.staging_path(self.url).exists())
+                db.close()
+
+    def test_recheck_success_without_a_staged_partial_admits_fresh_work(self):
+        with FaultRoot() as root:
+            downloader, db, _ = self.make_controller(root)
+            self.make_unavailable(downloader, db, partial=False)
+            result = self.recheck(downloader, db, {"status": 200, "etag": '"n"',
+                                                   "last_modified": None})
+            self.assertEqual(result, "recheck_available")
+            self.assertEqual(db.execute(
+                "SELECT status, recheck_at, next_retry_at FROM downloads WHERE url=?",
+                (self.url,)).fetchone(), ("queued", None, 0))
+            self.assertEqual(downloader.next_pending(db)[0], self.url)
+            db.close()
+
+    def test_recheck_success_with_unchanged_etag_resumes_under_the_same_generation(self):
+        with FaultRoot() as root:
+            downloader, db, _ = self.make_controller(root)
+            self.make_unavailable(downloader, db, etag='"same"', staging_generation=1)
+            result = self.recheck(downloader, db, {"status": 206, "etag": '"same"',
+                                                   "last_modified": None})
+            self.assertEqual(result, "recheck_available")
+            self.assertEqual(db.execute(
+                "SELECT status, staging_generation FROM downloads WHERE url=?",
+                (self.url,)).fetchone(), ("queued", 1))
+            self.assertTrue(downloader.staging_path(self.url).exists())
+            db.close()
+
+    def test_recheck_success_with_changed_etag_enters_review_and_keeps_old_bytes(self):
+        with FaultRoot() as root:
+            downloader, db, _ = self.make_controller(root)
+            self.make_unavailable(downloader, db, etag='"old"', staging_generation=1)
+            staging = downloader.staging_path(self.url)
+            result = self.recheck(downloader, db, {"status": 200, "etag": '"new"',
+                                                   "last_modified": None})
+            self.assertEqual(result, "recheck_review")
+            self.assertEqual(db.execute(
+                "SELECT status, review_code, staging_generation, etag, recheck_at "
+                "FROM downloads WHERE url=?", (self.url,)).fetchone(),
+                ("review_required", "changed_remote_representation", 1, '"new"', None))
+            self.assertFalse(staging.exists())
+            candidates = list(downloader.candidates.iterdir())
+            self.assertTrue(any(c.read_bytes() == self.payload[:len(self.payload) // 2]
+                                for c in candidates if c.suffix != ".aria2"))
+            db.close()
+
+    def test_recheck_success_without_any_recorded_validator_is_unconfirmed_review(self):
+        with FaultRoot() as root:
+            downloader, db, _ = self.make_controller(root)
+            self.make_unavailable(downloader, db, staging_generation=1)
+            result = self.recheck(downloader, db, {"status": 200, "etag": '"n"',
+                                                   "last_modified": None})
+            self.assertEqual(result, "recheck_review")
+            self.assertEqual(db.execute("SELECT status, review_code FROM downloads WHERE url=?",
+                                        (self.url,)).fetchone(),
+                             ("review_required", "no_reliable_version_protection"))
+            db.close()
+
+    def test_recheck_success_with_expected_checksum_resumes_despite_a_new_etag(self):
+        with FaultRoot() as root:
+            downloader, db, _ = self.make_controller(root)
+            self.make_unavailable(downloader, db, etag='"old"', staging_generation=1,
+                                  expected_sha256=hashlib.sha256(self.payload).hexdigest())
+            result = self.recheck(downloader, db, {"status": 200, "etag": '"new"',
+                                                   "last_modified": None})
+            self.assertEqual(result, "recheck_available")
+            self.assertEqual(db.execute("SELECT status FROM downloads WHERE url=?",
+                                        (self.url,)).fetchone()[0], "queued")
+            db.close()
+
+    def test_run_rechecks_a_due_unavailable_item_and_completes_it(self):
+        with FaultRoot() as root:
+            queue = root / "queue.txt"
+            queue.write_text(self.url + "\n", encoding="utf-8")
+
+            def build():
+                args = make_args(root, queue)
+                args.tor_control_address = "127.0.0.1:9051"
+                args.tor_control_cookie = root / "control.authcookie"
+                args.retry_now = False
+                args.time_limit = 0
+                args.progress_interval = 30
+                args.reserve_bytes = 0
+                return Downloader(args)
+
+            def run(downloader):
+                original = tod_dl.verify_tor_isolation
+                tod_dl.verify_tor_isolation = lambda address, cookie: ["9050"]
+                try:
+                    with redirect_stdout(StringIO()):
+                        return downloader.run()
+                finally:
+                    tod_dl.verify_tor_isolation = original
+
+            first = build()
+            first.probe_representation = lambda url: {"etag": '"v1"', "last_modified": None}
+            first.run_aria2 = lambda *_: (False, self.not_found_error)
+            self.assertEqual(run(first), 1)
+            db = sqlite3.connect(root / "state" / "manifest.sqlite")
+            self.assertEqual(db.execute("SELECT status FROM downloads").fetchone()[0],
+                             "unavailable")
+
+            second = build()
+            second.head_request = lambda url: {"status": 200, "etag": '"v1"',
+                                               "last_modified": None}
+            second.probe_representation = lambda url: {"etag": '"v1"', "last_modified": None}
+            second.run_aria2 = lambda *_: (False, self.not_found_error)
+            self.assertEqual(run(second), 1)
+            self.assertEqual(db.execute("SELECT status FROM downloads").fetchone()[0],
+                             "unavailable")
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM download_attempts").fetchone()[0],
+                             1)
+
+            db.execute("UPDATE downloads SET recheck_at=?", (time.time() - 1,))
+            db.commit()
+            third = build()
+            engine = LocalFakeTransferEngine(self.payload)
+            third.head_request = lambda url: {"status": 200, "etag": '"v1"',
+                                              "last_modified": None}
+            third.probe_representation = lambda url: {"etag": '"v1"', "last_modified": None}
+            third.run_aria2 = lambda _url, staging, _attempt: engine.complete(staging)
+            self.assertEqual(run(third), 0)
+            self.assertEqual(db.execute("SELECT status FROM downloads").fetchone()[0],
+                             "complete")
+            db.close()
+
+    def test_run_with_a_new_source_generation_rechecks_an_unavailable_item_early(self):
+        with FaultRoot() as root:
+            queue = root / "queue.txt"
+
+            def run(run_id, generation, head_response):
+                queue.write_text(f"{self.url} generation={generation}\n", encoding="utf-8")
+                args = make_args(root, queue)
+                args.run_id = run_id
+                args.tor_control_address = "127.0.0.1:9051"
+                args.tor_control_cookie = root / "control.authcookie"
+                args.retry_now = False
+                args.time_limit = 0
+                args.progress_interval = 30
+                args.reserve_bytes = 0
+                downloader = Downloader(args)
+                heads = []
+                downloader.head_request = lambda url: heads.append(url) or head_response
+                downloader.probe_representation = lambda url: {"etag": '"v1"',
+                                                               "last_modified": None}
+                downloader.run_aria2 = lambda *_: (False, self.not_found_error)
+                original = tod_dl.verify_tor_isolation
+                tod_dl.verify_tor_isolation = lambda address, cookie: ["9050"]
+                try:
+                    with redirect_stdout(StringIO()):
+                        downloader.run()
+                finally:
+                    tod_dl.verify_tor_isolation = original
+                return heads
+
+            gone = {"status": 404, "etag": None, "last_modified": None}
+            self.assertEqual(run("run-a", "g1", gone), [])
+            self.assertEqual(run("run-b", "g1", gone), [])
+            self.assertEqual(run("run-c", "g2", gone), [self.url])
+            self.assertEqual(run("run-d", "g2", gone), [])
+            self.assertEqual(run("run-e", "g3", gone), [self.url])
+            self.assertEqual(run("run-f", "g3", gone), [])
+            db = sqlite3.connect(root / "state" / "manifest.sqlite")
+            self.assertEqual(db.execute("SELECT status, source_generation, early_recheck "
+                                        "FROM downloads").fetchone(),
+                             ("unavailable", "g3", 2))
             db.close()
 
     def test_during_file_flush_preserves_staging_and_does_not_create_a_final(self):

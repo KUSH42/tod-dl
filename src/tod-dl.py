@@ -43,7 +43,8 @@ remediation_reason TEXT, remediation_mapping_version TEXT,
 remediation_outcome TEXT, remediation_started_at TEXT,
 remediation_completed_at TEXT, priority INTEGER NOT NULL DEFAULT 0,
 etag TEXT, last_modified TEXT, staging_generation INTEGER,
-updated_at TEXT NOT NULL)"""
+recheck_at REAL, source_generation TEXT,
+early_recheck INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)"""
 RUN_SCHEMA = """
 CREATE TABLE IF NOT EXISTS run_items (
     run_id TEXT NOT NULL,
@@ -106,6 +107,7 @@ SCOPE_RUN_TRACKED_STATUSES = frozenset({"complete", "existing_unverified",
                                         "review_required", "excluded",
                                         "unavailable"})
 COOLDOWN_OVERRIDE_MIN_S, COOLDOWN_OVERRIDE_MAX_S = 0, 3600
+UNAVAILABLE_RECHECK_INTERVAL_S = 24 * 60 * 60
 ADMISSION_POLL_SECONDS = 0.25
 SAFE_PATH_MAPPING_VERSION = "v1"
 DISPLAY_BUCKETS = ("queued", "busy", "retry", "exhausted", "complete",
@@ -297,7 +299,7 @@ def legacy_relative_path(url: str) -> PurePosixPath | None:
         return None
 
 
-QUEUE_LINE_TOKEN_KEYS = {"size", "sha256"}
+QUEUE_LINE_TOKEN_KEYS = {"size", "sha256", "generation"}
 SHA256_HEX_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
@@ -345,7 +347,8 @@ def read_queues(paths: list[Path], on_reject=None):
                     continue
                 seen.add(url)
                 try:
-                    yield url, relative_path(url), tokens.get("size"), tokens.get("sha256")
+                    yield (url, relative_path(url), tokens.get("size"), tokens.get("sha256"),
+                           tokens.get("generation"))
                 except ValueError as exc:
                     if on_reject:
                         on_reject(url, str(exc))
@@ -385,6 +388,16 @@ def is_incomplete_body_failure(error: str) -> bool:
     specific message rather than the code alone.
     """
     return "GOT EOF FROM THE SERVER" in error.upper()
+
+
+def is_unavailable_failure(error: str) -> bool:
+    """Identify an HTTP 404 or 410 from aria2's error log line.
+
+    aria2 reports 404 as errorCode=3 "Resource not found". It reports 410
+    as errorCode=22 with "status=410" in the message.
+    """
+    upper = error.upper()
+    return "RESOURCE NOT FOUND" in upper or bool(re.search(r"STATUS=(404|410)\b", upper))
 
 
 def is_disk_full_failure(error: str) -> bool:
@@ -1415,6 +1428,13 @@ class Downloader:
             db.execute("ALTER TABLE downloads ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
         if "staging_generation" not in columns:
             db.execute("ALTER TABLE downloads ADD COLUMN staging_generation INTEGER")
+        if "recheck_at" not in columns:
+            db.execute("ALTER TABLE downloads ADD COLUMN recheck_at REAL")
+        if "source_generation" not in columns:
+            db.execute("ALTER TABLE downloads ADD COLUMN source_generation TEXT")
+        if "early_recheck" not in columns:
+            db.execute("ALTER TABLE downloads ADD COLUMN early_recheck "
+                       "INTEGER NOT NULL DEFAULT 0")
         db.execute("PRAGMA journal_mode=WAL")
         db.execute("PRAGMA busy_timeout=60000")
         db.execute("UPDATE downloads SET status='queued' WHERE status='pending'")
@@ -1560,7 +1580,7 @@ class Downloader:
         def report_rejection(url: str, reason: str) -> None:
             print(f"[queue-rejected] {url}: {reason}", flush=True)
 
-        for url, rel, inventory_size, expected_sha256 in read_queues(
+        for url, rel, inventory_size, expected_sha256, source_generation in read_queues(
                 self.args.queue, on_reject=report_rejection):
             stored, _ = self.resolved_storage_target(rel, url)
             db.execute("INSERT OR IGNORE INTO downloads (url, relative_path, "
@@ -1569,14 +1589,40 @@ class Downloader:
                        (url, rel.as_posix(), stored.as_posix(),
                         str(self.staging_path(url)), inventory_size, expected_sha256, now()))
             db.execute("UPDATE downloads SET storage_path=?, staging_path=?, "
-                       "inventory_size=?, expected_sha256=?, updated_at=? "
-                       "WHERE url=? AND (storage_path IS NULL "
+                       "updated_at=? WHERE url=? AND (storage_path IS NULL "
                        "OR storage_path != ? OR staging_path IS NULL)",
-                       (stored.as_posix(), str(self.staging_path(url)), inventory_size,
-                        expected_sha256, now(), url, stored.as_posix()))
+                       (stored.as_posix(), str(self.staging_path(url)), now(), url,
+                        stored.as_posix()))
+            db.execute("UPDATE downloads SET inventory_size=?, expected_sha256=?, "
+                       "updated_at=? WHERE url=? AND (inventory_size IS NOT ? "
+                       "OR expected_sha256 IS NOT ?)",
+                       (inventory_size, expected_sha256, now(), url,
+                        inventory_size, expected_sha256))
+            self.record_source_generation(db, url, source_generation)
             count += 1
         db.commit()
         return count
+
+    def record_source_generation(self, db: sqlite3.Connection, url: str,
+                                 new_generation: str | None) -> None:
+        """Store the queue's source-generation identifier, comparing before overwriting.
+
+        A differing identifier pulls the next daily recheck of an `unavailable`
+        item forward. Both values must be known, and the daily recheck must
+        not be due yet. A differing identifier always triggers, also after an
+        earlier early recheck: only an identifier that differs from the stored
+        one can trigger, so an unchanged identifier never repeats it.
+        """
+        status, stored, early_recheck, recheck_at = db.execute(
+            "SELECT status, source_generation, early_recheck, recheck_at "
+            "FROM downloads WHERE url=?", (url,)).fetchone()
+        if (status == "unavailable" and early_recheck != 1 and stored and new_generation
+                and stored != new_generation and (recheck_at or 0) > time.time()):
+            db.execute("UPDATE downloads SET early_recheck=1 WHERE url=?", (url,))
+            print(f"[recheck] {url}: source generation changed; recheck due early",
+                  flush=True)
+        db.execute("UPDATE downloads SET source_generation=? WHERE url=?",
+                   (new_generation, url))
 
     def reconcile_existing_file(self, db: sqlite3.Connection, url: str, logical: str,
                                 stored: str, target: Path,
@@ -1623,7 +1669,8 @@ class Downloader:
             db.commit()
             return previous, 0
         selected = existing = 0
-        for url, rel, _inventory_size, expected_sha256 in read_queues(self.args.queue):
+        for url, rel, _inventory_size, expected_sha256, _generation in read_queues(
+                self.args.queue):
             if self.args.max_files and selected >= self.args.max_files:
                 break
             stored, target = self.resolved_storage_target(rel, url)
@@ -1644,7 +1691,8 @@ class Downloader:
 
     def dry_run(self) -> int:
         existing = missing = selected = 0
-        for url, rel, _inventory_size, _expected_sha256 in read_queues(self.args.queue):
+        for url, rel, _inventory_size, _expected_sha256, _generation in read_queues(
+                self.args.queue):
             if self.args.max_files and selected >= self.args.max_files:
                 break
             stored, target = self.resolved_storage_target(rel, url)
@@ -1668,6 +1716,65 @@ class Downloader:
             AND next_retry_at <= ? ORDER BY run_items.queue_rank LIMIT 1"""
         return db.execute(query, (self.run_id, self.args.max_attempts, self.args.max_attempts,
                                   time.time())).fetchone()
+
+    def next_recheck(self, db: sqlite3.Connection):
+        """Return the next selected `unavailable` item whose daily recheck is due."""
+        with self.db_lock:
+            return db.execute(
+                "SELECT downloads.url, relative_path, staging_path, expected_sha256, "
+                "etag, last_modified, staging_generation FROM downloads "
+                "JOIN run_items ON run_items.url = downloads.url "
+                "WHERE status='unavailable' AND run_items.run_id=? "
+                "AND (COALESCE(recheck_at, 0) <= ? OR early_recheck = 1) ORDER BY run_items.queue_rank LIMIT 1",
+                (self.run_id, time.time())).fetchone()
+
+    def claim_recheck(self, db: sqlite3.Connection, url: str) -> None:
+        """Spend the item's one recheck for the day before the request runs.
+
+        Every outcome except "available again" keeps the item waiting a full
+        day, so the deadline moves on claim, not on completion. A claim of a
+        pending early recheck marks it spent (2). Any other claim clears the mark.
+        """
+        with self.db_lock:
+            claimed_at = time.time()
+            db.execute("UPDATE downloads SET early_recheck=CASE WHEN early_recheck=1 "
+                       "AND COALESCE(recheck_at, 0) > ? THEN 2 ELSE 0 END, "
+                       "recheck_at=?, updated_at=? WHERE url=?",
+                       (claimed_at, claimed_at + UNAVAILABLE_RECHECK_INTERVAL_S, now(), url))
+            db.commit()
+
+    def recheck_unavailable(self, row, db: sqlite3.Connection) -> str:
+        """Send one recheck request and apply the resume decision if the item exists.
+
+        Only a 200 or 206 ends `unavailable`. A repeated 404/410, a failed
+        request, a 3xx, 4xx, or 5xx, or any other non-success leaves the
+        item `unavailable` until the next daily recheck.
+        """
+        (url, rel_text, staging_text, expected_sha256, etag, last_modified,
+         staging_generation) = row
+        payload = self.head_request(url)
+        status = payload.get("status") if payload else None
+        if status not in (200, 206):
+            print(f"[recheck] {rel_text}: still unavailable "
+                  f"({'no response' if status is None else f'HTTP {status}'})", flush=True)
+            return "still_unavailable"
+        observed = {"etag": payload.get("etag"), "last_modified": payload.get("last_modified")}
+        staging = Path(staging_text or str(self.staging_path(url)))
+        partial_exists = staging.exists() and staging.stat().st_size > 0
+        if staging_generation is None or not partial_exists:
+            detail = "recheck: available again; admitted as fresh work"
+        elif expected_sha256:
+            detail = "recheck: available again; expected checksum protects the resume"
+        else:
+            decision = self.classify_representation(etag, last_modified, observed)
+            if decision != "confirmed_unchanged":
+                self.enter_representation_review(db, url, PurePosixPath(rel_text), staging,
+                                                 decision, observed)
+                return "recheck_review"
+            detail = "recheck: available again; representation confirmed unchanged"
+        self.transition(db, url, "queued", detail, next_retry_at=0, recheck_at=None)
+        print(f"[recheck] {rel_text}: {detail}", flush=True)
+        return "recheck_available"
 
     def retry_wait(self, db: sqlite3.Connection) -> float | None:
         row = db.execute(
@@ -1982,11 +2089,12 @@ class Downloader:
                 time.sleep(delay)
             self.next_worker_start = time.monotonic() + self.args.worker_stagger
 
-    def probe_representation(self, url: str) -> dict | None:
-        """HEAD a URL through Tor to read validators without touching staging.
+    def head_request(self, url: str) -> dict | None:
+        """HEAD a URL through Tor and return its status and validators.
 
         Runs outside any item's engine job, like the outage-recovery probe:
-        it never starts, ends, or counts as an attempt for the item.
+        it never starts, ends, or counts as an attempt for the item. Returns
+        None when the request could not run or its output was malformed.
         """
         script = (
             "import http.client, json, sys\n"
@@ -2017,7 +2125,15 @@ class Downloader:
         except (ValueError, IndexError):
             # malformed probe output; None means the representation is unverified
             return None
-        if payload.get("status") not in (200, 206):
+        return payload
+
+    def probe_representation(self, url: str) -> dict | None:
+        """Read remote validators without touching staging.
+
+        Returns None unless the response is 200 or 206.
+        """
+        payload = self.head_request(url)
+        if not payload or payload.get("status") not in (200, 206):
             return None
         return {"etag": payload.get("etag"), "last_modified": payload.get("last_modified")}
 
@@ -2034,15 +2150,40 @@ class Downloader:
         observed = self.probe_representation(url)
         if observed is None:
             return "unconfirmed", {}
+        return self.classify_representation(recorded_etag, recorded_last_modified,
+                                            observed), observed
+
+    @staticmethod
+    def classify_representation(recorded_etag: str | None,
+                                recorded_last_modified: str | None,
+                                observed: dict) -> str:
         fresh_etag = observed.get("etag")
         if recorded_etag and fresh_etag and recorded_etag == fresh_etag:
-            return "confirmed_unchanged", observed
+            return "confirmed_unchanged"
         if recorded_etag and fresh_etag and recorded_etag != fresh_etag:
-            return "changed", observed
+            return "changed"
         if not recorded_etag and recorded_last_modified and observed.get("last_modified"):
             if recorded_last_modified != observed.get("last_modified"):
-                return "changed", observed
-        return "unconfirmed", observed
+                return "changed"
+        return "unconfirmed"
+
+    def enter_representation_review(self, db: sqlite3.Connection, url: str,
+                                    rel: PurePosixPath, staging: Path, decision: str,
+                                    observed: dict) -> None:
+        """Move the partial to a review candidate and record why."""
+        cause = ("changed_remote_representation" if decision == "changed"
+                 else "no_reliable_version_protection")
+        detail = ("changed remote representation detected on resume"
+                  if decision == "changed"
+                  else "no reliable version protection or expected checksum on resume")
+        candidate = self.move_candidate(staging)
+        self.candidate_event(url, staging, candidate, None, cause)
+        self.transition(db, url, "review_required", detail,
+                        bytes=None, last_error=detail, review_code=cause,
+                        etag=observed.get("etag"), last_modified=observed.get("last_modified"),
+                        recheck_at=None)
+        self.clear_transfer_telemetry(url)
+        print(f"[review] {rel}: {detail}", flush=True)
 
     def run_aria2(self, url: str, staging: Path, attempt: int) -> tuple[bool, str]:
         staging.parent.mkdir(parents=True, exist_ok=True)
@@ -2187,18 +2328,7 @@ class Downloader:
             # never had the means to fingerprint in the first place.
             decision, observed = self.check_representation(url, etag, last_modified)
             if decision != "confirmed_unchanged":
-                cause = ("changed_remote_representation" if decision == "changed"
-                        else "no_reliable_version_protection")
-                detail = ("changed remote representation detected on resume"
-                          if decision == "changed"
-                          else "no reliable version protection or expected checksum on resume")
-                candidate = self.move_candidate(staging)
-                self.candidate_event(url, staging, candidate, None, cause)
-                self.transition(db, url, "review_required", detail,
-                                bytes=None, last_error=detail, review_code=cause,
-                                etag=observed.get("etag"), last_modified=observed.get("last_modified"))
-                self.clear_transfer_telemetry(url)
-                print(f"[review] {rel}: {detail}", flush=True)
+                self.enter_representation_review(db, url, rel, staging, decision, observed)
                 return "review"
         attempt_started_at = utc_now()
         self.transition(db, url, "active", attempts=attempts + 1, **active_fields)
@@ -2250,6 +2380,19 @@ class Downloader:
                 self.clear_transfer_telemetry(url)
                 print(f"[stopped] {rel}: local failure: {error}", flush=True)
                 return "local_failure"
+            if is_unavailable_failure(error):
+                # Spec: HTTP 404/410 records `unavailable` at once, with no
+                # retry backoff. The staging partial and generation stay as
+                # they are; a daily recheck decides what happens next.
+                self.attempt_event(db, url, attempts + 1, attempt_started_at, "unavailable")
+                self.transition(db, url, "unavailable", error, bytes=size, last_error=error,
+                                recheck_at=time.time() + UNAVAILABLE_RECHECK_INTERVAL_S,
+                                early_recheck=0)
+                if self.telemetry:
+                    self.telemetry.event("warning", "unavailable", error, url, worker_id)
+                self.clear_transfer_telemetry(url)
+                print(f"[unavailable] {rel}: {error}", flush=True)
+                return "unavailable"
             if is_connectivity_failure(error):
                 with self.cooldown_lock:
                     self.cooldown_until = max(self.cooldown_until,
@@ -2657,7 +2800,12 @@ class Downloader:
                                 break
                             row = self.next_pending(db)
                             if row is None:
-                                break
+                                due = self.next_recheck(db)
+                                if due is None:
+                                    break
+                                self.claim_recheck(db, due[0])
+                                futures.add(pool.submit(self.recheck_unavailable, due, db))
+                                continue
                             self.transition(db, row[0], "admitted", "transfer admitted")
                             futures.add(pool.submit(self.transfer, row, db))
                         if futures:

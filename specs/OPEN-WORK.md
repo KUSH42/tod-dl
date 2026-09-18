@@ -75,8 +75,17 @@ backpressure fixes), migration support (`ALTER TABLE` column migrations in
 `src/tod-dl.py`), and representation-change handling for the resume path
 (`probe_representation()`, `check_representation()`, the
 `resume_new_generation` controller action) are done. The 404/410
-daily-recheck path that also wires in representation checks
-(`SPEC-reliable-acquisition.md:190-217`) is still greenfield.
+daily-recheck path (`SPEC-reliable-acquisition.md:190-217`) is done as
+well: `transfer()` records `unavailable` with a `recheck_at` deadline, and
+the run loop sends one HEAD recheck per due item per day
+(`recheck_unavailable()`), then applies the same resume decision. The
+early recheck is done too. A queue line's `generation=<id>` token fills the
+new `source_generation` column, and `record_source_generation()` compares it
+before overwriting. A differing identifier makes the recheck due at once,
+through the `early_recheck` column (0 none, 1 pending, 2 spent). A later
+differing identifier triggers again, also after a spent early recheck.
+`import_queues()` also refreshes `inventory_size` and `expected_sha256` of an
+existing row when a later queue changes them.
 
 Acceptance evidence is partly done: `exclude_item` is now verified from all
 8 reachable source states (`tests/test_tod_dl.py`), and the runbook covers
@@ -126,8 +135,6 @@ a debounced file-system watch, and produces a dated report plus a candidate
 acquisition queue for missing and mismatched items. It depends on
 inventory discovery's manifest and on the `expected_checksum` field already
 added to acquisition; it does not define either.
-
-Add row select for the event list in the Activity tab.
 
 Activity and Dashboard are not the same view. `SPEC-console-ui.md` uses
 "dashboard" for the whole console screen: the worker table, disk lines, and
