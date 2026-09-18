@@ -42,8 +42,17 @@ unavailable metadata:
   inventory snapshot hash, queue rank, and source-generation identifier.
 - Inventory display-size token, exact expected size if actually available,
   expected checksum and its origin, and available remote validators.
-- State, engine job ID, engine instance ID, staging path, attempt count,
-  next eligible retry time, observed bytes, and last categorized error.
+- State, engine job ID, engine instance ID, staging path, staging generation,
+  attempt count, next eligible retry time, observed bytes, last measured
+  engine total bytes, and last categorized error. Staging generation numbers
+  which representation of the item is currently staged. It is null before
+  the item's first staging attempt, when it is set to 1. Each later
+  representation-change restart decision (see Resume and representation
+  integrity below) increments it by 1. Only these two events change it. A
+  null value, not 0 or 1, is what "no staging generation recorded" means in
+  the table below. It is distinct from the source-generation identifier and
+  inventory snapshot hash above, which track the immutable inventory's
+  identity instead.
 - Request and response timestamps, final URL and redirect chain, HTTP status,
   available content length/range/type, ETag, and Last-Modified values.
 - Local SHA-256, validation result and method version, candidate path when
@@ -53,6 +62,50 @@ Use append-only attempt and transition records in addition to current state.
 Record metadata once per attempt where possible; don't rewrite an ever-growing
 run manifest after every worker event. Engine sessions are recovery aids, not
 the sole record of completed or failed work.
+
+Capture the last measured engine total bytes into the durable item record on
+each attempt that reports a total. This is the same attempt counted in the
+Outage and retry behavior section's per-adapter-attempt policy. An
+outage-recovery probe from that section never writes into a partial. It
+does not count as an attempt. It
+must not set or change this field. The most recently reported value replaces
+any earlier one within the same staging generation. Starting a new staging
+generation for a representation change clears any value captured under the
+old generation. A completed record then never reports a total measured
+against a different representation. An item that reaches `complete` without
+the engine ever reporting a total must keep the field null; do not back-fill
+it from an inventory-size estimate. This field is distinct from the
+per-attempt available content length recorded above. It is the engine's own
+reported transfer total. Capture it because a response content length is
+not always present or reliable. The two fields may differ or arrive
+independently. This field does not detect or reconcile a later attempt
+reporting a total that conflicts with an earlier one in the same generation.
+That gap is acceptable only because the field is informational display data
+for the console. Validation and finalization decisions must not depend on it.
+The Resume and representation integrity section governs the safeguards that
+apply to promotion. The table below states whether each terminal state
+clears or retains the field; that table is the sole source for this
+behavior. Some rows clear the field on state entry, independent of the
+staging-generation reset above. The last categorized error field must record
+each cause at the grain the table needs. The outage/retry table below groups
+"validation mismatch" and "changed remote representation" into one policy
+row, for retry purposes only. "No reliable version protection or expected
+checksum" is not an outage/retry cause. It comes from the Resume and
+representation integrity section instead. Defining the full categorized-error
+value set is future work. This spec requires only that the three
+review_required causes below stay distinguishable in that field.
+
+| Terminal state or cause | Field handling |
+| --- | --- |
+| `complete` | Retain the value. |
+| `existing_unverified` | Retain the value. |
+| `review_required` — validation mismatch | Retain the value. |
+| `review_required` — changed remote representation | Clear the value on entry to this state. Detecting the change enters this state directly, per the outage/retry table below. A recorded restart decision is needed only to leave this state and resume under a new staging generation, not to enter it. The cleared value described a representation the record no longer promotes. |
+| `review_required` — no reliable version protection or expected checksum | Clear the value on entry to this state. Unlike the row above, the representation is not known to have changed; it is only unconfirmed. Treat that uncertainty the same as a confirmed change for this field. |
+| `unavailable`, with a staging generation already recorded | Retain the value. A routine recheck alone never changes the staging generation. How an `unavailable` item resumes staging once it becomes available again is not defined here; whatever transition governs that resume must apply the generation-change and `review_required` clearing rules above, the same as any other resume. |
+| `unavailable`, with no staging generation recorded | The field has no value to clear, since it was never staged. A later recheck that admits the item as fresh work follows the ordinary capture rule above. |
+
+No other terminal state or cause clears the field.
 
 Persist transitions through `queued`, `active`, `retry_wait`, `validating`,
 `promoting`, and `complete`. Also support `existing_unverified`,
@@ -94,10 +147,10 @@ Use one engine attempt per adapter attempt when the adapter owns backoff.
 | Connection or Tor failure, timeout, transient 5xx | Retry after 1, 2, 4, 8, 16, then 30 minutes, with up to 20% added jitter. |
 | Three consecutive connectivity failures for one origin | Pause new transfers for that origin; allow one recovery probe after backoff, increasing to 30 minutes. |
 | HTTP 429 or 503 with valid Retry-After | Wait at least the server's requested interval; persist the deadline. |
-| HTTP 404 or 410 | Record unavailable; recheck no more than once per day or after a new inventory generation. |
+| HTTP 404 or 410 | Record unavailable. Recheck at most once per day since the last recheck. A differing source-generation identifier in a new run's manifest may trigger that day's recheck early, instead of waiting out the rest of the day. It still counts as that day's one recheck. The next recheck, for any reason, still waits a full day after it. Compare before overwriting the stored identifier with the new run's value. |
 | HTTP 401 or 403 | Pause affected scope for review; don't loop or attempt to bypass access controls. |
 | Disk full, database write failure, permission error | Stop admission and report local failure; don't consume network retry attempts. |
-| Validation mismatch or changed remote representation | Preserve a review candidate; no blind retry into the same bytes. |
+| Validation mismatch or changed remote representation | Move the item to `review_required` and preserve its staging file as a review candidate; no blind retry into the same bytes. |
 
 An outage must not mark the remaining million items failed one by one. Probe
 only an in-scope item, through Tor, without writing into an active partial.
@@ -118,8 +171,8 @@ retain the old partial and use a new staging generation only through a
 recorded restart decision. Never append new-version bytes to an old version.
 Prefer a strong ETag with conditional resume or a trusted expected checksum.
 Size and Last-Modified alone are weaker evidence. If a resumed transfer has
-neither reliable version protection nor an expected checksum, retain it for
-review instead of asserting that mixed versions were ruled out.
+neither reliable version protection nor an expected checksum, move it to
+`review_required` instead of asserting that mixed versions were ruled out.
 
 Resume and hashing must use bounded memory independent of file size. A slow
 but progressing file must not hit a total-transfer timeout merely because it
