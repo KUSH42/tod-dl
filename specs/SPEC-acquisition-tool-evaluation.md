@@ -5,8 +5,9 @@ implements deterministic content, immutable manifests, scripted HTTP behavior,
 event logs, and structured reports. E01 through E14 ran against the current
 per-URL aria2 candidate; all 14 pass and the engineering targets are met
 (`specs/reports/acquisition-tool-evaluation-2026-09-18c.md`). The separately
-scheduled source pilot required before this specification is complete has
-not run. This specification defines how you select an existing transfer tool
+scheduled source pilot ran on 2026-09-18 for one queue of 5 URLs, and all 5
+transferred (`specs/reports/source-pilot-2026-09-18.md`). The pilot did not
+observe the source Range behavior, so the specification is not complete. This specification defines how you select an existing transfer tool
 before expanding custom code. It does not authorize a production download.
 
 ## Outcome and scope
@@ -190,8 +191,8 @@ but is not source success.
 
 ## Next steps
 
-Run E01 through E14 against the current per-URL aria2 process configuration.
-Add a long-lived RPC worker only when the evaluation identifies a mandatory
-gap. Use the selected result to implement the acquisition specification, then
+Record the source Range behavior with a deliberate resume test in a second
+pilot of at most five URLs. Add a long-lived RPC worker only when the
+evaluation identifies a mandatory gap. Use the selected result to implement the acquisition specification, then
 add discovery without making crawling a prerequisite for downloading known
 URLs.

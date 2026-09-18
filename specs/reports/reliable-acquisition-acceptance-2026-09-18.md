@@ -90,3 +90,12 @@ the spec is already satisfied (or was overtaken by an earlier edit).
   E07 checks only the fixture case. The pilot needs an explicit operator
   instruction.
 
+## Addendum: source pilot (same day)
+
+- The source pilot for queue A ran: 5 of 5 items complete, HTTP 200, through
+  `torsocks -i`. See `source-pilot-2026-09-18.md`.
+- The pilot byte comparison is done. The raw inventory and snapshot hashes are
+  unchanged, and the destination was new. The queue had no `sha256=` token,
+  so no source checksum was compared.
+- Still open: source Range behavior, queues B and C, and a bounded production
+  run.

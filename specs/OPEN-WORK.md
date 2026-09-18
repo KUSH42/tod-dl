@@ -69,12 +69,19 @@ reach `review_required`, confirmed by re-running
 predates this fix and still shows the old gap; a fresh dated report has not
 been written yet.
 
-One gap remains open, not blocking selection under the specification's
-stated gate:
+The source pilot ran on 2026-09-18 with queue A (5 URLs, 512 KiB to 1 MiB,
+separate state). All 5 items completed with HTTP 200 through `torsocks -i`
+and the recorded `127.0.0.1:9050 IsolateSOCKSAuth` preflight. The provenance
+record set verifies, and the raw inventory and snapshot hashes did not change
+(`specs/reports/source-pilot-2026-09-18.md`). A first run of the same queue
+returned HTTP 404 for all 5 files, because the base URL in `~/base-url.txt` lacked
+the `/data/` segment. Two gaps remain open, and neither blocks selection:
 
-- The source pilot (at most five URLs, separate state, verified SOCKS
-  routing evidence) has not run. Do not treat the candidate as validated for
-  production use until it does.
+- Source Range behavior is unobserved. All 5 transfers were fresh, so no
+  response showed HTTP 206. A resume test against the source needs a
+  deliberate interruption.
+- Queues B and C, and a bounded production run, have not run. Do not treat
+  the candidate as validated for unattended production use until they do.
 
 Complete the reliable-acquisition contract after tool selection. Engine
 lifecycle checks (SIGINT parity with SIGTERM), bounded large-queue admission
@@ -100,7 +107,10 @@ Acceptance evidence is partly done: `exclude_item` is now verified from all
 storage recovery and candidate review (`README.md`). E01 through E14 were rerun against
 the current tree and all pass
 (`specs/reports/acquisition-tool-evaluation-2026-09-18d.md`). Still open:
-the pilot byte-hash comparison, which requires an actual transfer run. See
+the byte-hash comparison for isolated tests. The pilot comparison is done:
+the raw inventory and snapshot hashes are unchanged, and the destination held
+no earlier final. The pilot queue had no `sha256=` token, so no source
+checksum was compared. See `specs/reports/source-pilot-2026-09-18.md` and
 `specs/reports/reliable-acquisition-acceptance-2026-09-18.md`.
 
 Provenance and fault-recovery acceptance suites, updated 2026-09-18: every
@@ -140,7 +150,8 @@ manifest runs gave identical bytes.
 Still open in inventory discovery:
 
 - Network refresh and directory discovery are not built. Add them only after
-  the basic acquisition workflow is reliable and the source pilot is done.
+  the basic acquisition workflow is reliable. The source pilot for queue A is
+  done; the Range and production gaps above remain.
   Scheduled refresh waits for both.
 - The `diff` command does not produce a candidate queue or candidate manifest
   from the `added` and `metadata_changed` paths. The parent specification
@@ -199,7 +210,8 @@ The current specification status is grouped below.
 
 ## Next steps
 
-Run the separately scheduled source pilot (at most five URLs, separate
-state, verified SOCKS routing evidence) before treating the aria2 candidate
-as validated for production use. Do not run the pilot without an explicit
-instruction to do so.
+Record the source Range behavior with one deliberate resume test, then run
+queues B and C and a bounded production run, before you treat the aria2
+candidate as validated for unattended production use. Do not start any of
+these runs without an explicit instruction. Check every base URL against a
+known working URL first: a wrong base URL returns HTTP 404 for every file.
