@@ -386,7 +386,7 @@ class InspectionServer:
         if status in {"active", "admitted", "promoting"}: return "busy"
         if status in {"retry_wait", "failed"}: return "exhausted" if self.max_attempts and attempts >= self.max_attempts else "retry"
         if status in {"existing_unverified", "review_required", "unavailable"}: return status
-        return "queued" if status in {"pending", "queued"} else "unknown"
+        return "queued" if status == "queued" else "unknown"
 
     def _get_item(self, db: sqlite3.Connection, parameters: dict[str, Any]) -> dict[str, Any]:
         item_id = self._item_parameters(parameters, {"item_id", "reveal_source"})

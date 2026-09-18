@@ -151,7 +151,7 @@ def e04_outage_then_recovery(base: Path, torsocks_conf: Path) -> ScenarioResult:
                                  torsocks_conf=torsocks_conf, time_limit=5, timeout=20)
         rows_after_outage = read_downloads(state)
         row = next(iter(rows_after_outage.values()), None)
-        if row is None or row["status"] not in {"retry_wait", "queued", "pending"}:
+        if row is None or row["status"] not in {"retry_wait", "queued"}:
             return ScenarioResult("E04", "fail", "E04: apply outage policy; resume on recovery",
                                   f"503 did not produce a retryable state: {row}", str(events))
         server.scripts = {}

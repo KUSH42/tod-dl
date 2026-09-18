@@ -88,9 +88,26 @@ representation-change changes), and the isolated-test/pilot byte-hash
 comparison, which requires an actual transfer run. See
 `specs/reports/reliable-acquisition-acceptance-2026-09-18.md`.
 
-Complete the provenance and fault-recovery acceptance suites. Compare the
-existing implementation with both specifications. Add each missing fixture
-case before you claim complete compliance.
+Provenance and fault-recovery acceptance suites, updated 2026-09-18: every
+listed tampering case, consumer rejection rule, recovery row, and scheduler
+condition now has a named test. The comparison found and fixed these defects:
+the verifier crashed on an unsafe path; it accepted a fingerprint without a
+public key and skipped the signature check; it did not validate field values
+against the schema; `close_reason`, attempt `outcome`, and candidate reasons
+used values outside the specified enums; no `local_failure` event existed; and
+a staging-cleanup error moved a completed item to `review_required`.
+
+Still open before the two specs can become `implemented`:
+
+- `attempt_finished` always records `null` response fields, `final_url`, and
+  `http_status`, and never records `unavailable` or `access_denied`.
+- `finalized` always reports `expected_size`, `etag`, and `last_modified` as
+  unavailable, although the controller stores an ETag for resume checks.
+- `candidate_created` never records `unsafe_path` or `promotion_error`.
+- The writer rejects user-info URLs only. Queue import does not reject them,
+  and no rule exists for query values that grant access.
+- The recovery tests stop the controller by staged state. Only three named
+  failpoints exist (`FAILPOINTS`); none covers staging cleanup or shutdown.
 
 Complete telemetry integration. Use the read-only aria2 RPC interface for exact
 live transfer counters. Add tests for stale samples, snapshot failures, and all

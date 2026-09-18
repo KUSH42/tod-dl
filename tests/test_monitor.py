@@ -105,7 +105,7 @@ class MonitorTests(unittest.TestCase):
             """)
             source = "http://user:secret@example.onion/a/file.txt?token=secret"
             db.execute("INSERT INTO downloads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                       (source, "a/file.txt", "safe/file.txt", None, None, "pending",
+                       (source, "a/file.txt", "safe/file.txt", None, None, "queued",
                         0, None, None, None, 0, None, "2026-09-17T00:00:00Z", None, 0))
             db.execute("INSERT INTO run_items VALUES (?, ?, ?)",
                        ("run-one", source, 1))

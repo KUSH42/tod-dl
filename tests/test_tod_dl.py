@@ -10,12 +10,16 @@ import hashlib
 import errno
 import importlib.util
 import inspect
+import itertools
 import json
 import re
 import shutil
+import sqlite3
 import signal
 import sys
 import threading
+import base64
+import stat
 import time
 from contextlib import redirect_stdout
 from io import StringIO
@@ -39,7 +43,7 @@ from tod_dl import (ADMISSION_POLL_SECONDS, FAILPOINTS, Downloader, RETRY_DELAYS
                     relative_path, sha256sum, storage_relative)
 from download_telemetry import (PUBLISH_INTERVAL_SECONDS, TelemetryPublisher,
                                 estimate_eta_seconds, reduce_metrics)
-from provenance import ProvenanceWriter
+from provenance import ProvenanceError, ProvenanceWriter, canonical_json, digest as event_digest
 from verify_provenance import verify
 
 
@@ -329,7 +333,7 @@ class RunSelectionTests(unittest.TestCase):
             self.assertEqual(second["outcome"], "rejected")
             self.assertIn("seconds", second["reason"])
             self.assertEqual(db.execute("SELECT status, next_retry_at FROM downloads WHERE url=?",
-                                        (url,)).fetchone(), ("pending", 0))
+                                        (url,)).fetchone(), ("queued", 0))
             rows = db.execute("SELECT action, outcome, next_eligible_at FROM tor_renewals "
                               "ORDER BY requested_at").fetchall()
             self.assertEqual([row[0] for row in rows], ["renew_tor_circuits"] * 3)
@@ -535,7 +539,7 @@ class RunSelectionTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT status FROM downloads WHERE url=?",
                                         (first_url,)).fetchone()[0], "excluded")
             self.assertEqual(db.execute("SELECT status FROM downloads WHERE url=?",
-                                        (second_url,)).fetchone()[0], "pending")
+                                        (second_url,)).fetchone()[0], "queued")
             self.assertEqual(db.execute("SELECT COUNT(*) FROM control_requests").fetchone()[0], 1)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM download_transitions "
                                         "WHERE url='__control__'").fetchone()[0], 1)
@@ -884,6 +888,18 @@ class RunSelectionTests(unittest.TestCase):
                 self.assertEqual((selected, existing), (0, 1))
                 self.assertEqual(db.execute("SELECT status FROM downloads WHERE url=?",
                                             (url,)).fetchone()[0], status)
+            db.close()
+
+    def test_open_db_migrates_legacy_pending_status_to_queued(self):
+        url = "https://fixture.test/first/data/legacy.bin"
+        with tempfile.TemporaryDirectory() as temporary:
+            downloader, db = self.prepare(Path(temporary), [url])
+            db.execute("UPDATE downloads SET status='pending' WHERE url=?", (url,))
+            db.commit()
+            db.close()
+            db = downloader.open_db()
+            self.assertEqual(db.execute("SELECT status FROM downloads WHERE url=?",
+                                        (url,)).fetchone()[0], "queued")
             db.close()
 
     def test_next_pending_preserves_input_order_not_path_order(self):
@@ -1297,6 +1313,34 @@ class LocalFakeTransferEngine:
         return True, "local fixture changed representation"
 
 
+class FaultRootTests(unittest.TestCase):
+    """Fault artifacts stay outside the repository and survive only a failed test."""
+
+    def test_root_is_removed_after_a_passing_test(self):
+        with FaultRoot() as root:
+            (root / "artifact").write_bytes(b"x")
+        self.assertFalse(root.exists())
+
+    def test_root_is_kept_and_its_path_printed_after_a_failing_test(self):
+        output = StringIO()
+        with redirect_stdout(output):
+            with self.assertRaises(RuntimeError):
+                with FaultRoot() as root:
+                    raise RuntimeError("fixture failure")
+        try:
+            self.assertTrue(root.is_dir())
+            self.assertIn(str(root), output.getvalue())
+        finally:
+            shutil.rmtree(root)
+
+    def test_root_is_outside_the_repository_and_its_protected_directories(self):
+        repository = Path(__file__).resolve().parents[1]
+        with FaultRoot() as root:
+            self.assertNotIn(repository, root.resolve().parents)
+            for name in ("downloaded_files", "archive", "pst_extracted", "msg_extracted", "output"):
+                self.assertNotIn(repository / name, root.resolve().parents)
+
+
 class FailpointGatingTests(unittest.TestCase):
     """TOD_DL_FAILPOINT must gate exactly the named boundary, for E06."""
 
@@ -1358,6 +1402,10 @@ class AcquisitionFaultRecoveryTests(unittest.TestCase):
         return [row[0] for row in db.execute(
             "SELECT url FROM run_items WHERE run_id='test-run' ORDER BY queue_rank"
         )]
+
+    def transition_states(self, db):
+        return [row[0] for row in db.execute(
+            "SELECT to_status FROM download_transitions WHERE url=? ORDER BY id", (self.url,))]
 
     def assert_final(self, downloader, db, payload=None):
         payload = self.payload if payload is None else payload
@@ -1530,6 +1578,8 @@ class AcquisitionFaultRecoveryTests(unittest.TestCase):
             restarted.cleanup_completed_staging(db)
             self.assert_final(restarted, db)
             self.assertFalse(staging.exists())
+            self.assertEqual(self.transition_states(db)[:2], ["promoting", "complete"])
+            self.assertEqual(self.selected_urls(db), [self.url])
             db.close()
 
     def test_after_exclusive_final_creation_before_completion_commit_hashes_final(self):
@@ -1550,6 +1600,8 @@ class AcquisitionFaultRecoveryTests(unittest.TestCase):
             restarted.reconcile_promotions(db)
             self.assert_final(restarted, db)
             self.assertFalse(staging.exists())
+            self.assertEqual(self.transition_states(db)[:2], ["promoting", "complete"])
+            self.assertEqual(self.selected_urls(db), [self.url])
             db.close()
 
     def test_after_completion_commit_before_staging_cleanup_repeats_cleanup_safely(self):
@@ -1573,6 +1625,7 @@ class AcquisitionFaultRecoveryTests(unittest.TestCase):
             self.assertFalse(staging.exists())
             self.assertIsNotNone(db.execute("SELECT cleanup_completed_at FROM downloads "
                                              "WHERE url=?", (self.url,)).fetchone()[0])
+            self.assertEqual(self.selected_urls(db), [self.url])
             db.close()
 
     def test_during_candidate_creation_preserves_existing_final_and_incoming_bytes(self):
@@ -1598,6 +1651,7 @@ class AcquisitionFaultRecoveryTests(unittest.TestCase):
             self.assertEqual(sha256sum(candidate), hashlib.sha256(self.payload).hexdigest())
             self.assertEqual(db.execute("SELECT status FROM downloads WHERE url=?", (self.url,))
                              .fetchone()[0], "review_required")
+            self.assertEqual(self.selected_urls(db), [self.url])
             db.close()
 
     def test_during_sqlite_commit_or_wal_checkpoint_stops_admission_until_recovery(self):
@@ -1625,6 +1679,122 @@ class AcquisitionFaultRecoveryTests(unittest.TestCase):
             downloader.reset_retry_now(db)
             self.assertEqual(downloader.next_pending(db)[0], self.url)
             self.assertEqual(self.selected_urls(db), [self.url])
+            db.close()
+
+    def test_staging_cleanup_failure_keeps_the_final_complete_and_repeats_safely(self):
+        with FaultRoot() as root:
+            downloader, db, queue = self.make_controller(root)
+            staging = downloader.staging_path(self.url)
+            staging.parent.mkdir(parents=True)
+            staging.write_bytes(self.payload)
+            target = downloader.destination / "first" / "data" / "item.bin"
+            target.parent.mkdir(parents=True)
+            os.link(staging, target)
+            digest = hashlib.sha256(self.payload).hexdigest()
+            downloader.transition(db, self.url, "complete", sha256=digest,
+                                  bytes=len(self.payload))
+            original_unlink = os.unlink
+
+            def failing_unlink(path, *args, **kwargs):
+                raise OSError(errno.EIO, "local fixture cleanup failure")
+
+            os.unlink = failing_unlink
+            try:
+                downloader.cleanup_completed_staging(db)
+            finally:
+                os.unlink = original_unlink
+            self.assert_final(downloader, db)
+            self.assertTrue(staging.exists())
+            self.assertIsNone(db.execute("SELECT cleanup_completed_at FROM downloads "
+                                         "WHERE url=?", (self.url,)).fetchone()[0])
+            self.assertEqual(self.transition_states(db), ["complete", "complete"])
+            db.close()
+
+            restarted, db = self.restart(root, queue)
+            restarted.cleanup_completed_staging(db)
+            self.assert_final(restarted, db)
+            self.assertFalse(staging.exists())
+            self.assertEqual(target.read_bytes(), self.payload)
+            self.assertIsNotNone(db.execute("SELECT cleanup_completed_at FROM downloads "
+                                            "WHERE url=?", (self.url,)).fetchone()[0])
+            self.assertEqual(self.selected_urls(db), [self.url])
+            db.close()
+
+    def test_controller_shutdown_during_transfer_keeps_the_partial_for_resume(self):
+        with FaultRoot() as root:
+            downloader, db, queue = self.make_controller(root)
+            staging = downloader.staging_path(self.url)
+            engine = LocalFakeTransferEngine(self.payload)
+
+            def stopped_by_shutdown(*_):
+                engine.partial(staging)
+                downloader.stop_requested.set()
+                return False, "local fixture stopped by controller shutdown"
+
+            downloader.run_aria2 = stopped_by_shutdown
+            self.assertEqual(downloader.transfer(downloader.next_pending(db), db), "failed")
+            self.assertEqual(staging.read_bytes(), self.payload[:len(self.payload) // 2])
+            self.assertTrue(Path(str(staging) + ".aria2").is_file())
+            self.assertFalse((downloader.destination / "first" / "data" / "item.bin").exists())
+            self.assertEqual(db.execute("SELECT status FROM downloads WHERE url=?", (self.url,))
+                             .fetchone()[0], "retry_wait")
+            self.assertEqual(db.execute("SELECT outcome FROM download_attempts WHERE url=?",
+                                        (self.url,)).fetchone()[0], "stopped")
+            db.close()
+
+            restarted, db = self.restart(root, queue)
+            restarted.requeue_interrupted_transfers(db)
+            restarted.reset_retry_now(db)
+            restarted.run_aria2 = lambda *_: engine.complete(staging)
+            self.assertEqual(restarted.transfer(restarted.next_pending(db), db), "complete")
+            self.assert_final(restarted, db)
+            self.assertEqual(self.selected_urls(db), [self.url])
+            db.close()
+
+    def run_with_time_limit(self, root: Path, time_limit: float, ticking_clock: bool = False):
+        queue = root / "queue.txt"
+        queue.write_text(self.url + "\n", encoding="utf-8")
+        args = make_args(root, queue)
+        args.tor_control_address = "127.0.0.1:9051"
+        args.tor_control_cookie = root / "control.authcookie"
+        args.retry_now = False
+        args.time_limit = time_limit
+        args.progress_interval = 30
+        args.reserve_bytes = 0
+        downloader = Downloader(args)
+        engine = LocalFakeTransferEngine(self.payload)
+        downloader.run_aria2 = lambda _url, staging, _attempt: engine.complete(staging)
+        original_verify = tod_dl.verify_tor_isolation
+        original_monotonic = time.monotonic
+        tod_dl.verify_tor_isolation = lambda address, cookie: ["9050"]
+        if ticking_clock:
+            # Each clock read advances one second, so the deadline has always expired
+            # by the next read. This removes the race between setup time and a tiny limit.
+            ticks = itertools.count()
+            time.monotonic = lambda: float(next(ticks))
+        try:
+            with redirect_stdout(StringIO()):
+                exit_code = downloader.run()
+        finally:
+            time.monotonic = original_monotonic
+            tod_dl.verify_tor_isolation = original_verify
+        closed = [json.loads(line) for line in
+                  downloader.provenance.events_path.read_text(encoding="utf-8").splitlines()][-1]
+        return exit_code, closed["close_reason"], downloader.destination / "first" / "data" / "item.bin"
+
+    def test_time_limit_does_not_stop_admission_before_expiry(self):
+        with FaultRoot() as root:
+            exit_code, close_reason, target = self.run_with_time_limit(root, 3600)
+            self.assertEqual((exit_code, close_reason), (0, "finished"))
+            self.assertEqual(target.read_bytes(), self.payload)
+
+    def test_time_limit_stops_admission_at_expiry_without_touching_finals(self):
+        with FaultRoot() as root:
+            exit_code, close_reason, target = self.run_with_time_limit(root, 1, ticking_clock=True)
+            self.assertEqual((exit_code, close_reason), (1, "time_limit"))
+            self.assertFalse(target.exists())
+            db = sqlite3.connect(root / "state" / "manifest.sqlite")
+            self.assertEqual(db.execute("SELECT status FROM downloads").fetchall(), [("queued",)])
             db.close()
 
     def test_incomplete_body_retries_once_before_review(self):
@@ -1734,7 +1904,7 @@ class AcquisitionFaultRecoveryTests(unittest.TestCase):
             self.assertFalse(downloader.has_storage_reserve())
             self.assertEqual(target.read_bytes(), b"existing final")
             self.assertEqual(db.execute("SELECT status FROM downloads WHERE url=?", (self.url,))
-                             .fetchone()[0], "pending")
+                             .fetchone()[0], "queued")
             db.close()
 
     def test_storage_reserve_accounts_for_admitted_transfers_remaining_bytes(self):
@@ -1880,6 +2050,349 @@ class ProvenanceTests(unittest.TestCase):
             self.assertTrue(verify(writer.directory, destination, public, None))
 
 
+class ProvenanceAcceptanceTests(unittest.TestCase):
+    """Each tampering case must fail for its own named reason, not only fail."""
+
+    make_record = ProvenanceTests.make_record
+
+    def assert_fails_with(self, writer, destination, public, text):
+        errors = verify(writer.directory, destination, public, None)
+        self.assertTrue(any(text in error for error in errors), errors)
+        return errors
+
+    def read_events(self, writer):
+        return [json.loads(line) for line in
+                writer.events_path.read_text(encoding="utf-8").splitlines()]
+
+    def resign(self, writer, change=lambda summary: None):
+        summary_path = writer.directory / "summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary.pop("signature")
+        change(summary)
+        signature = writer.private_key.sign(canonical_json(summary))
+        summary["signature"] = base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")
+        summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+    def rewrite_events(self, writer, change):
+        """Apply a change, then rebuild the digest chain and re-sign the summary.
+
+        The result isolates one rule: only the changed field can fail.
+        """
+        events = self.read_events(writer)
+        change(events)
+        previous = None
+        for event in events:
+            event["previous_digest"] = previous
+            event.pop("event_digest", None)
+            event["event_digest"] = previous = event_digest(event)
+        writer.events_path.write_text(
+            "".join(json.dumps(event, sort_keys=True) + "\n" for event in events),
+            encoding="utf-8")
+        self.resign(writer, lambda summary: summary.update(
+            event_count=len(events), final_event_digest=previous))
+
+    def test_changed_final_file_reports_the_digest_mismatch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            writer, destination, final, public = self.make_record(Path(temporary))
+            final.write_bytes(b"provenance fixtur3")  # same length, different bytes
+            errors = self.assert_fails_with(writer, destination, public, "final SHA-256 differs")
+            self.assertFalse(any("byte count" in error for error in errors))
+
+    def test_missing_final_file_is_reported_by_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            writer, destination, final, public = self.make_record(Path(temporary))
+            final.unlink()
+            self.assert_fails_with(writer, destination, public,
+                                   "final file is missing: fixture/data/item.bin")
+
+    def test_removed_event_line_reports_a_sequence_gap(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            writer, destination, final, public = self.make_record(Path(temporary))
+            lines = writer.events_path.read_text(encoding="utf-8").splitlines()
+            del lines[1]
+            writer.events_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            self.assert_fails_with(writer, destination, public, "sequence gap or reorder")
+
+    def test_reordered_event_lines_report_a_sequence_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            writer, destination, final, public = self.make_record(Path(temporary))
+            lines = writer.events_path.read_text(encoding="utf-8").splitlines()
+            lines[1], lines[2] = lines[2], lines[1]
+            writer.events_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            self.assert_fails_with(writer, destination, public, "sequence gap or reorder")
+
+    def test_changed_event_field_reports_an_invalid_event_digest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            writer, destination, final, public = self.make_record(Path(temporary))
+            events = self.read_events(writer)
+            events[2]["source_url"] = "https://fixture.test/other/item.bin"
+            writer.events_path.write_text(
+                "".join(json.dumps(event, sort_keys=True) + "\n" for event in events),
+                encoding="utf-8")
+            self.assert_fails_with(writer, destination, public, "invalid event digest")
+
+    def test_wrong_summary_final_digest_is_reported_when_correctly_signed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            writer, destination, final, public = self.make_record(Path(temporary))
+            self.resign(writer, lambda summary: summary.update(final_event_digest="0" * 64))
+            errors = self.assert_fails_with(writer, destination, public,
+                                            "final event digest mismatch")
+            self.assertFalse(any("invalid signature" in error for error in errors))
+
+    def test_changed_summary_signature_is_reported(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            writer, destination, final, public = self.make_record(Path(temporary))
+            summary_path = writer.directory / "summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["signature"] = "A" * 86
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            self.assert_fails_with(writer, destination, public, "invalid signature")
+
+    def test_changed_schema_file_is_reported(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            writer, destination, final, public = self.make_record(Path(temporary))
+            (writer.directory / "schema.json").write_text("{}", encoding="utf-8")
+            errors = self.assert_fails_with(writer, destination, public, "schema digest mismatch")
+            self.assertTrue(any("schema content changed" in error for error in errors))
+
+    def test_removed_final_event_with_a_matching_signed_summary_fails(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            writer, destination, final, public = self.make_record(Path(temporary))
+            self.rewrite_events(writer, lambda events: events.pop())
+            errors = self.assert_fails_with(writer, destination, public, "not a matching run_closed")
+            self.assertFalse(any("final event digest" in error for error in errors))
+
+    def test_removed_finalized_event_with_a_matching_signed_summary_fails(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            writer, destination, final, public = self.make_record(Path(temporary))
+            self.rewrite_events(writer, lambda events: events.pop(2))
+            self.assert_fails_with(writer, destination, public,
+                                   "completed-item count does not match finalized events")
+
+    def test_summary_signed_by_an_untrusted_key_fails(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            writer, destination, final, public = self.make_record(root)
+            other, _, _, other_public = self.make_record(root / "other")
+            self.assert_fails_with(writer, destination, other_public, "fingerprint mismatch")
+
+    def test_verifier_requires_a_trust_anchor(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            writer, destination, final, public = self.make_record(Path(temporary))
+            errors = verify(writer.directory, destination, None, None)
+            self.assertIn("a trusted public key or expected fingerprint is required", errors)
+
+    def test_a_fingerprint_alone_does_not_skip_the_signature_check(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            writer, destination, final, public = self.make_record(Path(temporary))
+            errors = verify(writer.directory, destination, None, writer.fingerprint)
+            self.assertIn("a public key is required to verify the summary signature", errors)
+
+    def test_an_expected_fingerprint_must_match_the_trusted_key(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            writer, destination, final, public = self.make_record(Path(temporary))
+            self.assertEqual(verify(writer.directory, destination, public, writer.fingerprint), [])
+            errors = verify(writer.directory, destination, public, "1" * 64)
+            self.assertIn("trusted public key fingerprint does not match expected fingerprint", errors)
+
+    def test_each_consumer_rejection_rule_is_reported(self):
+        cases = {
+            "invalid event type": lambda events: events[1].update(event_type="bogus"),
+            "missing or unknown event fields": lambda events: events[1].pop("outcome"),
+            "duplicate event ID": lambda events: events[2].update(event_id=events[1]["event_id"]),
+            "sequence gap or reorder": lambda events: events[2].update(sequence=9),
+            "identifiers do not match record path": lambda events: events[1].update(run_id="other"),
+            "is not an allowed value": lambda events: events[1].update(outcome="local_failure"),
+        }
+        for text, change in cases.items():
+            with self.subTest(rule=text), tempfile.TemporaryDirectory() as temporary:
+                writer, destination, final, public = self.make_record(Path(temporary))
+                self.rewrite_events(writer, change)
+                self.assert_fails_with(writer, destination, public, text)
+
+    def test_invalid_json_and_duplicate_keys_are_rejected(self):
+        for text, line in {"invalid JSON": "{not json", "duplicate key": '{"a":1,"a":2}'}.items():
+            with self.subTest(rule=text), tempfile.TemporaryDirectory() as temporary:
+                writer, destination, final, public = self.make_record(Path(temporary))
+                with writer.events_path.open("a", encoding="utf-8") as handle:
+                    handle.write(line + "\n")
+                self.assert_fails_with(writer, destination, public, text)
+
+    def test_invalid_digest_format_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            writer, destination, final, public = self.make_record(Path(temporary))
+            self.rewrite_events(writer, lambda events: events[2].update(
+                sha256=events[2]["sha256"].upper()))
+            self.assert_fails_with(writer, destination, public, "does not match the required format")
+
+    def test_unsafe_relative_path_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            writer, destination, final, public = self.make_record(Path(temporary))
+            self.rewrite_events(writer, lambda events: events[2].update(
+                final_relative_path="../escape.bin"))
+            self.assert_fails_with(writer, destination, public, "finalized event is invalid")
+
+    def test_an_unavailable_validation_object_must_not_claim_a_value(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            writer, destination, final, public = self.make_record(Path(temporary))
+            self.rewrite_events(writer, lambda events: events[2]["etag"].update(compared=True))
+            self.assert_fails_with(writer, destination, public, "etag is unavailable")
+
+    def test_verifier_never_modifies_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            writer, destination, final, public = self.make_record(Path(temporary))
+            final.write_bytes(b"tampered")
+            paths = [*writer.directory.iterdir(), final]
+            before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in paths}
+            self.assertTrue(verify(writer.directory, destination, public, None))
+            after = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in paths}
+            self.assertEqual(before, after)
+            self.assertEqual(sorted(path.name for path in writer.directory.iterdir()),
+                             ["events.jsonl", "schema.json", "summary.json"])
+
+    def test_record_set_modes_and_line_format(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            writer, destination, final, public = self.make_record(Path(temporary))
+            self.assertEqual(stat.S_IMODE(writer.directory.stat().st_mode), 0o700)
+            for name in ("events.jsonl", "schema.json", "summary.json"):
+                self.assertEqual(stat.S_IMODE((writer.directory / name).stat().st_mode), 0o600, name)
+            raw = writer.events_path.read_bytes()
+            self.assertTrue(raw.endswith(b"\n"))
+            self.assertNotIn(b"\r", raw)
+            self.assertEqual(len(raw.decode("utf-8").split("\n")), 5)
+
+    def test_writer_rejects_credentialed_urls_without_appending(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            writer, destination, final, public = self.make_record(Path(temporary))
+            before = writer.events_path.read_bytes()
+            for url in ("https://user:secret@fixture.test/item.bin", "https://user@fixture.test/item.bin"):
+                with self.assertRaises(ProvenanceError):
+                    writer.event("candidate_created", item_id="a" * 64, source_url=url)
+            with self.assertRaises(ProvenanceError):
+                writer.event("attempt_finished", item_id="a" * 64,
+                             source_url="https://fixture.test/item.bin", attempt_number=1,
+                             request_started_at="2026-09-16T00:00:00Z",
+                             request_finished_at="2026-09-16T00:00:01Z",
+                             final_url="https://fixture.test/item.bin",
+                             redirect_chain=["https://u:p@fixture.test/hop"], http_status=200,
+                             outcome="success", response_content_length=None,
+                             response_content_range=None, response_content_type=None,
+                             response_etag=None, response_last_modified=None)
+            self.assertEqual(writer.events_path.read_bytes(), before)
+            self.assertEqual(writer.sequence, 4)
+
+    def test_writer_rejects_an_event_that_breaks_the_schema(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            writer, destination, final, public = self.make_record(Path(temporary))
+            before = writer.events_path.read_bytes()
+            with self.assertRaisesRegex(ProvenanceError, "schema"):
+                writer.event("local_failure", failure_code="bogus", failure_detail="x")
+            self.assertEqual(writer.events_path.read_bytes(), before)
+            self.assertEqual(writer.sequence, 4)
+
+
+class ProvenanceControllerTests(unittest.TestCase):
+    """The controller must record durable provenance before it records completion."""
+
+    url = "https://fixture.test/first/data/item.bin"
+    payload = b"provenance controller fixture"
+
+    def make_controller(self, root: Path):
+        queue = root / "queue.txt"
+        queue.write_text(self.url + "\n", encoding="utf-8")
+        downloader = Downloader(make_args(root, queue, 1))
+        downloader.destination.mkdir(exist_ok=True)
+        downloader.state.mkdir(exist_ok=True)
+        db = downloader.open_db()
+        downloader.import_queues(db)
+        downloader.scope_run(db)
+        downloader.provenance = ProvenanceWriter(downloader.state, downloader.run_id)
+        downloader.provenance_event("run_started", queue_input_digests=[],
+                                    selection_settings={"max_files": 1}, selected_item_count=1)
+        engine = LocalFakeTransferEngine(self.payload)
+        staging = downloader.staging_path(self.url)
+        downloader.run_aria2 = lambda *_: engine.complete(staging)
+        return downloader, db, engine, staging
+
+    def events(self, downloader):
+        return [json.loads(line) for line in
+                downloader.provenance.events_path.read_text(encoding="utf-8").splitlines()]
+
+    def public_key(self, root: Path, downloader) -> Path:
+        public = root / "trusted.pem"
+        public.write_bytes(downloader.provenance.private_key.public_key().public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
+        return public
+
+    def test_completed_transfer_records_a_finalized_event_that_verifies(self):
+        with FaultRoot() as root:
+            downloader, db, engine, staging = self.make_controller(root)
+            self.assertEqual(downloader.transfer(downloader.next_pending(db), db), "complete")
+            events = self.events(downloader)
+            self.assertEqual([event["event_type"] for event in events],
+                             ["run_started", "attempt_finished", "finalized"])
+            finalized = events[2]
+            self.assertEqual(finalized["item_id"], downloader.item_id(self.url))
+            self.assertEqual(finalized["sha256"], hashlib.sha256(self.payload).hexdigest())
+            downloader.provenance.close([], {"max_files": 1}, 1, {"complete": 1}, "finished")
+            self.assertEqual(verify(downloader.provenance.directory, downloader.destination,
+                                    self.public_key(root, downloader), None), [])
+            db.close()
+
+    def test_failed_record_write_stops_admission_and_leaves_the_item_unresolved(self):
+        with FaultRoot() as root:
+            downloader, db, engine, staging = self.make_controller(root)
+            downloader.provenance.events_path = root / "missing" / "events.jsonl"
+            with self.assertRaisesRegex(RuntimeError, "local provenance failure"):
+                downloader.transfer(downloader.next_pending(db), db)
+            self.assertTrue(downloader.stop_requested.is_set())
+            self.assertEqual(downloader.local_failure_code, "record_write")
+            self.assertNotEqual(db.execute("SELECT status FROM downloads WHERE url=?",
+                                           (self.url,)).fetchone()[0], "complete")
+            db.close()
+
+    def test_candidate_reasons_use_only_the_specified_values(self):
+        with FaultRoot() as root:
+            downloader, db, engine, staging = self.make_controller(root)
+            staging.parent.mkdir(parents=True, exist_ok=True)
+            staging.write_bytes(self.payload)
+            candidate = downloader.candidates / "first" / "item.bin"
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            candidate.write_bytes(self.payload)
+            expected = {"incomplete_body": "validation_failed",
+                        "checksum_mismatch": "validation_failed",
+                        "changed_remote_representation": "recovery_review",
+                        "no_reliable_version_protection": "recovery_review",
+                        "destination_collision": "destination_collision"}
+            for cause, reason in expected.items():
+                downloader.candidate_event(self.url, staging, candidate, None, cause)
+                self.assertEqual(self.events(downloader)[-1]["finalization_failure_reason"], reason)
+            db.close()
+
+    def test_disk_full_records_a_stopped_attempt_and_a_storage_local_failure(self):
+        with FaultRoot() as root:
+            downloader, db, engine, staging = self.make_controller(root)
+            downloader.run_aria2 = lambda *_: (False, "errorCode=9 No space left on device")
+            self.assertEqual(downloader.transfer(downloader.next_pending(db), db), "local_failure")
+            events = self.events(downloader)
+            self.assertEqual([event["event_type"] for event in events],
+                             ["run_started", "attempt_finished", "local_failure"])
+            self.assertEqual(events[1]["outcome"], "stopped")
+            self.assertEqual(events[2]["failure_code"], "storage")
+            self.assertEqual(downloader.local_failure_code, "storage")
+            db.close()
+
+    def test_sqlite_failure_records_a_database_write_local_failure(self):
+        with FaultRoot() as root:
+            downloader, db, engine, staging = self.make_controller(root)
+            db.close()
+            with self.assertRaisesRegex(RuntimeError, "local SQLite failure"):
+                downloader.transition(db, self.url, "admitted")
+            failure = self.events(downloader)[-1]
+            self.assertEqual((failure["event_type"], failure["failure_code"]),
+                             ("local_failure", "database_write"))
+
+
 class TelemetryTests(unittest.TestCase):
     def test_projection_hydrates_and_updates_without_snapshot_sql(self):
         url = "https://fixture.test/first/data/item.bin"
@@ -2001,7 +2514,7 @@ class ShutdownSignalTests(unittest.TestCase):
             self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_DFL)
             events = downloader.provenance.events_path.read_text(encoding="utf-8").splitlines()
             closed = [json.loads(line) for line in events if '"run_closed"' in line][0]
-            self.assertEqual(closed["close_reason"], "sigterm")
+            self.assertEqual(closed["close_reason"], "interrupted")
 
     def test_sigint_during_run_exits_130_and_records_close_reason(self):
         url = "https://fixture.test/first/data/item.bin"
@@ -2034,7 +2547,7 @@ class ShutdownSignalTests(unittest.TestCase):
             self.assertEqual(signal.getsignal(signal.SIGINT), signal.default_int_handler)
             events = downloader.provenance.events_path.read_text(encoding="utf-8").splitlines()
             closed = [json.loads(line) for line in events if '"run_closed"' in line][0]
-            self.assertEqual(closed["close_reason"], "sigint")
+            self.assertEqual(closed["close_reason"], "interrupted")
 
     def test_exclusive_ownership_conflicts_across_state_dirs_sharing_destination(self):
         url = "https://fixture.test/first/data/item.bin"

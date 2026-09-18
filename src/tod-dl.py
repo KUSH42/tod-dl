@@ -35,7 +35,7 @@ from provenance import ProvenanceError, ProvenanceWriter, utc_now
 SCHEMA = """CREATE TABLE IF NOT EXISTS downloads (
 url TEXT PRIMARY KEY, relative_path TEXT NOT NULL, storage_path TEXT,
 staging_path TEXT, inventory_size TEXT, expected_sha256 TEXT,
-status TEXT NOT NULL DEFAULT 'pending',
+status TEXT NOT NULL DEFAULT 'queued',
 attempts INTEGER NOT NULL DEFAULT 0, bytes INTEGER, sha256 TEXT,
 last_error TEXT, next_retry_at REAL NOT NULL DEFAULT 0, promotion_target TEXT,
 promotion_intent_at TEXT, cleanup_completed_at TEXT, review_code TEXT,
@@ -85,9 +85,16 @@ CREATE TABLE IF NOT EXISTS telemetry_revisions (
 );
 """
 RETRY_DELAYS = (60, 120, 240, 300, 300, 300)
+# Internal review causes that the provenance schema names differently.
+CANDIDATE_EVENT_REASONS = {
+    "incomplete_body": "validation_failed",
+    "checksum_mismatch": "validation_failed",
+    "changed_remote_representation": "recovery_review",
+    "no_reliable_version_protection": "recovery_review",
+}
 FAILPOINTS = frozenset({"post_validation_intent", "post_final_file_creation",
                         "post_completion_commit"})
-EXCLUDABLE_STATUSES = frozenset({"pending", "queued", "active", "admitted",
+EXCLUDABLE_STATUSES = frozenset({"queued", "active", "admitted",
                                  "retry_wait", "failed", "review_required",
                                  "unavailable"})
 PRIORITIZABLE_STATUSES = EXCLUDABLE_STATUSES
@@ -120,7 +127,7 @@ def display_bucket(status: str, attempts: int, max_attempts: int) -> str:
         return "exhausted" if max_attempts and attempts >= max_attempts else "retry"
     if status in {"existing_unverified", "review_required", "unavailable", "excluded"}:
         return status
-    if status in {"pending", "queued"}:
+    if status == "queued":
         return "queued"
     return "unknown"
 
@@ -657,6 +664,7 @@ class Downloader:
         self.deadline: float | None = None
         self.pending_remediation_events: list[tuple[str, str, str]] = []
         self.provenance: ProvenanceWriter | None = None
+        self.local_failure_code: str | None = None
         self.queue_inputs: list[dict] = []
         self.selected_item_count = 0
 
@@ -673,7 +681,17 @@ class Downloader:
             self.provenance.event(event_type, **fields)
         except ProvenanceError as exc:
             self.stop_requested.set()
+            self.local_failure_code = "record_write"
             raise RuntimeError(f"local provenance failure: {exc}") from exc
+
+    def record_local_failure(self, code: str, detail: str) -> None:
+        """Remember a local failure and record it; never mask the caller's error."""
+        self.local_failure_code = code
+        try:
+            self.provenance_event("local_failure", failure_code=code, failure_detail=detail)
+        except RuntimeError:
+            # the record store is failing too; the caller is already stopping the run
+            pass
 
     def attempt_event(self, db: sqlite3.Connection, url: str, number: int,
                       started_at: str, outcome: str) -> None:
@@ -723,6 +741,7 @@ class Downloader:
 
     def candidate_event(self, url: str, staging: Path, candidate: Path | None,
                         sha256: str | None, reason: str) -> None:
+        reason = CANDIDATE_EVENT_REASONS.get(reason, reason)
         staging_relative = staging.relative_to(self.state).as_posix()
         candidate_relative = (candidate.relative_to(self.candidates).as_posix()
                               if candidate else None)
@@ -811,7 +830,7 @@ class Downloader:
                 "SELECT downloads.url, downloads.status, downloads.attempts, downloads.bytes, "
                 "downloads.next_retry_at, downloads.last_error FROM downloads JOIN run_items "
                 "ON run_items.url=downloads.url WHERE run_items.run_id=? AND "
-                "downloads.status IN ('queued', 'retry_wait', 'pending', 'failed')",
+                "downloads.status IN ('queued', 'retry_wait', 'failed')",
                 (self.run_id,),
             ).fetchall()
             if item_ids is not None:
@@ -1398,6 +1417,8 @@ class Downloader:
             db.execute("ALTER TABLE downloads ADD COLUMN staging_generation INTEGER")
         db.execute("PRAGMA journal_mode=WAL")
         db.execute("PRAGMA busy_timeout=60000")
+        db.execute("UPDATE downloads SET status='queued' WHERE status='pending'")
+        db.commit()
         return db
 
     def update(self, db: sqlite3.Connection, query: str, values: tuple) -> None:
@@ -1411,6 +1432,7 @@ class Downloader:
             # A commit error leaves the durable result unknown.  Stop admission
             # at once.  A later controller start reconciles the recorded state.
             self.stop_requested.set()
+            self.record_local_failure("database_write", "SQLite write or commit failed")
             raise RuntimeError(f"local SQLite failure: {exc}") from exc
 
     def advance_telemetry_revision(self, db: sqlite3.Connection) -> int:
@@ -1472,6 +1494,7 @@ class Downloader:
                                          and new["status"] == "complete" else None)
         except sqlite3.Error as exc:
             self.stop_requested.set()
+            self.record_local_failure("database_write", "SQLite write or commit failed")
             raise RuntimeError(f"local SQLite failure: {exc}") from exc
 
     def staging_path(self, url: str) -> Path:
@@ -1542,7 +1565,7 @@ class Downloader:
             stored, _ = self.resolved_storage_target(rel, url)
             db.execute("INSERT OR IGNORE INTO downloads (url, relative_path, "
                        "storage_path, staging_path, inventory_size, expected_sha256, "
-                       "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                       "status, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?)",
                        (url, rel.as_posix(), stored.as_posix(),
                         str(self.staging_path(url)), inventory_size, expected_sha256, now()))
             db.execute("UPDATE downloads SET storage_path=?, staging_path=?, "
@@ -1639,7 +1662,7 @@ class Downloader:
         query = """SELECT downloads.url, relative_path, storage_path, staging_path, attempts,
             expected_sha256, etag, last_modified, staging_generation
             FROM downloads JOIN run_items ON run_items.url = downloads.url
-            WHERE status IN ('queued', 'retry_wait', 'pending', 'failed')
+            WHERE status IN ('queued', 'retry_wait', 'failed')
             AND run_items.run_id = ?
             AND (? = 0 OR attempts < ?)
             AND next_retry_at <= ? ORDER BY run_items.queue_rank LIMIT 1"""
@@ -1650,7 +1673,7 @@ class Downloader:
         row = db.execute(
             "SELECT MIN(next_retry_at) FROM downloads JOIN run_items "
             "ON run_items.url = downloads.url WHERE run_items.run_id=? "
-            "AND status IN ('queued', 'retry_wait', 'pending', 'failed') "
+            "AND status IN ('queued', 'retry_wait', 'failed') "
             "AND (? = 0 OR attempts < ?)",
             (self.run_id, self.args.max_attempts, self.args.max_attempts),
         ).fetchone()
@@ -1661,7 +1684,7 @@ class Downloader:
     def reset_retry_now(self, db: sqlite3.Connection) -> None:
         """Make persisted retryable selected items eligible immediately."""
         db.execute("UPDATE downloads SET next_retry_at=0 WHERE status IN "
-                   "('queued', 'retry_wait', 'pending', 'failed') AND url IN "
+                   "('queued', 'retry_wait', 'failed') AND url IN "
                    "(SELECT url FROM run_items WHERE run_id=?)", (self.run_id,))
 
     def surviving_writer_pid(self, url: str) -> int | None:
@@ -2218,7 +2241,8 @@ class Downloader:
                 # back to `queued` with its original attempt count restored
                 # rather than the incremented one recorded at attempt start.
                 self.admission_paused.set()
-                self.attempt_event(db, url, attempts + 1, attempt_started_at, "local_failure")
+                self.attempt_event(db, url, attempts + 1, attempt_started_at, "stopped")
+                self.record_local_failure("storage", "free space exhausted while writing staging")
                 self.transition(db, url, "queued", error, attempts=attempts,
                                 bytes=size, last_error=error, next_retry_at=0)
                 if self.telemetry:
@@ -2476,9 +2500,10 @@ class Downloader:
                 self.transition(db, url, "complete", "reconciled staging cleanup",
                                 cleanup_completed_at=now())
             except OSError as exc:
-                self.transition(db, url, "review_required",
-                                "completed staging cleanup failed", last_error=str(exc),
-                                review_code=review_code_for_error(exc))
+                # The final is committed and valid. Keep it complete and leave
+                # cleanup_completed_at unset so the next start repeats the cleanup.
+                self.transition(db, url, "complete",
+                                f"completed staging cleanup failed; will repeat: {exc}")
 
     def is_safe_staging_path(self, staging: Path) -> bool:
         """Return true only for a path below the non-symlink staging directory."""
@@ -2682,8 +2707,9 @@ class Downloader:
                         "GROUP BY status", (self.run_id,)
                     ).fetchall()
                 durable_outcomes = {status: count for status, count in outcome_rows}
-                close_reason = ("sigterm" if self.sigterm_received.is_set()
-                                else "sigint" if self.sigint_received.is_set()
+                close_reason = ("local_failure" if self.local_failure_code
+                                else "interrupted" if self.sigterm_received.is_set()
+                                or self.sigint_received.is_set()
                                 else "time_limit" if self.deadline is not None and self.stop_requested.is_set()
                                 else "finished" if not unresolved else "stopped")
                 if self.provenance:

@@ -13,8 +13,9 @@ from pathlib import Path
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 
-from provenance import (EVENT_TYPES, HEX_DIGEST, SCHEMA_VERSION, canonical_json,
-                        digest, read_public_key, relative_text, schema_document)
+from provenance import (EVENT_TYPES, ProvenanceError, HEX_DIGEST, SCHEMA_VERSION, canonical_json,
+                        digest, event_schema, read_public_key, relative_text,
+                        schema_document, schema_errors)
 
 EVENT_FIELDS = {
     "run_started": {"queue_input_digests", "selection_settings", "selected_item_count"},
@@ -60,6 +61,14 @@ def check_event(event: object, run_id: str, session_id: str, sequence: int,
     else:
         expected = required | EVENT_FIELDS[event["event_type"]]
         if set(event) != expected: errors.append("events.jsonl: missing or unknown event fields")
+        errors.extend(f"events.jsonl: {problem}" for problem in
+                      schema_errors(event, event_schema(schema_document(), event["event_type"])))
+        if event["event_type"] == "finalized":
+            for name in ("expected_size", "expected_checksum", "etag", "last_modified"):
+                check = event.get(name)
+                if (isinstance(check, dict) and check.get("available") is False
+                        and (check.get("compared") is not False or check.get("value") is not None)):
+                    errors.append(f"events.jsonl: {name} is unavailable but has a value or was compared")
     if event.get("run_id") != run_id or event.get("session_id") != session_id:
         errors.append("events.jsonl: event identifiers do not match record path")
     if event.get("sequence") != sequence: errors.append("events.jsonl: sequence gap or reorder")
@@ -108,14 +117,20 @@ def verify(record_dir: Path, destination: Path, public_key: Path | None,
             if expected_fingerprint and fingerprint != expected_fingerprint:
                 errors.append("trusted public key fingerprint does not match expected fingerprint")
         except (OSError, ValueError) as exc: errors.append(f"trusted public key: {exc}")
-    elif expected_fingerprint and summary.get("signing_key_fingerprint") != expected_fingerprint:
-        errors.append("summary.json: signing key fingerprint mismatch")
+    elif expected_fingerprint:
+        # A fingerprint alone cannot verify a signature; fail instead of skipping the check.
+        errors.append("a public key is required to verify the summary signature")
+        if summary.get("signing_key_fingerprint") != expected_fingerprint:
+            errors.append("summary.json: signing key fingerprint mismatch")
     if key:
         unsigned = dict(summary); signature_text = unsigned.pop("signature", "")
         try:
             key.verify(base64.urlsafe_b64decode(signature_text + "=="), canonical_json(unsigned))
         except (InvalidSignature, ValueError) as exc: errors.append(f"summary.json: invalid signature: {exc}")
-    previous = None; seen_ids: set[str] = set(); final_events = []
+    if isinstance(summary, dict):
+        errors.extend(f"summary.json: {problem}" for problem in
+                      schema_errors(summary, schema_document()["$defs"]["summary"]))
+    previous = None; seen_ids: set[str] = set(); final_events = []; last_event = None
     try:
         lines = events_path.read_bytes().splitlines()
     except OSError as exc:
@@ -133,21 +148,27 @@ def verify(record_dir: Path, destination: Path, public_key: Path | None,
         except (UnicodeDecodeError, ValueError) as exc:
             errors.append(f"events.jsonl line {number}: invalid JSON: {exc}"); continue
         previous = check_event(event, run_id, session_id, number, previous, seen_ids, errors)
+        last_event = event
         if isinstance(event, dict) and event.get("event_type") == "finalized": final_events.append(event)
     if summary.get("event_count") != len(lines): errors.append("summary.json: event count mismatch")
     if summary.get("final_event_digest") != previous: errors.append("summary.json: final event digest mismatch")
+    if lines and not (isinstance(last_event, dict) and last_event.get("event_type") == "run_closed"
+                      and last_event.get("durable_outcome_counts") == summary.get("durable_outcome_counts")):
+        errors.append("summary.json: last event is not a matching run_closed event")
     durable_counts = summary.get("durable_outcome_counts")
     if (isinstance(durable_counts, dict) and durable_counts.get("complete", 0) != len(final_events)):
         errors.append("summary.json: completed-item count does not match finalized events")
     for event in final_events:
         try:
+            relative_text(event["logical_relative_path"])
             relative = relative_text(event["final_relative_path"])
             final = destination / Path(relative)
             if not final.is_file(): errors.append(f"final file is missing: {relative}"); continue
             if final.stat().st_size != event.get("byte_count"): errors.append(f"final byte count differs: {relative}")
             if hashlib.sha256(final.read_bytes()).hexdigest() != event.get("sha256"):
                 errors.append(f"final SHA-256 differs: {relative}")
-        except (KeyError, OSError, ValueError) as exc: errors.append(f"finalized event is invalid: {exc}")
+        except (KeyError, OSError, ValueError, ProvenanceError) as exc:
+            errors.append(f"finalized event is invalid: {exc}")
     return errors
 
 

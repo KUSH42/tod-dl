@@ -185,7 +185,10 @@ The controller writes signed record sets below
 public key or its fingerprint outside the record directory.
 
 Run the verifier to check the signature, event chain, final paths, byte counts,
-and SHA-256 digests. The verifier does not modify downloaded files.
+and SHA-256 digests. The verifier does not modify downloaded files. The
+verifier always needs `--public-key`. Add `--expected-fingerprint` to pin that
+key to a fingerprint you keep elsewhere. A fingerprint alone fails, because it
+cannot verify the signature.
 
 ```bash
 python3 src/verify_provenance.py \

@@ -77,7 +77,7 @@ def build_item_database(root: Path, with_attempts_table: bool = True) -> Path:
     db.executescript("""
         CREATE TABLE downloads (
             url TEXT PRIMARY KEY, relative_path TEXT NOT NULL, storage_path TEXT,
-            staging_path TEXT, inventory_size TEXT, status TEXT NOT NULL DEFAULT 'pending',
+            staging_path TEXT, inventory_size TEXT, status TEXT NOT NULL DEFAULT 'queued',
             attempts INTEGER NOT NULL DEFAULT 0, bytes INTEGER, sha256 TEXT,
             last_error TEXT, next_retry_at REAL NOT NULL DEFAULT 0, promotion_target TEXT,
             updated_at TEXT NOT NULL, review_code TEXT, priority INTEGER NOT NULL DEFAULT 0
