@@ -245,6 +245,19 @@ class RunSelectionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             relative_path("https://example.invalid/RUN1/data/../secret")
 
+    def test_relative_path_rejects_a_path_that_would_replace_the_destination(self):
+        """An absolute result makes destination / path ignore the destination,
+        so a crafted URL could write outside the tree."""
+        for bad in ("https://example.invalid/%2Fetc/passwd",
+                    "https://example.invalid/RUN1/data/a/%2Fetc%2Fpasswd",
+                    "https://example.invalid/RUN1//passwd",
+                    "https://example.invalid/RUN1/data/a%00b"):
+            with self.assertRaises(ValueError, msg=bad):
+                relative_path(bad)
+
+    def test_legacy_relative_path_rejects_an_absolute_result(self):
+        self.assertIsNone(tod_dl.legacy_relative_path("https://example.invalid/RUN1//passwd"))
+
     def test_reimport_does_not_remap_an_already_acquired_encoded_path(self):
         """A corrected relative_path() must not orphan evidence already
         acquired under the previous, un-decoded storage path."""

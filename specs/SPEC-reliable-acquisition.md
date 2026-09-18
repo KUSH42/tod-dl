@@ -289,6 +289,7 @@ blindly labeling it complete or discarding its computed hash.
 
 Preserve existing encoded-name conventions during migration. New mappings
 must explicitly reject traversal, encoded separators that become traversal,
+absolute paths that a decoded segment or an empty segment produces, NUL bytes,
 symlink escapes, and collisions between different source identities. Retain
 the exact URL even if storage uses a hashed long-name fallback. Validate
 redirect targets against configured source scope before following them.

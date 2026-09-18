@@ -53,7 +53,9 @@ values are ignored or rejected.
 A URL has the form `https://HOST/COLLECTION/PATH`. The `/data/` segment is
 optional. The final path is `COLLECTION/PATH`, so a URL with `/data/` keeps
 `data` in the final path. A URL with only a collection, or with `ALL_FILES` as
-the file, is rejected.
+the file, is rejected. A URL is also rejected if a decoded segment makes the
+path absolute (for example `/%2Fetc/passwd` or `//passwd`), contains `..`, or
+contains a NUL byte. Such a path could leave the destination directory.
 
 A line can carry optional `key=value` tokens after the URL, separated by
 whitespace, in any order:

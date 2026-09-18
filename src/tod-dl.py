@@ -258,6 +258,11 @@ def evaluate_aria2_rpc(args: argparse.Namespace) -> int:
                 process.wait()
 
 
+def is_unsafe_relative(path: PurePosixPath) -> bool:
+    """Return True if joining path to the destination could leave it."""
+    return path.is_absolute() or any(part == ".." or "\0" in part for part in path.parts)
+
+
 def relative_path(url: str) -> PurePosixPath:
     parsed = urlsplit(url)
     if parsed.username or parsed.password or parsed.query:
@@ -269,7 +274,9 @@ def relative_path(url: str) -> PurePosixPath:
     # so a percent-encoded "/" cannot be mistaken for a path separator.
     tail = [unquote(part) for part in PurePosixPath(parts[1]).parts]
     path = PurePosixPath(unquote(parts[0])) / PurePosixPath(*tail)
-    if any(part == ".." for part in path.parts):
+    # A decoded segment such as "%2Fetc" or an empty segment ("//") makes the
+    # path absolute, and joining an absolute path replaces the destination.
+    if is_unsafe_relative(path):
         raise ValueError("unsafe URL path")
     return path
 
@@ -292,7 +299,7 @@ def legacy_relative_path(url: str) -> PurePosixPath | None:
         if len(parts) != 2 or parts[1] in {"", "ALL_FILES", "data/ALL_FILES"}:
             return None
         path = PurePosixPath(parts[0]) / PurePosixPath(parts[1])
-        if any(part == ".." for part in path.parts):
+        if is_unsafe_relative(path):
             return None
         return path
     except ValueError:

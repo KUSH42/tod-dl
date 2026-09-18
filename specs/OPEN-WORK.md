@@ -10,7 +10,7 @@ The controller has durable selected-run state, no-overwrite finalization,
 recovery tests, signed provenance records, telemetry snapshots, and local
 confirmed controls for retry, Tor renewal, pause admission, resume
 admission, drain and stop, and checkpoint and stop. The repository test
-suite runs 239 local tests. These features do not establish compliance
+suite runs 321 local tests. These features do not establish compliance
 with every requirement in the related specifications.
 
 A process-ownership review closed five gaps in this session and the four
@@ -21,6 +21,14 @@ admission subtracts known in-flight remaining bytes from the reserve
 check; disk-full stops admission and resets attempts instead of consuming
 a retry; and hashing now serializes to one file at a time, so a lagging
 hash holds its worker slot and backs off new admission.
+
+`relative_path()` and `legacy_relative_path()` now reject an absolute
+result, a `..` segment, and a NUL byte. Before this fix, a URL such as
+`/%2Fetc/passwd` gave `/etc/passwd`, and `destination / path` then ignored
+the destination. No caller checked for this case. The check lives in
+`is_unsafe_relative()`. The database and `ensure_safe_parent` do not
+re-validate a stored `relative_path`; a database written before this fix
+can still hold an absolute row. No such row is known.
 
 ## Remaining work
 
