@@ -24,7 +24,7 @@ from inspection import InspectionError, inspection_request
 FINAL_LIFECYCLES = {"finished", "stopped"}
 REQUIRED_COUNTS = {
     "queued", "busy", "retry", "exhausted", "complete", "existing_unverified",
-    "review_required", "unavailable", "unknown",
+    "review_required", "unavailable", "excluded", "unknown",
 }
 EVENT_SEVERITY_STYLES = {
     "info": "cyan",
@@ -526,8 +526,9 @@ def format_retry_deadline(value: Any) -> str:
 
 
 QUEUE_STATE_FILTERS = ("all", "queued", "busy", "retry", "exhausted", "complete",
-                      "existing_unverified", "review_required", "unavailable", "unknown")
-QUEUE_NOT_ELIGIBLE_BUCKETS = {"exhausted", "review_required"}
+                      "existing_unverified", "review_required", "unavailable",
+                      "excluded", "unknown")
+QUEUE_NOT_ELIGIBLE_BUCKETS = {"exhausted", "review_required", "excluded"}
 
 
 def queue_retry_status(bucket: Any, retry_at: Any, cooldown_active: bool = False,
@@ -757,6 +758,10 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                            if self.item_count is not None else
                            "Make all retryable selected items eligible now?\n"
                            "This does not add files or expand the selected run.")
+            elif self.action == "exclude_item":
+                message = (f"Exclude {self.item_count} selected item(s)?\n"
+                           "This stops future admission and retry for them. It cannot "
+                           "be undone in this release and does not change queue rank.")
             else:
                 message = ("Ask Tor to use new circuits for future streams?\n"
                            "This does not prove a new route or affect active transfers.")
@@ -1049,6 +1054,7 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             Binding("f", "refresh_results", "Refresh results", show=False),
             Binding("g", "first_page", "First page", show=False),
             Binding("R", "prepare_retry_selected", "Retry row", show=True),
+            Binding("x", "prepare_exclude_selected", "Exclude row", show=True),
             Binding("l", "logs", "Logs"),
             Binding("question_mark", "help", "Help", show=True),
         ]
@@ -1294,8 +1300,8 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
         def action_help(self) -> None:
             self.app.notify(
                 "/ search   Enter apply   Escape cancel   PageUp/PageDown page   "
-                "Enter opens item details   R retry row   l logs   c clear filters   "
-                "f refresh results   g first page",
+                "Enter opens item details   R retry row   x exclude row   l logs   "
+                "c clear filters   f refresh results   g first page",
                 title="Queue help")
 
         def retry_selected_eligible(self) -> bool:
@@ -1306,10 +1312,23 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             """
             return bool(control and state and self.selected_item_id)
 
+        def exclude_selected_eligible(self) -> bool:
+            """Return whether the focused row can be offered for row-scoped exclusion.
+
+            Eligibility is advisory only; the controller validates the item's
+            actual excludable state at execution time.
+            """
+            return bool(control and state and self.selected_item_id)
+
         def action_prepare_retry_selected(self) -> None:
             if not self.retry_selected_eligible():
                 return
             self.app.prepare_row_scoped_retry(self.selected_item_id)
+
+        def action_prepare_exclude_selected(self) -> None:
+            if not self.exclude_selected_eligible():
+                return
+            self.app.prepare_row_scoped_exclude(self.selected_item_id)
 
         def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
             if action == "next_page" and not self.next_cursor:
@@ -1322,6 +1341,8 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                     and self.cursor_stack[0] is None):
                 return None
             if action == "prepare_retry_selected" and not self.retry_selected_eligible():
+                return None
+            if action == "prepare_exclude_selected" and not self.exclude_selected_eligible():
                 return None
             return True
 
@@ -1692,6 +1713,12 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                 return
             self.pending_item_ids = [item_id]
             self.prepare_action("retry_now", {"item_ids": [item_id]})
+
+        def prepare_row_scoped_exclude(self, item_id: str) -> None:
+            if not (control and state):
+                return
+            self.pending_item_ids = [item_id]
+            self.prepare_action("exclude_item", {"item_ids": [item_id]})
 
         def prepare_action(self, action: str, parameters: dict[str, Any] | None = None) -> None:
             self.submit_control_request(

@@ -23,20 +23,32 @@ to the exact sections that define correct behavior.
 
 ## Current baseline in code
 
-- Row-scoped retry (step 1 below) is implemented: `ControlServer` binds an
+- Row-scoped retry (step 1) is implemented: `ControlServer` binds an
   `item_ids` scope to the confirmation nonce and re-injects it at execution
   time so a client cannot widen scope after confirming; `control_retry_now`
   in `src/tod-dl.py` filters to the requested item IDs; `QueuePane` binds
   `R` to `action_prepare_retry_selected`, distinct from the run-wide `r`
   control.
-- `src/controller.py`: `ControlServer._handle` accepts only
-  `get_control_state`, `prepare_confirmation`, `retry_now`, and
-  `renew_tor_circuits`. `_prepare_confirmation` restricts confirmation to
-  the same two mutating actions.
+- Removal (step 2) is implemented: the `excluded` durable state exists in
+  `DISPLAY_BUCKETS`/`display_bucket()` in `src/tod-dl.py`;
+  `control_exclude_item` validates `item_ids` against `EXCLUDABLE_STATUSES`
+  (`pending`, `queued`, `active`, `admitted`, `retry_wait`, `failed`,
+  `review_required`, `unavailable`), moves matching items to `excluded`, and
+  reports a per-item outcome map; `item_ids` is required (non-empty), unlike
+  `retry_now`'s optional scope. `QueuePane` binds `x` to
+  `action_prepare_exclude_selected`. The idempotent replay path (a repeated
+  `request_id`) returns the original `outcome`/`reason`/`state_revision` but
+  not the original per-item map, since `control_requests` does not persist
+  it; this matches `retry_now`'s existing replay fidelity.
+- `src/controller.py`: `ControlServer._handle` accepts
+  `get_control_state`, `prepare_confirmation`, `retry_now`, `exclude_item`,
+  and `renew_tor_circuits`. `_prepare_confirmation` restricts confirmation to
+  those three mutating actions and requires non-empty `item_ids` for
+  `exclude_item`.
 - `src/monitor.py`: `QueuePane`'s `BINDINGS` have no key bindings or actions
-  for reordering, removal, export, or queue editing.
-- No `excluded` state, `set_item_priority`, or `set_retry_cooldown` handling
-  exists anywhere in `src/`.
+  for reordering, export, or queue editing.
+- No `set_item_priority` or `set_retry_cooldown` handling exists anywhere in
+  `src/`.
 
 ## Implementation order
 

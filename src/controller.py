@@ -201,7 +201,8 @@ class ControlServer:
                         "control_state": self.state_provider()}
             if action == "prepare_confirmation":
                 return self._prepare_confirmation(request_id, request.get("parameters"))
-            if action not in {"retry_now", "renew_tor_circuits"} or self.action_handler is None:
+            if (action not in {"retry_now", "exclude_item", "renew_tor_circuits"}
+                    or self.action_handler is None):
                 raise ControlError("action is unavailable")
             return self._confirmed_action(action, request_id, request.get("parameters"), request)
         except (ControlError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -211,23 +212,26 @@ class ControlServer:
         if not isinstance(parameters, dict):
             raise ControlError("confirmation parameters must be an object")
         action = parameters.get("action")
-        if action not in {"retry_now", "renew_tor_circuits"}:
+        if action not in {"retry_now", "exclude_item", "renew_tor_circuits"}:
             raise ControlError("action is unavailable")
         item_ids: tuple[str, ...] | None = None
-        if action == "retry_now" and "item_ids" in parameters:
+        if action in {"retry_now", "exclude_item"} and (
+                action == "exclude_item" or "item_ids" in parameters):
             raw_item_ids = parameters.get("item_ids")
             if (not isinstance(raw_item_ids, list) or not raw_item_ids
                     or not all(isinstance(item_id, str) and item_id for item_id in raw_item_ids)):
                 raise ControlError("item_ids must be a non-empty list of strings")
             item_ids = tuple(raw_item_ids)
-        nonce = secrets.token_urlsafe(24)
-        with self.command_lock:
-            self.confirmations[nonce] = (action, time.monotonic() + 60, item_ids)
         if action == "retry_now":
             scope = (f"{len(item_ids)} selected item(s) in the immutable selected run"
                       if item_ids else "retryable items in the immutable selected run")
+        elif action == "exclude_item":
+            scope = f"{len(item_ids)} selected item(s) in the immutable selected run"
         else:
             scope = "future Tor streams only"
+        nonce = secrets.token_urlsafe(24)
+        with self.command_lock:
+            self.confirmations[nonce] = (action, time.monotonic() + 60, item_ids)
         return {"request_id": request_id, "outcome": "completed", "confirmation": {
             "nonce": nonce, "action": action, "expires_in_s": 60, "scope": scope,
         }}

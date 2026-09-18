@@ -45,7 +45,8 @@ def snapshot(lifecycle: str = "running") -> dict:
             "selected_count": 1,
             "counts": {"queued": 1, "busy": 0, "retry": 0, "exhausted": 0,
                        "complete": 0, "existing_unverified": 0,
-                       "review_required": 0, "unavailable": 0, "unknown": 0},
+                       "review_required": 0, "unavailable": 0, "excluded": 0,
+                       "unknown": 0},
             "metrics": {},
         },
         "workers": [], "validation": [], "health": {}, "recent_events": [],
@@ -196,6 +197,34 @@ class MonitorTests(unittest.TestCase):
                                 {"nonce": prepared["nonce"], "confirmation": "retry_now",
                                  "item_ids": ["c", "d", "e"]})
                 self.assertEqual(commands[0]["parameters"]["item_ids"], ["a", "b"])
+            finally:
+                server.stop()
+
+    def test_exclude_item_requires_item_ids_and_confirms_scope(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            commands = []
+            server = ControlServer(root, "run-one", "session-one", lambda: {},
+                                   lambda request: commands.append(request) or {
+                                       "outcome": "completed", "reason": "excluded",
+                                       "state_revision": 4,
+                                   })
+            server.start()
+            try:
+                with self.assertRaisesRegex(ControlError, "item_ids must be"):
+                    control_request(root, "run-one", "prepare_confirmation",
+                                    {"action": "exclude_item"})
+                prepared = control_request(
+                    root, "run-one", "prepare_confirmation",
+                    {"action": "exclude_item", "item_ids": ["a"]})["confirmation"]
+                self.assertIn("1 selected item(s)", prepared["scope"])
+                # The final request must not be able to widen or replace the
+                # scope the operator confirmed: the controller re-injects the
+                # confirmed item_ids regardless of what the client resends.
+                control_request(root, "run-one", "exclude_item",
+                                {"nonce": prepared["nonce"], "confirmation": "exclude_item",
+                                 "item_ids": ["b", "c"]})
+                self.assertEqual(commands[0]["parameters"]["item_ids"], ["a"])
             finally:
                 server.stop()
 

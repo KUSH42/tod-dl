@@ -280,6 +280,67 @@ class RunSelectionTests(unittest.TestCase):
             self.assertIn("item_ids", response["reason"])
             db.close()
 
+    def test_control_exclude_item_moves_selected_items_and_is_audited(self):
+        first_url = "https://fixture.test/first/data/item.bin"
+        second_url = "https://fixture.test/first/data/other.bin"
+        with tempfile.TemporaryDirectory() as temporary:
+            downloader, db = self.prepare(Path(temporary), [first_url, second_url])
+            downloader.scope_run(db)
+            downloader.update(db, "UPDATE downloads SET status='retry_wait' WHERE url=?",
+                              (first_url,))
+            request = {"request_id": "request-one", "session_id": "session-one",
+                      "parameters": {"item_ids": [downloader.item_id(first_url)]}}
+
+            first = downloader.control_exclude_item(db, request)
+            second = downloader.control_exclude_item(db, request)
+
+            self.assertEqual(first["outcome"], second["outcome"])
+            self.assertEqual(first["reason"], second["reason"])
+            self.assertEqual(first["state_revision"], second["state_revision"])
+            self.assertEqual(first["outcome"], "completed")
+            self.assertEqual(first["items"][downloader.item_id(first_url)], "excluded")
+            self.assertEqual(db.execute("SELECT status FROM downloads WHERE url=?",
+                                        (first_url,)).fetchone()[0], "excluded")
+            self.assertEqual(db.execute("SELECT status FROM downloads WHERE url=?",
+                                        (second_url,)).fetchone()[0], "pending")
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM control_requests").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM download_transitions "
+                                        "WHERE url='__control__'").fetchone()[0], 1)
+            db.close()
+
+    def test_control_exclude_item_rejects_out_of_scope_and_inapplicable_ids(self):
+        first_url = "https://fixture.test/first/data/item.bin"
+        with tempfile.TemporaryDirectory() as temporary:
+            downloader, db = self.prepare(Path(temporary), [first_url])
+            downloader.scope_run(db)
+            downloader.update(db, "UPDATE downloads SET status='complete' WHERE url=?",
+                              (first_url,))
+            request = {"request_id": "request-one", "session_id": "session-one",
+                      "parameters": {"item_ids": [downloader.item_id(first_url), "missing-item"]}}
+
+            response = downloader.control_exclude_item(db, request)
+
+            self.assertEqual(response["outcome"], "completed")
+            self.assertIn("not excludable", response["items"][downloader.item_id(first_url)])
+            self.assertIn("outside the selected set", response["items"]["missing-item"])
+            self.assertEqual(db.execute("SELECT status FROM downloads WHERE url=?",
+                                        (first_url,)).fetchone()[0], "complete")
+            db.close()
+
+    def test_control_exclude_item_rejects_malformed_item_ids(self):
+        url = "https://fixture.test/first/data/item.bin"
+        with tempfile.TemporaryDirectory() as temporary:
+            downloader, db = self.prepare(Path(temporary), [url])
+            downloader.scope_run(db)
+            request = {"request_id": "request-one", "session_id": "session-one",
+                      "parameters": {"item_ids": []}}
+
+            response = downloader.control_exclude_item(db, request)
+
+            self.assertEqual(response["outcome"], "rejected")
+            self.assertIn("item_ids", response["reason"])
+            db.close()
+
     def test_control_wake_interrupts_active_transfer_wait(self):
         with tempfile.TemporaryDirectory() as temporary:
             queue = Path(temporary) / "queue.txt"

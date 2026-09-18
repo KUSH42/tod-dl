@@ -80,11 +80,14 @@ CREATE TABLE IF NOT EXISTS telemetry_revisions (
 );
 """
 RETRY_DELAYS = (60, 120, 240, 300, 300, 300)
+EXCLUDABLE_STATUSES = frozenset({"pending", "queued", "active", "admitted",
+                                 "retry_wait", "failed", "review_required",
+                                 "unavailable"})
 ADMISSION_POLL_SECONDS = 0.25
 SAFE_PATH_MAPPING_VERSION = "v1"
 DISPLAY_BUCKETS = ("queued", "busy", "retry", "exhausted", "complete",
                    "existing_unverified", "review_required", "unavailable",
-                   "unknown")
+                   "excluded", "unknown")
 
 
 def now() -> str:
@@ -99,7 +102,7 @@ def display_bucket(status: str, attempts: int, max_attempts: int) -> str:
         return "busy"
     if status in {"retry_wait", "failed"}:
         return "exhausted" if max_attempts and attempts >= max_attempts else "retry"
-    if status in {"existing_unverified", "review_required", "unavailable"}:
+    if status in {"existing_unverified", "review_required", "unavailable", "excluded"}:
         return status
     if status in {"pending", "queued"}:
         return "queued"
@@ -592,6 +595,7 @@ class Downloader:
             "actions": {
                 "get_control_state": "available",
                 "retry_now": "available",
+                "exclude_item": "available",
                 "renew_tor_circuits": "available" if renewal_available else "unavailable",
             },
         }
@@ -601,6 +605,8 @@ class Downloader:
         """Run one confirmed controller action through the command channel."""
         if request.get("action") == "retry_now":
             return self.control_retry_now(db, request)
+        if request.get("action") == "exclude_item":
+            return self.control_exclude_item(db, request)
         if request.get("action") == "renew_tor_circuits":
             return self.control_renew_tor_circuits(db, request)
         return {"outcome": "rejected", "reason": "action is unavailable"}
@@ -669,6 +675,74 @@ class Downloader:
             self.telemetry.event("info", "control", "retry now accepted")
         self.control_wake.set()
         return {"outcome": "completed", "reason": reason, "state_revision": revision}
+
+    def control_exclude_item(self, db: sqlite3.Connection,
+                             request: dict[str, object]) -> dict[str, object]:
+        """Durably move only the requested selected items to `excluded`."""
+        request_id = request["request_id"]
+        session_id = request["session_id"]
+        if not isinstance(request_id, str) or not isinstance(session_id, str):
+            return {"outcome": "rejected", "reason": "invalid control request"}
+        parameters = request.get("parameters")
+        item_ids = parameters.get("item_ids") if isinstance(parameters, dict) else None
+        if (not isinstance(item_ids, list) or not item_ids
+                or not all(isinstance(item_id, str) and item_id for item_id in item_ids)):
+            return {"outcome": "rejected", "reason": "item_ids must be a non-empty list of strings"}
+        with self.db_lock:
+            existing = db.execute("SELECT outcome, reason, state_revision FROM control_requests "
+                                  "WHERE request_id=?", (request_id,)).fetchone()
+            if existing:
+                outcome, reason, revision = existing
+                return {"outcome": outcome, "reason": reason, "state_revision": revision}
+            selected_rows = db.execute(
+                "SELECT downloads.url, downloads.status, downloads.attempts, downloads.bytes, "
+                "downloads.next_retry_at, downloads.last_error FROM downloads JOIN run_items "
+                "ON run_items.url=downloads.url WHERE run_items.run_id=?",
+                (self.run_id,),
+            ).fetchall()
+            by_id = {self.item_id(row[0]): row for row in selected_rows}
+            item_outcomes: dict[str, str] = {}
+            changed_rows = []
+            for item_id in item_ids:
+                row = by_id.get(item_id)
+                if row is None:
+                    item_outcomes[item_id] = "rejected: item is outside the selected set"
+                elif row[1] not in EXCLUDABLE_STATUSES:
+                    item_outcomes[item_id] = f"rejected: item is in {row[1]}, not excludable"
+                else:
+                    item_outcomes[item_id] = "excluded"
+                    changed_rows.append(row)
+            urls = [row[0] for row in changed_rows]
+            if urls:
+                placeholders = ",".join("?" * len(urls))
+                db.execute(
+                    f"UPDATE downloads SET status='excluded', updated_at=? "
+                    f"WHERE url IN ({placeholders})",
+                    (now(), *urls),
+                )
+            reason = f"excluded {len(changed_rows)} of {len(item_ids)} requested item(s)"
+            db.execute("INSERT INTO download_transitions "
+                       "(url, run_id, from_status, to_status, detail, recorded_at) "
+                       "VALUES (?, ?, ?, ?, ?, ?)",
+                       ("__control__", self.run_id, "control", "control", reason, now()))
+            revision = self.advance_telemetry_revision(db)
+            db.execute("INSERT INTO control_requests "
+                       "(request_id, run_id, session_id, action, outcome, reason, "
+                       "state_revision, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                       (request_id, self.run_id, session_id, "exclude_item", "completed",
+                        reason, revision, now()))
+            db.commit()
+        for url, status, attempts, byte_count, retry_at, error in changed_rows:
+            old = {"url": url, "status": status, "attempts": attempts,
+                   "bytes": byte_count, "next_retry_at": retry_at, "last_error": error}
+            new = dict(old, status="excluded")
+            self.apply_projection_change(old, new, revision)
+        if self.projection and not changed_rows:
+            self.projection.set_revision(revision)
+        if self.telemetry:
+            self.telemetry.event("info", "control", "exclude item accepted")
+        return {"outcome": "completed", "reason": reason, "state_revision": revision,
+                "items": item_outcomes}
 
     def admission_wait_timeout(self) -> float:
         """Return a short wait so eligible retries can fill idle worker slots."""
