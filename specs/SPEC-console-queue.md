@@ -206,7 +206,7 @@ Selection and filtering must never submit a retry command. The existing `r`
 control must retain the controller-confirmed scope defined in
 [SPEC-controller-control-ui.md](SPEC-controller-control-ui.md). A filtered queue must not imply that a
 run-scoped action applies only to visible rows.
-Row-scoped retry, reordering, removal, export, and queue editing are deferred.
+Row-scoped retry, reordering, removal, export, and queue editing are planned.
 
 ## Acceptance criteria
 
