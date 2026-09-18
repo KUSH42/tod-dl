@@ -1607,6 +1607,22 @@ class AcquisitionFaultRecoveryTests(unittest.TestCase):
                              .fetchone()[0], "pending")
             db.close()
 
+    def test_storage_reserve_accounts_for_admitted_transfers_remaining_bytes(self):
+        with FaultRoot() as root:
+            downloader, db, _ = self.make_controller(root)
+            free = shutil.disk_usage(downloader.destination).free
+            downloader.args.reserve_bytes = 1
+
+            class FakeTelemetry:
+                def runtime_copy(self):
+                    return [{"total_bytes": free, "received_bytes": 0}]
+
+            downloader.telemetry = FakeTelemetry()
+            self.assertFalse(downloader.has_storage_reserve())
+            downloader.telemetry = None
+            self.assertTrue(downloader.has_storage_reserve())
+            db.close()
+
     def test_zero_progress_transfer_uses_one_terminal_stall_result_without_busy_loop(self):
         with FaultRoot() as root:
             downloader, db, _ = self.make_controller(root)

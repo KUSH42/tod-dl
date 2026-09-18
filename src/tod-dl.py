@@ -2262,8 +2262,21 @@ class Downloader:
         except (OSError, ValueError):
             return False
 
+    def committed_remaining_bytes(self) -> int:
+        """Sum known remaining bytes for admitted transfers with an engine size sample."""
+        if not self.telemetry:
+            return 0
+        total = 0
+        for sample in self.telemetry.runtime_copy():
+            engine_total = sample.get("total_bytes")
+            if engine_total is None:
+                continue
+            total += max(0, engine_total - (sample.get("received_bytes") or 0))
+        return total
+
     def has_storage_reserve(self) -> bool:
-        return shutil.disk_usage(self.destination).free >= self.args.reserve_bytes
+        free = shutil.disk_usage(self.destination).free
+        return free - self.committed_remaining_bytes() >= self.args.reserve_bytes
 
     def run(self) -> int:
         self.destination.mkdir(parents=True, exist_ok=True)
