@@ -189,7 +189,7 @@ class RunSelectionTests(unittest.TestCase):
             selected, existing = downloader.scope_run(db)
             self.assertEqual((selected, existing), (0, 1))
             self.assertEqual(db.execute("SELECT status FROM downloads WHERE url=?",
-                                        (url,)).fetchone()[0], "existing_unverified")
+                                        (url,)).fetchone()[0], "complete")
             db.close()
 
     def test_dry_run_does_not_report_an_already_acquired_encoded_path_as_missing(self):
@@ -711,6 +711,32 @@ class RunSelectionTests(unittest.TestCase):
             self.assertEqual(downloader.scope_run(db), (1, 0))
             rows = db.execute("SELECT url FROM run_items WHERE run_id='test-run'").fetchall()
             self.assertEqual(rows, [(initial[0],)])
+            db.close()
+
+    def test_scope_run_does_not_demote_a_row_already_tracked_as_terminal(self):
+        """A second scope_run() over a final file that a prior run already
+        settled to a terminal status must leave that status alone, instead
+        of re-treating the file's presence as a brand-new collision."""
+        url = "https://fixture.test/first/data/item.bin"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            downloader, db = self.prepare(root, [url])
+            target = downloader.destination / "first" / "data" / "item.bin"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"evidence")
+            for status in ("complete", "existing_unverified", "review_required",
+                           "excluded", "unavailable"):
+                db.execute("UPDATE downloads SET status=? WHERE url=?", (status, url))
+                db.commit()
+                db.execute("DELETE FROM run_items WHERE run_id='test-run'")
+                db.commit()
+                downloader.run_id = f"test-run-{status}"
+
+                selected, existing = downloader.scope_run(db)
+
+                self.assertEqual((selected, existing), (0, 1))
+                self.assertEqual(db.execute("SELECT status FROM downloads WHERE url=?",
+                                            (url,)).fetchone()[0], status)
             db.close()
 
     def test_next_pending_preserves_input_order_not_path_order(self):

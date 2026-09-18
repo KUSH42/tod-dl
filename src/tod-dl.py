@@ -89,6 +89,9 @@ EXCLUDABLE_STATUSES = frozenset({"pending", "queued", "active", "admitted",
 PRIORITIZABLE_STATUSES = EXCLUDABLE_STATUSES
 PRIORITY_MIN, PRIORITY_MAX = -5, 5
 COOLDOWN_ELIGIBLE_STATUSES = frozenset({"retry_wait", "failed"})
+SCOPE_RUN_TRACKED_STATUSES = frozenset({"complete", "existing_unverified",
+                                        "review_required", "excluded",
+                                        "unavailable"})
 COOLDOWN_OVERRIDE_MIN_S, COOLDOWN_OVERRIDE_MAX_S = 0, 3600
 ADMISSION_POLL_SECONDS = 0.25
 SAFE_PATH_MAPPING_VERSION = "v1"
@@ -1404,8 +1407,12 @@ class Downloader:
             stored, target = self.resolved_storage_target(rel, url)
             if target.exists():
                 existing += 1
-                self.transition(db, url, "existing_unverified", "final already exists",
-                                bytes=target.stat().st_size)
+                row = db.execute("SELECT status FROM downloads WHERE url=?",
+                                 (url,)).fetchone()
+                current_status = row[0] if row else None
+                if current_status not in SCOPE_RUN_TRACKED_STATUSES:
+                    self.transition(db, url, "existing_unverified", "final already exists",
+                                    bytes=target.stat().st_size)
                 continue
             db.execute("INSERT INTO run_items (run_id, url, queue_rank) "
                        "VALUES (?, ?, ?)", (self.run_id, url, selected))

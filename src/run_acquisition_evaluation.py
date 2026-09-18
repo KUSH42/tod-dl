@@ -379,7 +379,8 @@ def e02_large_file_interrupted_resume(base: Path, torsocks_conf: Path) -> Scenar
     write_manifest(root / "fixture-manifest.json", [body])
     events = root / "fixture-events.json"
     destination, state = isolated_dirs(root)
-    scripts = {body.name: [ResponseScript(terminate_after_bytes=256 * 1024**2)]}
+    scripts = {body.name: [ResponseScript(terminate_after_bytes=256 * 1024**2),
+                           ResponseScript()]}
     with fixture_server([body], events, scripts=scripts) as server:
         queue = write_queue_file(root / "queue.txt", [server.url(body.name)])
         result1 = run_downloader(queue=queue, destination=destination, state=state,
@@ -748,20 +749,7 @@ def e11_five_item_scoped_run(base: Path, torsocks_conf: Path) -> ScenarioResult:
                           "a restart", detail, str(events))
 
 
-NOT_RUN = {
-    "E02": "harness built and wired, but not run to completion this session. The "
-          "deterministic fixture generator's throughput (Section 1's open question in "
-          "specs/SPEC-acquisition-evaluation-infrastructure.md) is now measured and "
-          "fixed: it used a 64-byte blake2b digest per block (134M hash calls for an "
-          "8 GiB fixture, ~3.4 MB/s) and, through Fixture.generator, created a fresh "
-          "DeterministicBytes instance per read, so no per-instance cache could ever "
-          "hit. It now uses a shake_256 digest producing 1 MiB blocks (8192 calls for "
-          "an 8 GiB fixture) via a module-level cache keyed on (seed, block index), "
-          "measured at 8 GiB in ~16 s (>500 MB/s), well inside the 600 s attempt limit. "
-          "The is_incomplete_body fix itself is confirmed working (the staging file "
-          "grew well past the 256 MiB interrupt point, i.e. it resumed instead of "
-          "routing to review_required). Run E02 to completion next.",
-}
+NOT_RUN: dict[str, str] = {}
 
 
 def main() -> int:
@@ -785,6 +773,7 @@ def main() -> int:
 
     scenarios = [
         e01_small_and_empty,
+        e02_large_file_interrupted_resume,
         e03_range_ignored,
         e04_outage_then_recovery,
         e05_kill_injection,
