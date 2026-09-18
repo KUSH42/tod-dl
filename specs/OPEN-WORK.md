@@ -10,7 +10,7 @@ The controller has durable selected-run state, no-overwrite finalization,
 recovery tests, signed provenance records, telemetry snapshots, and local
 confirmed controls for retry, Tor renewal, pause admission, resume
 admission, drain and stop, and checkpoint and stop. The repository test
-command runs 122 local tests. These features do not establish compliance
+suite runs 130 local tests. These features do not establish compliance
 with every requirement in the related specifications.
 
 ## Remaining work
