@@ -1372,18 +1372,79 @@ class AcquisitionFaultRecoveryTests(unittest.TestCase):
             self.assertEqual(self.selected_urls(db), [self.url])
             db.close()
 
-    def test_changed_remote_representation_hashes_the_completed_local_bytes(self):
+    def test_unconfirmed_representation_on_resume_enters_review_without_retrying(self):
+        # Spec: a resumed transfer that had a recorded validator but cannot
+        # reconfirm it now has neither reliable version protection nor an
+        # expected checksum, so it must move to review_required rather than
+        # blindly retry into the same partial bytes.
         with FaultRoot() as root:
             downloader, db, _ = self.make_controller(root)
+            downloader.transition(db, self.url, "queued", staging_generation=1,
+                                  etag='"known-etag"')
             engine = LocalFakeTransferEngine(self.payload)
             staging = downloader.staging_path(self.url)
             engine.partial(staging)
             downloader.run_aria2 = lambda *_: engine.changed_representation(staging)
+            downloader.probe_representation = lambda url: None
+
+            self.assertEqual(downloader.transfer(downloader.next_pending(db), db), "review")
+            self.assertEqual(engine.calls, 0)
+            row = db.execute(
+                "SELECT status, review_code, bytes FROM downloads WHERE url=?",
+                (self.url,)).fetchone()
+            self.assertEqual(row, ("review_required", "no_reliable_version_protection", None))
+            db.close()
+
+    def test_changed_etag_on_resume_enters_review_without_retrying(self):
+        with FaultRoot() as root:
+            downloader, db, _ = self.make_controller(root)
+            downloader.transition(db, self.url, "queued", staging_generation=1, etag='"old-etag"')
+            engine = LocalFakeTransferEngine(self.payload)
+            staging = downloader.staging_path(self.url)
+            engine.partial(staging)
+            downloader.run_aria2 = lambda *_: engine.changed_representation(staging)
+            downloader.probe_representation = lambda url: {"etag": '"new-etag"', "last_modified": None}
+
+            self.assertEqual(downloader.transfer(downloader.next_pending(db), db), "review")
+            self.assertEqual(engine.calls, 0)
+            row = db.execute(
+                "SELECT status, review_code, bytes, etag FROM downloads WHERE url=?",
+                (self.url,)).fetchone()
+            self.assertEqual(row, ("review_required", "changed_remote_representation", None, '"new-etag"'))
+            db.close()
+
+    def test_confirmed_unchanged_etag_resumes_the_existing_partial(self):
+        with FaultRoot() as root:
+            downloader, db, _ = self.make_controller(root)
+            downloader.transition(db, self.url, "queued", staging_generation=1, etag='"same-etag"')
+            engine = LocalFakeTransferEngine(self.payload)
+            staging = downloader.staging_path(self.url)
+            engine.partial(staging)
+            downloader.run_aria2 = lambda *_: engine.complete(staging)
+            downloader.probe_representation = lambda url: {"etag": '"same-etag"', "last_modified": None}
 
             self.assertEqual(downloader.transfer(downloader.next_pending(db), db), "complete")
-            changed = self.payload + b" changed representation"
-            self.assert_final(downloader, db, changed)
+            self.assert_final(downloader, db)
             self.assertEqual(engine.calls, 1)
+            db.close()
+
+    def test_resume_new_generation_control_action_restarts_a_representation_review(self):
+        with FaultRoot() as root:
+            downloader, db, _ = self.make_controller(root)
+            downloader.transition(db, self.url, "review_required", "changed remote representation",
+                                  bytes=None, review_code="changed_remote_representation",
+                                  staging_generation=1, etag='"old-etag"')
+            item_id = downloader.item_id(self.url)
+            response = downloader.control_resume_new_generation(db, {
+                "request_id": "req-1", "session_id": "sess-1",
+                "parameters": {"item_ids": [item_id]},
+            })
+            self.assertEqual(response["outcome"], "completed")
+            self.assertEqual(response["items"][item_id], "resumed under a new staging generation")
+            row = db.execute(
+                "SELECT status, review_code, etag, last_modified, staging_generation "
+                "FROM downloads WHERE url=?", (self.url,)).fetchone()
+            self.assertEqual(row, ("queued", None, None, None, 2))
             db.close()
 
     def test_during_file_flush_preserves_staging_and_does_not_create_a_final(self):

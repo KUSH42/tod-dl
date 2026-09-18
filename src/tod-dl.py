@@ -42,6 +42,7 @@ promotion_intent_at TEXT, cleanup_completed_at TEXT, review_code TEXT,
 remediation_reason TEXT, remediation_mapping_version TEXT,
 remediation_outcome TEXT, remediation_started_at TEXT,
 remediation_completed_at TEXT, priority INTEGER NOT NULL DEFAULT 0,
+etag TEXT, last_modified TEXT, staging_generation INTEGER,
 updated_at TEXT NOT NULL)"""
 RUN_SCHEMA = """
 CREATE TABLE IF NOT EXISTS run_items (
@@ -92,6 +93,8 @@ EXCLUDABLE_STATUSES = frozenset({"pending", "queued", "active", "admitted",
 PRIORITIZABLE_STATUSES = EXCLUDABLE_STATUSES
 PRIORITY_MIN, PRIORITY_MAX = -5, 5
 COOLDOWN_ELIGIBLE_STATUSES = frozenset({"retry_wait", "failed"})
+REPRESENTATION_REVIEW_CODES = frozenset({"changed_remote_representation",
+                                         "no_reliable_version_protection"})
 SCOPE_RUN_TRACKED_STATUSES = frozenset({"complete", "existing_unverified",
                                         "review_required", "excluded",
                                         "unavailable"})
@@ -759,6 +762,8 @@ class Downloader:
             return self.control_retry_now(db, request)
         if request.get("action") == "exclude_item":
             return self.control_exclude_item(db, request)
+        if request.get("action") == "resume_new_generation":
+            return self.control_resume_new_generation(db, request)
         if request.get("action") == "set_item_priority":
             return self.control_set_item_priority(db, request)
         if request.get("action") == "set_retry_cooldown":
@@ -905,6 +910,82 @@ class Downloader:
             self.projection.set_revision(revision)
         if self.telemetry:
             self.telemetry.event("info", "control", "exclude item accepted")
+        return {"outcome": "completed", "reason": reason, "state_revision": revision,
+                "items": item_outcomes}
+
+    def control_resume_new_generation(self, db: sqlite3.Connection,
+                                      request: dict[str, object]) -> dict[str, object]:
+        """Durably restart a representation-change review item under a new
+        staging generation. This is the recorded restart decision required by
+        the Resume and representation integrity spec section before an item
+        detected or suspected to have changed leaves `review_required`."""
+        request_id = request["request_id"]
+        session_id = request["session_id"]
+        if not isinstance(request_id, str) or not isinstance(session_id, str):
+            return {"outcome": "rejected", "reason": "invalid control request"}
+        parameters = request.get("parameters")
+        item_ids = parameters.get("item_ids") if isinstance(parameters, dict) else None
+        if (not isinstance(item_ids, list) or not item_ids
+                or not all(isinstance(item_id, str) and item_id for item_id in item_ids)):
+            return {"outcome": "rejected", "reason": "item_ids must be a non-empty list of strings"}
+        with self.db_lock:
+            existing = db.execute("SELECT outcome, reason, state_revision FROM control_requests "
+                                  "WHERE request_id=?", (request_id,)).fetchone()
+            if existing:
+                outcome, reason, revision = existing
+                return {"outcome": outcome, "reason": reason, "state_revision": revision}
+            selected_rows = db.execute(
+                "SELECT downloads.url, downloads.status, downloads.attempts, downloads.bytes, "
+                "downloads.next_retry_at, downloads.last_error, downloads.review_code "
+                "FROM downloads JOIN run_items "
+                "ON run_items.url=downloads.url WHERE run_items.run_id=?",
+                (self.run_id,),
+            ).fetchall()
+            by_id = {self.item_id(row[0]): row for row in selected_rows}
+            item_outcomes: dict[str, str] = {}
+            changed_rows = []
+            for item_id in item_ids:
+                row = by_id.get(item_id)
+                if row is None:
+                    item_outcomes[item_id] = "rejected: item is outside the selected set"
+                elif row[1] != "review_required" or row[6] not in REPRESENTATION_REVIEW_CODES:
+                    item_outcomes[item_id] = (
+                        f"rejected: item is in {row[1]}, not a representation-change review")
+                else:
+                    item_outcomes[item_id] = "resumed under a new staging generation"
+                    changed_rows.append(row)
+            urls = [row[0] for row in changed_rows]
+            if urls:
+                placeholders = ",".join("?" * len(urls))
+                db.execute(
+                    f"UPDATE downloads SET status='queued', review_code=NULL, last_error=NULL, "
+                    f"etag=NULL, last_modified=NULL, next_retry_at=0, "
+                    f"staging_generation=staging_generation+1, updated_at=? "
+                    f"WHERE url IN ({placeholders})",
+                    (now(), *urls),
+                )
+            reason = (f"restarted {len(changed_rows)} of {len(item_ids)} requested item(s) "
+                      f"under a new staging generation")
+            db.execute("INSERT INTO download_transitions "
+                       "(url, run_id, from_status, to_status, detail, recorded_at) "
+                       "VALUES (?, ?, ?, ?, ?, ?)",
+                       ("__control__", self.run_id, "control", "control", reason, now()))
+            revision = self.advance_telemetry_revision(db)
+            db.execute("INSERT INTO control_requests "
+                       "(request_id, run_id, session_id, action, outcome, reason, "
+                       "state_revision, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                       (request_id, self.run_id, session_id, "resume_new_generation",
+                        "completed", reason, revision, now()))
+            db.commit()
+        for url, status, attempts, byte_count, retry_at, error, _review_code in changed_rows:
+            old = {"url": url, "status": status, "attempts": attempts,
+                   "bytes": byte_count, "next_retry_at": retry_at, "last_error": error}
+            new = dict(old, status="queued", next_retry_at=0, last_error=None)
+            self.apply_projection_change(old, new, revision)
+        if self.projection and not changed_rows:
+            self.projection.set_revision(revision)
+        if self.telemetry:
+            self.telemetry.event("info", "control", "resume new generation accepted")
         return {"outcome": "completed", "reason": reason, "state_revision": revision,
                 "items": item_outcomes}
 
@@ -1298,13 +1379,15 @@ class Downloader:
                        "cleanup_completed_at", "review_code",
                        "remediation_reason", "remediation_mapping_version",
                        "remediation_outcome", "remediation_started_at",
-                       "remediation_completed_at"):
+                       "remediation_completed_at", "etag", "last_modified"):
             if column not in columns:
                 db.execute(f"ALTER TABLE downloads ADD COLUMN {column} TEXT")
         if "next_retry_at" not in columns:
             db.execute("ALTER TABLE downloads ADD COLUMN next_retry_at REAL NOT NULL DEFAULT 0")
         if "priority" not in columns:
             db.execute("ALTER TABLE downloads ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
+        if "staging_generation" not in columns:
+            db.execute("ALTER TABLE downloads ADD COLUMN staging_generation INTEGER")
         db.execute("PRAGMA journal_mode=WAL")
         db.execute("PRAGMA busy_timeout=60000")
         return db
@@ -1545,7 +1628,7 @@ class Downloader:
 
     def next_pending(self, db: sqlite3.Connection):
         query = """SELECT downloads.url, relative_path, storage_path, staging_path, attempts,
-            expected_sha256
+            expected_sha256, etag, last_modified, staging_generation
             FROM downloads JOIN run_items ON run_items.url = downloads.url
             WHERE status IN ('queued', 'retry_wait', 'pending', 'failed')
             AND run_items.run_id = ?
@@ -1864,6 +1947,66 @@ class Downloader:
                 time.sleep(delay)
             self.next_worker_start = time.monotonic() + self.args.worker_stagger
 
+    def probe_representation(self, url: str) -> dict | None:
+        """HEAD a URL through Tor to read validators without touching staging.
+
+        Runs outside any item's engine job, like the outage-recovery probe:
+        it never starts, ends, or counts as an attempt for the item.
+        """
+        script = (
+            "import http.client, json, sys\n"
+            "from urllib.parse import urlsplit\n"
+            "p = urlsplit(sys.argv[1])\n"
+            "cls = http.client.HTTPSConnection if p.scheme == 'https' else http.client.HTTPConnection\n"
+            "conn = cls(p.hostname, p.port, timeout=30)\n"
+            "path = (p.path or '/') + (('?' + p.query) if p.query else '')\n"
+            "conn.request('HEAD', path)\n"
+            "resp = conn.getresponse()\n"
+            "print(json.dumps({'status': resp.status, 'etag': resp.getheader('ETag'),\n"
+            "                   'last_modified': resp.getheader('Last-Modified')}))\n"
+        )
+        torsocks = getattr(self.args, "torsocks", None)
+        if not torsocks:
+            return None
+        command = [torsocks, "-i", sys.executable, "-c", script, url]
+        try:
+            result = subprocess.run(command, capture_output=True, text=True,
+                                    timeout=getattr(self.args, "connect_timeout", 30) + 30)
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+        if result.returncode != 0:
+            return None
+        try:
+            payload = json.loads(result.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            return None
+        if payload.get("status") not in (200, 206):
+            return None
+        return {"etag": payload.get("etag"), "last_modified": payload.get("last_modified")}
+
+    def check_representation(self, url: str, recorded_etag: str | None,
+                             recorded_last_modified: str | None) -> tuple[str, dict]:
+        """Decide whether a resumed transfer's representation is unchanged.
+
+        Returns one of "confirmed_unchanged", "changed", "unconfirmed", with
+        the fresh validators observed (empty if the probe failed outright).
+        Prefers a strong ETag; falls back to Last-Modified as weaker evidence
+        only when no ETag was ever recorded. Per spec, anything short of a
+        strong-ETag or checksum match is treated as unconfirmed, not "safe".
+        """
+        observed = self.probe_representation(url)
+        if observed is None:
+            return "unconfirmed", {}
+        fresh_etag = observed.get("etag")
+        if recorded_etag and fresh_etag and recorded_etag == fresh_etag:
+            return "confirmed_unchanged", observed
+        if recorded_etag and fresh_etag and recorded_etag != fresh_etag:
+            return "changed", observed
+        if not recorded_etag and recorded_last_modified and observed.get("last_modified"):
+            if recorded_last_modified != observed.get("last_modified"):
+                return "changed", observed
+        return "unconfirmed", observed
+
     def run_aria2(self, url: str, staging: Path, attempt: int) -> tuple[bool, str]:
         staging.parent.mkdir(parents=True, exist_ok=True)
         name = hashlib.sha256(url.encode()).hexdigest()[:12]
@@ -1955,7 +2098,8 @@ class Downloader:
         return candidate
 
     def transfer(self, row, db: sqlite3.Connection) -> str:
-        url, rel_text, stored_text, staging_text, attempts, expected_sha256 = row
+        (url, rel_text, stored_text, staging_text, attempts, expected_sha256,
+         etag, last_modified, staging_generation) = row
         rel = PurePosixPath(rel_text)
         stored_text = stored_text or storage_relative(rel, self.destination).as_posix()
         staging_text = staging_text or str(self.staging_path(url))
@@ -1979,8 +2123,45 @@ class Downloader:
         self.wait_for_cooldown()
         self.wait_for_start_slot()
         self.wait_for_cooldown()
+        partial_exists = staging.exists() and staging.stat().st_size > 0
+        active_fields: dict[str, object] = {}
+        if staging_generation is None:
+            active_fields["staging_generation"] = 1
+        if not partial_exists:
+            # Nothing staged to protect yet, either because this is the
+            # item's first staging attempt or because a restart decision just
+            # started a fresh staging generation. Best-effort capture remote
+            # validators as the baseline for a later resume decision. Skip
+            # the probe when an expected checksum already protects promotion;
+            # the post-transfer digest check is reliable protection on its own.
+            observed = None if expected_sha256 else self.probe_representation(url)
+            if observed:
+                active_fields["etag"] = observed.get("etag")
+                active_fields["last_modified"] = observed.get("last_modified")
+        elif not expected_sha256 and (etag or last_modified):
+            # Only gate the resume when a baseline validator was actually
+            # recorded. Without one, there is nothing new to compare against
+            # here that the existing outage/retry and validation checks don't
+            # already cover; this keeps the gate from intercepting an
+            # ordinary resumable mid-transfer cut on an item this deployment
+            # never had the means to fingerprint in the first place.
+            decision, observed = self.check_representation(url, etag, last_modified)
+            if decision != "confirmed_unchanged":
+                cause = ("changed_remote_representation" if decision == "changed"
+                        else "no_reliable_version_protection")
+                detail = ("changed remote representation detected on resume"
+                          if decision == "changed"
+                          else "no reliable version protection or expected checksum on resume")
+                candidate = self.move_candidate(staging)
+                self.candidate_event(url, staging, candidate, None, cause)
+                self.transition(db, url, "review_required", detail,
+                                bytes=None, last_error=detail, review_code=cause,
+                                etag=observed.get("etag"), last_modified=observed.get("last_modified"))
+                self.clear_transfer_telemetry(url)
+                print(f"[review] {rel}: {detail}", flush=True)
+                return "review"
         attempt_started_at = utc_now()
-        self.transition(db, url, "active", attempts=attempts + 1)
+        self.transition(db, url, "active", attempts=attempts + 1, **active_fields)
         self.record_attempt_start(db, url, attempts + 1, attempt_started_at)
         if self.telemetry:
             self.telemetry.update_phase(url, "connecting")

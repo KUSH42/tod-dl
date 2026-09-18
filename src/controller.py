@@ -205,7 +205,8 @@ class ControlServer:
                         "control_state": self.state_provider()}
             if action == "prepare_confirmation":
                 return self._prepare_confirmation(request_id, request.get("parameters"))
-            if (action not in {"retry_now", "exclude_item", "set_item_priority",
+            if (action not in {"retry_now", "exclude_item", "resume_new_generation",
+                                "set_item_priority",
                                 "set_retry_cooldown", "renew_tor_circuits",
                                 "pause_admission", "resume_admission",
                                 "drain_and_stop", "checkpoint_stop"}
@@ -219,15 +220,17 @@ class ControlServer:
         if not isinstance(parameters, dict):
             raise ControlError("confirmation parameters must be an object")
         action = parameters.get("action")
-        if action not in {"retry_now", "exclude_item", "set_item_priority",
+        if action not in {"retry_now", "exclude_item", "resume_new_generation",
+                          "set_item_priority",
                           "set_retry_cooldown", "renew_tor_circuits",
                           "pause_admission", "resume_admission",
                           "drain_and_stop", "checkpoint_stop"}:
             raise ControlError("action is unavailable")
         item_ids: tuple[str, ...] | None = None
-        if action in {"retry_now", "exclude_item", "set_item_priority",
-                      "set_retry_cooldown"} and (
-                action in {"exclude_item", "set_item_priority", "set_retry_cooldown"}
+        if action in {"retry_now", "exclude_item", "resume_new_generation",
+                      "set_item_priority", "set_retry_cooldown"} and (
+                action in {"exclude_item", "resume_new_generation",
+                          "set_item_priority", "set_retry_cooldown"}
                 or "item_ids" in parameters):
             raw_item_ids = parameters.get("item_ids")
             if (not isinstance(raw_item_ids, list) or not raw_item_ids
@@ -252,7 +255,8 @@ class ControlServer:
         if action == "retry_now":
             scope = (f"{len(item_ids)} selected item(s) in the immutable selected run"
                       if item_ids else "retryable items in the immutable selected run")
-        elif action in {"exclude_item", "set_item_priority", "set_retry_cooldown"}:
+        elif action in {"exclude_item", "resume_new_generation",
+                        "set_item_priority", "set_retry_cooldown"}:
             scope = f"{len(item_ids)} selected item(s) in the immutable selected run"
         elif action in {"pause_admission", "resume_admission", "drain_and_stop",
                         "checkpoint_stop"}:
