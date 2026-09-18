@@ -684,8 +684,15 @@ def worker_details_text(worker: dict[str, Any], read_at: Any = None,
     return "\n".join(lines)
 
 
-def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
-                state: Path | None = None, control: bool = False, fps: int = 30) -> int:
+def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = None,
+                      state: Path | None = None, control: bool = False,
+                      fps: int = 30) -> type | None:
+    """Build the Monitor Textual App class without running it.
+
+    Shared by run_textual (which calls .run()) and headless interaction
+    tests (which call .run_test()); returns None if Textual is not
+    installed.
+    """
     try:
         from textual.app import App, ComposeResult
         from textual.binding import Binding
@@ -697,7 +704,7 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
     except ImportError:
         print("Textual is optional. Install requirements-monitor.txt, or use "
               "./run.sh --status.", file=sys.stderr)
-        return 2
+        return None
 
     section_labels = {"Identity and paths", "State", "Engine", "Bytes", "Validation",
                       "Source", "Attempts and errors", "Assignment", "Activity",
@@ -1817,6 +1824,11 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             threading.Thread(target=worker, name="monitor-inspection", daemon=True).start()
 
         def populate(self, current: dict[str, Any], force: bool = False) -> None:
+            if not self.query("#summary"):
+                # A queued render tick can still fire while the app is
+                # mid-shutdown (screen already torn down); skip this frame
+                # instead of raising through the render loop.
+                return
             summary_signature = self.summary_text(current).plain
             if force or summary_signature != self.last_summary_signature:
                 self.query_one("#summary", Static).update(self.summary_text(current))
@@ -2064,7 +2076,15 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                 self.query_one("#summary", Static).update(
                     Text("Telemetry stale or unreadable; showing last valid display."))
 
-    Monitor().run()
+    return Monitor
+
+
+def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
+                state: Path | None = None, control: bool = False, fps: int = 30) -> int:
+    monitor_class = build_monitor_app(snapshot, snapshot_path, state, control, fps)
+    if monitor_class is None:
+        return 2
+    monitor_class().run()
     return 0
 
 

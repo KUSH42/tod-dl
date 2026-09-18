@@ -40,7 +40,7 @@ and verifies those records without changing final files.
 Run these commands before you hand off downloader changes:
 
 ```bash
-python3 -m unittest -v tests/test_tod_dl.py tests/test_monitor.py
+python3 -m unittest -v tests/test_tod_dl.py tests/test_monitor.py tests/test_monitor_interaction.py
 python3 -m py_compile src/tod-dl.py src/download_telemetry.py \
     src/monitor.py src/controller.py src/provenance.py src/verify_provenance.py
 bash -n ./run.sh

@@ -200,6 +200,23 @@ not contact a source, Tor, or aria2.
 Every command in "Command set and confirmation" is implemented with its
 confirmation, audit, and telemetry event, following the pattern
 `retry_now` and `renew_tor_circuits` established. No mutating action remains
-to add. The headless-Textual interaction tests in "Verification and
-delivery" (30-FPS render loop, reconnect, resize) remain unwritten for the
-whole command set; only controller-side contract tests exist today.
+to add.
+
+`tests/test_monitor_interaction.py` adds headless-Textual interaction tests
+(`Pilot`/`run_test`) against a real `ControlServer` over a temporary socket,
+covering: a confirm/cancel round trip for a run-wide action; an ineligible
+action opening no confirmation; `p`/`u`/`d`/`k` disabled inside
+`WorkerDetails`; the control-state poll gate staying at or below two polls
+per second; activity-pane scroll position surviving a snapshot update; a
+terminal resize; and controller restart/reconnect recovering control state.
+Writing these tests found and fixed a real bug: a queued render tick could
+fire against an already-torn-down default screen during app shutdown,
+raising `NoMatches` (see `populate()`'s guard in `src/monitor.py`).
+
+Still unverified: the 30-FPS/150ms-p95 input-latency SLO on documented
+hardware (not meaningfully assertable in a CI unit test), a 60-FPS
+configuration specifically, and "kill the UI during every command stage"
+across the full command set (only the confirm/cancel/reconnect paths above
+are covered). Row-scoped queue actions (`retry_now`, `exclude_item`,
+`set_item_priority`, `set_retry_cooldown`) still have only controller-side
+contract tests, no Pilot-level interaction tests.
