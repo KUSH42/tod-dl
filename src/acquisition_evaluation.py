@@ -19,6 +19,7 @@ from dataclasses import asdict, dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 from urllib.request import Request, urlopen
 
 
@@ -93,8 +94,10 @@ class Fixture:
     @classmethod
     def create(cls, name: str, seed: str, length: int,
                content_type: str = "application/octet-stream") -> "Fixture":
-        if not name or "/" in name or name in {".", ".."}:
-            raise EvaluationError("fixture name must be a single path component")
+        segments = name.split("/") if name else []
+        if not segments or any(not part or part in {".", ".."} for part in segments):
+            raise EvaluationError("fixture name must be a non-empty relative path "
+                                  "with no empty, '.', or '..' segments")
         generator = DeterministicBytes(seed, length)
         digest = generator.sha256()
         return cls(name, seed, length, digest, content_type,
@@ -204,10 +207,14 @@ class FixtureServer:
     """Serve deterministic local HTTP fixtures and record each request."""
 
     def __init__(self, fixtures: list[Fixture], event_log: Path,
-                 scripts: dict[str, list[ResponseScript]] | None = None) -> None:
+                 scripts: dict[str, list[ResponseScript]] | None = None,
+                 path_prefix: str = "fixtures") -> None:
         self.fixtures = {fixture.name: fixture for fixture in fixtures}
         if len(self.fixtures) != len(fixtures):
             raise EvaluationError("fixture names must be unique")
+        if not path_prefix or path_prefix.startswith("/") or path_prefix.endswith("/"):
+            raise EvaluationError("fixture path prefix must be a bare relative path")
+        self.path_prefix = path_prefix
         self.event_log = event_log
         self.scripts = scripts or {}
         for fixture_scripts in self.scripts.values():
@@ -242,7 +249,7 @@ class FixtureServer:
     def url(self, name: str) -> str:
         if name not in self.fixtures:
             raise EvaluationError("unknown fixture")
-        return f"{self.base_url}/fixtures/{name}"
+        return f"{self.base_url}/{self.path_prefix}/{name}"
 
     def _script(self, name: str, count: int) -> ResponseScript:
         values = self.scripts.get(name, [])
@@ -267,10 +274,14 @@ class FixtureServer:
             write_json(self.event_log, {"schema_version": 1, "events": self.events})
 
     def _serve(self, handler: BaseHTTPRequestHandler) -> None:
-        name = handler.path.removeprefix("/fixtures/")
-        if not handler.path.startswith("/fixtures/") or "/" in name:
+        prefix = f"/{self.path_prefix}/"
+        if not handler.path.startswith(prefix):
             handler.send_error(404)
             return
+        # Decode each raw path segment on its own, after splitting on literal
+        # "/", so a percent-encoded "/" cannot be mistaken for a separator.
+        name = "/".join(unquote(part) for part in
+                        handler.path.removeprefix(prefix).split("/"))
         fixture = self.fixtures.get(name)
         if fixture is None:
             handler.send_error(404)

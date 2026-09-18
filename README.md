@@ -46,10 +46,9 @@ python3 -m pip install -r requirements-monitor.txt
 
 ## Prepare a queue
 
-Each queue file contains one URL per line. A URL must identify a file below a
-host-specific `data/` path. Blank lines, comment lines, duplicate URLs, unsafe
-paths, URLs with credentials, and URLs with query values are ignored or
-rejected.
+Each queue file contains one URL per line. Blank lines, comment lines,
+duplicate URLs, unsafe paths, URLs with credentials, and URLs with query
+values are ignored or rejected.
 
 Store queue files outside this source repository when they contain case data.
 
