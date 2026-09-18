@@ -186,7 +186,10 @@ E14 pass and meet all evaluation targets.
 ## Development status
 
 Read [open development work](specs/OPEN-WORK.md) for the current implementation
-state and the planned work that remains.
+state and the planned work that remains, including
+[inventory discovery](specs/SPEC-inventory-discovery.md) and the
+[on-demand target-directory rescan](specs/SPEC-target-dir-rescan.md) that
+depends on it.
 
 The [console UI specification](specs/SPEC-console-ui.md) defines planned
 [item details](specs/SPEC-console-item-details.md),
