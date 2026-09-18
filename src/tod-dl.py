@@ -99,7 +99,7 @@ def display_bucket(status: str, attempts: int, max_attempts: int) -> str:
         return "busy"
     if status in {"retry_wait", "failed"}:
         return "exhausted" if max_attempts and attempts >= max_attempts else "retry"
-    if status in {"existing_unverified", "review_required"}:
+    if status in {"existing_unverified", "review_required", "unavailable"}:
         return status
     if status in {"pending", "queued"}:
         return "queued"

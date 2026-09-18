@@ -591,6 +591,32 @@ class MonitorTests(unittest.TestCase):
             finally:
                 server.stop()
 
+    def test_list_queue_maps_unavailable_status_to_unavailable_bucket(self):
+        """The `unavailable` durable status must land in the `unavailable` bucket.
+
+        SPEC-download-telemetry.md requires every selected item to belong to
+        exactly one display bucket; the `unavailable` bucket is a distinct
+        entry in BUCKETS, so a row with that durable status must not fall
+        through to `unknown`.
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            rows = [("unavailable", "http://example.onion/gone.txt", 0),
+                   ("queued", "http://example.onion/other.txt", 1)]
+            database = self._queue_manifest(root, rows)
+            server = InspectionServer(root, "run-one", "session-one", database, 3)
+            server.start()
+            try:
+                page = inspection_request(root, "run-one", "list_queue",
+                                          {"bucket": "unavailable", "page_size": 10})
+                self.assertEqual({row["basename"] for row in page["data"]["rows"]},
+                                 {"gone.txt"})
+                by_query = inspection_request(root, "run-one", "list_queue",
+                                              {"bucket": "unknown", "page_size": 10})
+                self.assertEqual(by_query["data"]["rows"], [])
+            finally:
+                server.stop()
+
     def test_list_queue_scans_a_large_manifest_without_loading_it_whole(self):
         """A scaled-down stand-in for the spec's million-item scale test.
 
