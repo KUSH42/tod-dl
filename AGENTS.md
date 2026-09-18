@@ -32,6 +32,9 @@ the acquisition database or write evidence. `src/controller.py` provides
 the same-user control endpoint for confirmed retry, Tor renewal, pause and
 resume admission, drain-and-stop, and checkpoint-stop requests.
 
+`src/inventory.py` parses a local inventory listing, writes reproducible
+manifests, and exports queue files. It reads local files only.
+
 `src/provenance.py` writes signed provenance records. `src/verify_provenance.py` reads
 and verifies those records without changing final files.
 
@@ -40,9 +43,11 @@ and verifies those records without changing final files.
 Run these commands before you hand off downloader changes:
 
 ```bash
-python3 -m unittest -v tests/test_tod_dl.py tests/test_monitor.py tests/test_monitor_interaction.py
+python3 -m unittest -v tests/test_tod_dl.py tests/test_monitor.py tests/test_monitor_interaction.py \
+    tests/test_inventory.py
 python3 -m py_compile src/tod-dl.py src/download_telemetry.py \
-    src/monitor.py src/controller.py src/provenance.py src/verify_provenance.py
+    src/monitor.py src/controller.py src/provenance.py src/verify_provenance.py \
+    src/inventory.py
 bash -n ./run.sh
 git diff --check
 ```

@@ -123,9 +123,12 @@ required metric-quality states.
 
 Complete the monitor and control UI. Add the planned Errors / review tab.
 
-Add inventory discovery last. Implement local snapshot parsing, reproducible
-manifest generation, and safe queue export. Add bounded network refresh and
-directory discovery only after the basic acquisition workflow is reliable.
+Inventory discovery is partly done. `src/inventory.py` implements local
+snapshot parsing, reproducible manifest generation, and safe queue export
+(`SPEC-inventory-snapshot-manifest.md`, implemented). Still open: snapshot
+diffing with the dated parse/diff report, bounded network refresh, and
+directory discovery. Add those only after the basic acquisition workflow is
+reliable.
 
 Add on-demand target-directory rescan after inventory discovery. It
 reconciles files already in the target directory against the inventory
@@ -152,7 +155,9 @@ The current specification status is grouped below.
   recovery, provenance, console UI, controller controls, download telemetry,
   reliable acquisition, queue view, console visual style, and console
   inspection.
-- Planned: inventory discovery and target-directory rescan.
+- Implemented (new): `SPEC-inventory-snapshot-manifest.md`.
+- Partially implemented (new): inventory discovery.
+- Planned: target-directory rescan.
 
 ## Next steps
 

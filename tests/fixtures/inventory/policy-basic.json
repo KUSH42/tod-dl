@@ -1,0 +1,12 @@
+{
+  "policy_version": "1",
+  "rules": [
+    {"id": "skip-tmp", "match": {"extensions": [".tmp"]},
+     "disposition": "rejected", "reason": "temporary file"},
+    {"id": "pst-later", "match": {"extensions": [".pst"]},
+     "disposition": "deferred", "reason": "mail container, acquire later"},
+    {"id": "docs", "match": {"path_prefix": "Docs"},
+     "disposition": "priority", "reason": "documents tree"}
+  ],
+  "default": {"disposition": "deferred", "reason": "no rule matched"}
+}

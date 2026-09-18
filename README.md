@@ -241,6 +241,30 @@ manifest, a machine-readable fixture event log, and a structured report. It
 does not select an engine. An engine becomes selected only after E01 through
 E14 pass and meet all evaluation targets.
 
+## Build a queue from an inventory listing
+
+`src/inventory.py` reads a local `ls -R`-style listing, writes a reproducible
+manifest, and exports a queue. It reads local files only and never replaces an
+existing file. Use a case directory for all paths.
+
+```bash
+python3 src/inventory.py snapshot --input /case/ALL_FILES1 --store /case/inventory
+python3 src/inventory.py activate --store /case/inventory --snapshot <sha256-prefix>
+python3 src/inventory.py manifest --snapshot /case/inventory/snapshots/<name> \
+    --policy /case/policy.json --base-url https://HOST/COLLECTION/data \
+    --output /case/manifests/m1
+python3 src/inventory.py queue --manifest /case/manifests/m1 --output /case/urls_1.txt
+```
+
+A rejected snapshot lands in `rejected/` and cannot become a baseline. Read
+its `parse-report.json` before you use `--max-issues`. The policy file assigns
+each item to `priority`, `deferred`, or `rejected`; the specification shows
+the format. `queue --disposition deferred` exports the deferred items. The
+`--generation` option adds a `generation=` token to each line; use it only
+when you want the downloader to run early rechecks. Read
+[the specification](specs/SPEC-inventory-snapshot-manifest.md) for the
+runbook.
+
 ## Development status
 
 Read [open development work](specs/OPEN-WORK.md) for the current implementation
