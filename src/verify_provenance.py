@@ -98,7 +98,7 @@ def verify(record_dir: Path, destination: Path, public_key: Path | None,
     if not isinstance(summary, dict): return errors
     required_summary = {"schema_version", "run_id", "session_id", "queue_input_digests", "selection_settings",
                         "event_count", "final_event_digest", "selected_item_count", "durable_outcome_counts",
-                        "schema_sha256", "signing_key_fingerprint", "signature"}
+                        "session_finalized_count", "schema_sha256", "signing_key_fingerprint", "signature"}
     if set(summary) != required_summary: errors.append("summary.json: missing or unknown fields")
     if summary.get("run_id") != run_id or summary.get("session_id") != session_id:
         errors.append("summary.json: identifiers do not match record path")
@@ -156,8 +156,11 @@ def verify(record_dir: Path, destination: Path, public_key: Path | None,
                       and last_event.get("durable_outcome_counts") == summary.get("durable_outcome_counts")):
         errors.append("summary.json: last event is not a matching run_closed event")
     durable_counts = summary.get("durable_outcome_counts")
-    if (isinstance(durable_counts, dict) and durable_counts.get("complete", 0) != len(final_events)):
-        errors.append("summary.json: completed-item count does not match finalized events")
+    session_count = summary.get("session_finalized_count")
+    if isinstance(durable_counts, dict) and isinstance(session_count, int):
+        # The run total covers all sessions, so it can exceed this session's finalized events.
+        if session_count != len(final_events) or durable_counts.get("complete", 0) < session_count:
+            errors.append("summary.json: completed-item count does not match finalized events")
     for event in final_events:
         try:
             relative_text(event["logical_relative_path"])

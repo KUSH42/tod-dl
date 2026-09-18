@@ -21,6 +21,9 @@ contain downloaded data, queue files, download state, or derived content.
 - `src/verify_provenance.py` verifies a signed provenance record set.
 - `tests/` contains tests and non-sensitive fixtures.
 - `src/acquisition_evaluation.py` provides local acquisition-engine fixtures.
+- `docs/` explains the [audit rail](docs/AUDIT-RAIL.md), the
+  [chain of custody](docs/CHAIN-OF-CUSTODY.md), and gives a
+  [project overview](docs/PORTFOLIO-OVERVIEW.md).
 
 ## Requirements
 

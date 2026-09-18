@@ -2639,6 +2639,40 @@ class ProvenanceAcceptanceTests(unittest.TestCase):
             self.assert_fails_with(writer, destination, public,
                                    "completed-item count does not match finalized events")
 
+    def close_resumed_session(self, root: Path, complete_in_run: int):
+        """Close a second session of the same run that finalizes no file.
+
+        The run already has finalized files from session 1, so the run-wide
+        durable count is larger than this session's own finalized events.
+        """
+        queue = [{"path": "/fixture/queue.txt", "sha256": "0" * 64}]
+        resumed = ProvenanceWriter(root / "state", "fixture-run")
+        resumed.event("run_started", queue_input_digests=queue,
+                      selection_settings={"max_files": 1}, selected_item_count=1)
+        resumed.close(queue, {"max_files": 1}, 1, {"complete": complete_in_run}, "finished")
+        return resumed
+
+    def test_resumed_session_verifies_when_it_finalizes_fewer_files_than_the_run_total(self):
+        # A resume is a normal operation. The verifier must not report a defect
+        # only because an earlier session finalized the files of the run.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            writer, destination, final, public = self.make_record(root)
+            resumed = self.close_resumed_session(root, complete_in_run=1)
+            self.assertEqual(verify(writer.directory, destination, public, None), [])
+            self.assertEqual(verify(resumed.directory, destination, public, None), [])
+
+    def test_session_count_above_the_run_total_fails(self):
+        # A session cannot finalize more files than the run completed.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            writer, destination, final, public = self.make_record(root)
+            self.resign(writer, lambda summary: summary["durable_outcome_counts"].update(complete=0))
+            self.rewrite_events(writer, lambda events: events[-1].update(
+                durable_outcome_counts={"complete": 0}))
+            self.assert_fails_with(writer, destination, public,
+                                   "completed-item count does not match finalized events")
+
     def test_summary_signed_by_an_untrusted_key_fails(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -2804,6 +2838,50 @@ class ProvenanceControllerTests(unittest.TestCase):
             finalized = events[2]
             self.assertEqual(finalized["item_id"], downloader.item_id(self.url))
             self.assertEqual(finalized["sha256"], hashlib.sha256(self.payload).hexdigest())
+            downloader.provenance.close([], {"max_files": 1}, 1, {"complete": 1}, "finished")
+            self.assertEqual(verify(downloader.provenance.directory, downloader.destination,
+                                    self.public_key(root, downloader), None), [])
+            db.close()
+
+    def test_crash_after_the_finalized_event_is_recovered_in_the_next_session(self):
+        # G5. The first session wrote its finalized event and died before the
+        # complete commit. The unsigned first session cannot prove the file.
+        # The second session must write its own finalized event, or the item
+        # would be complete with no event in any verified session.
+        class Crash(BaseException):
+            pass
+
+        with FaultRoot() as root:
+            downloader, db, engine, staging = self.make_controller(root)
+            transition = downloader.transition
+
+            def crash_on_complete(db_, url, status, *args, **fields):
+                if status == "complete":
+                    raise Crash()
+                return transition(db_, url, status, *args, **fields)
+
+            downloader.transition = crash_on_complete
+            with self.assertRaises(Crash):
+                downloader.transfer(downloader.next_pending(db), db)
+            first = [event["event_type"] for event in self.events(downloader)]
+            self.assertEqual(first, ["run_started", "attempt_finished", "finalized"])
+            self.assertEqual(db.execute("SELECT status FROM downloads WHERE url=?",
+                                        (self.url,)).fetchone()[0], "promoting")
+
+            downloader.transition = transition
+            downloader.provenance = ProvenanceWriter(downloader.state, downloader.run_id)
+            downloader.provenance_event("run_started", queue_input_digests=[],
+                                        selection_settings={"max_files": 1},
+                                        selected_item_count=1)
+            downloader.reconcile_promotions(db)
+
+            self.assertEqual(db.execute("SELECT status FROM downloads WHERE url=?",
+                                        (self.url,)).fetchone()[0], "complete")
+            events = self.events(downloader)
+            self.assertEqual([event["event_type"] for event in events],
+                             ["run_started", "finalized"])
+            self.assertEqual(events[1]["item_id"], downloader.item_id(self.url))
+            self.assertEqual(events[1]["sha256"], hashlib.sha256(self.payload).hexdigest())
             downloader.provenance.close([], {"max_files": 1}, 1, {"complete": 1}, "finished")
             self.assertEqual(verify(downloader.provenance.directory, downloader.destination,
                                     self.public_key(root, downloader), None), [])

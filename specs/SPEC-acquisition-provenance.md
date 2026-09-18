@@ -153,11 +153,16 @@ nonnegative integer.
 
 `summary.json` must include the run ID, session ID, queue-input digests,
 selection settings, event count, final event digest, selected-item count,
-durable outcome counts, the SHA-256 digest of `schema.json`, and an Ed25519
-signature. The signature must cover the JCS canonical summary object without
-the signature field. The summary must also identify the signing public-key
-fingerprint. `schema_sha256` must use the digest format above. `signature` must
-be an unpadded base64url encoding of the 64-byte Ed25519 signature.
+durable outcome counts, the session finalized count, the SHA-256 digest of
+`schema.json`, and an Ed25519 signature. The durable outcome counts cover all
+items of the run. `session_finalized_count` is the number of `finalized` events
+that this session wrote. The verifier must require that it equals the number of
+`finalized` events in the session and does not exceed the durable `complete`
+count. A resumed session can finalize fewer files than the run total. The
+signature must cover the JCS canonical summary object without the signature
+field. The summary must also identify the signing public-key fingerprint.
+`schema_sha256` must use the digest format above. `signature` must be an
+unpadded base64url encoding of the 64-byte Ed25519 signature.
 `signing_key_fingerprint` must be the lowercase hexadecimal SHA-256 digest of
 the 32-byte Ed25519 public key. It must not contain full response bodies or
 copied source files.
@@ -186,4 +191,5 @@ valid record set and that each of these changes causes verification failure:
 - A wrong summary final-event digest.
 - A changed summary signature or schema file.
 - A removed final event line with a replaced matching summary.
+- A `finalized` event count that differs from `session_finalized_count`.
 - A missing final file.

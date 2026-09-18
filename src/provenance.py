@@ -147,14 +147,15 @@ def schema_document() -> dict:
         "type": "object", "additionalProperties": False,
         "required": ["schema_version", "run_id", "session_id", "queue_input_digests",
                      "selection_settings", "event_count", "final_event_digest",
-                     "selected_item_count", "durable_outcome_counts", "schema_sha256",
-                     "signing_key_fingerprint", "signature"],
+                     "selected_item_count", "durable_outcome_counts", "session_finalized_count",
+                     "schema_sha256", "signing_key_fingerprint", "signature"],
         "properties": {
             "schema_version": {"const": SCHEMA_VERSION}, "run_id": {"type": "string", "minLength": 1},
             "session_id": UUID, "queue_input_digests": {"type": "array"},
             "selection_settings": {"type": "object"}, "event_count": COUNT,
             "final_event_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
             "selected_item_count": COUNT, "durable_outcome_counts": COUNTS,
+            "session_finalized_count": COUNT,
             "schema_sha256": HEX, "signing_key_fingerprint": HEX,
             "signature": {"type": "string", "pattern": "^[A-Za-z0-9_-]{86}$"},
         },
@@ -288,6 +289,7 @@ class ProvenanceWriter:
                                                               serialization.PublicFormat.Raw)
         self.fingerprint = hashlib.sha256(public).hexdigest()
         self.sequence = 0
+        self.finalized_count = 0
         self.previous_digest: str | None = None
         self.lock = threading.Lock()
 
@@ -319,6 +321,8 @@ class ProvenanceWriter:
             except OSError as exc:
                 raise ProvenanceError(f"cannot write provenance event: {exc}") from exc
             self.previous_digest = record["event_digest"]
+            if event_type == "finalized":
+                self.finalized_count += 1
             return record
 
     def close(self, queue_input_digests: list[dict], selection_settings: dict,
@@ -331,6 +335,7 @@ class ProvenanceWriter:
                    "selection_settings": selection_settings, "event_count": self.sequence,
                    "final_event_digest": self.previous_digest, "selected_item_count": selected_item_count,
                    "durable_outcome_counts": durable_outcome_counts,
+                   "session_finalized_count": self.finalized_count,
                    "schema_sha256": self.schema_sha256,
                    "signing_key_fingerprint": self.fingerprint}
         signature = self.private_key.sign(canonical_json(summary))
