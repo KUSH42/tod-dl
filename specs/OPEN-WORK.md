@@ -29,12 +29,12 @@ live transfer counters. Add tests for stale samples, snapshot failures, and all
 required metric-quality states.
 
 Complete the monitor and control UI. Add the planned dashboard and review
-views. Implement [read-only inspection](SPEC-console-inspection.md),
-[item details](SPEC-console-item-details.md),
-[worker details](SPEC-console-worker-details.md), and the
-[queue view](SPEC-console-queue.md) with their contract and headless UI tests.
-Add pause, resume, drain, and checkpoint-stop controls one at a time with
-confirmation, audit, telemetry, and headless UI tests.
+views. Implement [read-only inspection](SPEC-console-inspection.md). Finish
+the remaining contract and headless UI test gaps in
+[item details](SPEC-console-item-details.md) and the
+[queue view](SPEC-console-queue.md). Add pause, resume, drain, and
+checkpoint-stop controls one at a time with confirmation, audit, telemetry,
+and headless UI tests.
 
 Complete the provenance and fault-recovery acceptance suites. Compare the
 existing implementation with both specifications. Add each missing fixture
@@ -48,12 +48,11 @@ directory discovery only after the basic acquisition workflow is reliable.
 
 The current specification status is grouped below.
 
-- Implemented: `SPEC-tor-circuit-recovery.md`.
+- Implemented: `SPEC-tor-circuit-recovery.md` and worker details.
 - Partially implemented: acquisition tool evaluation, acquisition fault
   recovery, provenance, console UI, controller controls, download telemetry,
-  and reliable acquisition.
-- Planned: inventory discovery, console inspection, item details, worker
-  details, queue view, and console visual style.
+  reliable acquisition, item details, and queue view.
+- Planned: inventory discovery, console inspection, and console visual style.
 
 ## Next steps
 
