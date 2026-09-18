@@ -146,6 +146,55 @@ class RunSelectionTests(unittest.TestCase):
                                         (urls[0],)).fetchone()[0], "existing_unverified")
             db.close()
 
+    def test_scope_run_completes_an_existing_file_whose_hash_matches_the_queue(self):
+        url = "https://fixture.test/first/data/existing.bin"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            queue = root / "queue.txt"
+            content = b"evidence"
+            digest = hashlib.sha256(content).hexdigest()
+            queue.write_text(f"{url} sha256={digest}\n", encoding="utf-8")
+            downloader = Downloader(make_args(root, queue))
+            downloader.destination.mkdir()
+            downloader.state.mkdir()
+            db = downloader.open_db()
+            downloader.import_queues(db)
+            existing = downloader.destination / "first" / "data" / "existing.bin"
+            existing.parent.mkdir(parents=True)
+            existing.write_bytes(content)
+
+            selected, skipped = downloader.scope_run(db)
+
+            self.assertEqual((selected, skipped), (0, 1))
+            row = db.execute("SELECT status, bytes, sha256 FROM downloads WHERE url=?",
+                             (url,)).fetchone()
+            self.assertEqual(row, ("complete", len(content), digest))
+            db.close()
+
+    def test_scope_run_sends_an_existing_file_with_a_mismatched_hash_to_review(self):
+        url = "https://fixture.test/first/data/existing.bin"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            queue = root / "queue.txt"
+            expected_digest = hashlib.sha256(b"evidence").hexdigest()
+            queue.write_text(f"{url} sha256={expected_digest}\n", encoding="utf-8")
+            downloader = Downloader(make_args(root, queue))
+            downloader.destination.mkdir()
+            downloader.state.mkdir()
+            db = downloader.open_db()
+            downloader.import_queues(db)
+            existing = downloader.destination / "first" / "data" / "existing.bin"
+            existing.parent.mkdir(parents=True)
+            existing.write_bytes(b"a different file entirely")
+
+            selected, skipped = downloader.scope_run(db)
+
+            self.assertEqual((selected, skipped), (0, 1))
+            row = db.execute("SELECT status, last_error, review_code FROM downloads WHERE url=?",
+                             (url,)).fetchone()
+            self.assertEqual(row, ("review_required", "checksum mismatch", "checksum_mismatch"))
+            db.close()
+
     def test_relative_path_decodes_percent_encoded_segments(self):
         path = relative_path("https://example.invalid/RUN1/data/a%20b/c%24d.txt")
         self.assertEqual(path.as_posix(), "RUN1/data/a b/c$d.txt")

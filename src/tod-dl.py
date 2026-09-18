@@ -1431,6 +1431,36 @@ class Downloader:
         db.commit()
         return count
 
+    def reconcile_existing_file(self, db: sqlite3.Connection, url: str, logical: str,
+                                stored: str, target: Path,
+                                expected_sha256: str | None) -> None:
+        """Verify a path-matched pre-existing final file against its expected hash.
+
+        Per SPEC-reliable-acquisition.md: record existing_unverified unless the
+        expected identity and hash have been established.
+        """
+        if not expected_sha256:
+            self.transition(db, url, "existing_unverified", "final already exists",
+                            bytes=target.stat().st_size)
+            return
+        try:
+            digest = sha256sum(target)
+            byte_count = target.stat().st_size
+        except OSError as exc:
+            self.transition(db, url, "review_required",
+                            "existing file is inaccessible",
+                            last_error=f"existing-file reconciliation failed: {exc}",
+                            review_code=review_code_for_error(exc))
+            return
+        if digest.lower() != expected_sha256.lower():
+            self.transition(db, url, "review_required", "checksum mismatch",
+                            sha256=digest, bytes=byte_count,
+                            last_error="checksum mismatch", review_code="checksum_mismatch")
+            return
+        self.finalized_event(url, logical, stored, byte_count, digest, expected_sha256)
+        self.transition(db, url, "complete", "final already exists and verified",
+                        bytes=byte_count, sha256=digest)
+
     def scope_run(self, db: sqlite3.Connection) -> tuple[int, int]:
         """Persist this invocation's bounded selection in queue order.
 
@@ -1446,7 +1476,7 @@ class Downloader:
             db.commit()
             return previous, 0
         selected = existing = 0
-        for url, rel, _inventory_size, _expected_sha256 in read_queues(self.args.queue):
+        for url, rel, _inventory_size, expected_sha256 in read_queues(self.args.queue):
             if self.args.max_files and selected >= self.args.max_files:
                 break
             stored, target = self.resolved_storage_target(rel, url)
@@ -1456,8 +1486,7 @@ class Downloader:
                                  (url,)).fetchone()
                 current_status = row[0] if row else None
                 if current_status not in SCOPE_RUN_TRACKED_STATUSES:
-                    self.transition(db, url, "existing_unverified", "final already exists",
-                                    bytes=target.stat().st_size)
+                    self.reconcile_existing_file(db, url, rel, stored, target, expected_sha256)
                 continue
             db.execute("INSERT INTO run_items (run_id, url, queue_rank) "
                        "VALUES (?, ?, ?)", (self.run_id, url, selected))
