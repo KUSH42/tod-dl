@@ -101,6 +101,27 @@ class RunSelectionTests(unittest.TestCase):
         downloader.import_queues(db)
         return downloader, db
 
+    def test_import_reports_rejected_and_duplicate_queue_lines(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            good = "https://fixture.test/first/data/item.bin"
+            invalid = "https://fixture.test/first/data/../escape.bin"
+            urls = [good, invalid, good]
+            queue = root / "queue.txt"
+            queue.write_text("\n".join(urls) + "\n", encoding="utf-8")
+            downloader = Downloader(make_args(root, queue))
+            downloader.destination.mkdir()
+            downloader.state.mkdir()
+            db = downloader.open_db()
+            capture = StringIO()
+            with redirect_stdout(capture):
+                imported = downloader.import_queues(db)
+            output = capture.getvalue()
+            self.assertEqual(imported, 1)
+            self.assertIn(f"[queue-rejected] {invalid}: unsafe URL path", output)
+            self.assertIn(f"[queue-rejected] {good}: duplicate URL", output)
+            db.close()
+
     def test_selection_skips_existing_before_applying_limit(self):
         urls = [
             "https://fixture.test/first/data/existing.bin",
@@ -1059,6 +1080,12 @@ class LocalFakeTransferEngine:
         staging.write_bytes(b"")
         return False, "local fixture stalled with zero progress"
 
+    def incomplete_body(self, staging: Path) -> tuple[bool, str]:
+        self.calls += 1
+        staging.parent.mkdir(parents=True, exist_ok=True)
+        staging.write_bytes(self.payload[:len(self.payload) // 2])
+        return False, "errorCode=1 Got EOF from the server"
+
     def changed_representation(self, staging: Path) -> tuple[bool, str]:
         self.calls += 1
         staging.parent.mkdir(parents=True, exist_ok=True)
@@ -1301,6 +1328,23 @@ class AcquisitionFaultRecoveryTests(unittest.TestCase):
             downloader.reset_retry_now(db)
             self.assertEqual(downloader.next_pending(db)[0], self.url)
             self.assertEqual(self.selected_urls(db), [self.url])
+            db.close()
+
+    def test_incomplete_body_blocks_promotion_and_retains_review_candidate(self):
+        with FaultRoot() as root:
+            downloader, db, _ = self.make_controller(root)
+            engine = LocalFakeTransferEngine(self.payload)
+            staging = downloader.staging_path(self.url)
+            downloader.run_aria2 = lambda *_: engine.incomplete_body(staging)
+            self.assertEqual(downloader.transfer(downloader.next_pending(db), db), "review")
+            row = db.execute("SELECT status, last_error FROM downloads WHERE url=?",
+                             (self.url,)).fetchone()
+            self.assertEqual(row[0], "review_required")
+            self.assertIn("Got EOF from the server", row[1])
+            self.assertFalse(staging.exists())
+            candidates = list(downloader.candidates.glob("*"))
+            self.assertEqual(len(candidates), 1)
+            self.assertEqual(candidates[0].read_bytes(), self.payload[:len(self.payload) // 2])
             db.close()
 
     def test_retry_now_wakes_admission_with_an_active_transfer(self):

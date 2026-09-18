@@ -10,7 +10,7 @@ The controller has durable selected-run state, no-overwrite finalization,
 recovery tests, signed provenance records, telemetry snapshots, and local
 confirmed controls for retry, Tor renewal, pause admission, resume
 admission, drain and stop, and checkpoint and stop. The repository test
-suite runs 174 local tests. These features do not establish compliance
+suite runs 176 local tests. These features do not establish compliance
 with every requirement in the related specifications.
 
 ## Remaining work
@@ -20,16 +20,22 @@ adapter that drives the real per-URL aria2 process configuration are
 available. The September 18, 2026 evaluation report
 (`specs/reports/acquisition-tool-evaluation-2026-09-18.md`) ran 8 of 14
 scenarios: E01, E03, E04, E07, E09, and E14 passed; E08 and E12 failed on
-real gaps in `src/tod-dl.py` (a truncated transfer is not classified as
-`review_required`, and `read_queues()` silently drops a rejected URL instead
-of reporting it); E02, E05, E06, E10, and E13 did not run and still need
-their own infrastructure (an 8 GiB fixture pass, a process-kill injection
-harness, controller failpoints, a one-million-row queue generator with an
-RSS/latency sampler, and concurrency-timing assertions). Fix the E08 and E12
-gaps, build the remaining scenario infrastructure, and rerun all 14 before
-selecting a configuration. Add a long-lived RPC worker only when the results
-show a mandatory scheduling, recovery, or resource gap. Do not run a source
-pilot until the evaluation selects a configuration.
+real gaps in `src/tod-dl.py`. Both gaps are fixed as of 2026-09-18, with a
+regression test each: `Downloader.transfer` now recognizes aria2's short-body
+"Got EOF from the server" failure, retains the partial bytes as a review
+candidate, and transitions the item to `review_required` instead of
+`retry_wait`; `read_queues()` now takes an `on_reject` callback, and
+`import_queues` uses it to print a `[queue-rejected] <url>: <reason>` line
+for an invalid URL and for a duplicate URL. The fixture-driven E08/E12
+scenarios in the evaluation report have not been rerun against the fix. E02,
+E05, E06, E10, and E13 did not run and still need their own infrastructure
+(an 8 GiB fixture pass, a process-kill injection harness, controller
+failpoints, a one-million-row queue generator with an RSS/latency sampler,
+and concurrency-timing assertions). Rerun E08 and E12 against the fixture
+harness, build the remaining scenario infrastructure, and rerun all 14
+before selecting a configuration. Add a long-lived RPC worker only when the
+results show a mandatory scheduling, recovery, or resource gap. Do not run a
+source pilot until the evaluation selects a configuration.
 
 Complete the reliable-acquisition contract after tool selection. The remaining
 work includes full engine lifecycle checks, bounded large-queue admission,
@@ -72,6 +78,6 @@ The current specification status is grouped below.
 
 ## Next steps
 
-Fix the E08 and E12 gaps in `src/tod-dl.py`, then build the infrastructure
-for E02, E05, E06, E10, and E13. Record the selected engine configuration
-before you expand acquisition behavior.
+Rerun E08 and E12 against the fixture harness to confirm the 2026-09-18 fix,
+then build the infrastructure for E02, E05, E06, E10, and E13. Record the
+selected engine configuration before you expand acquisition behavior.

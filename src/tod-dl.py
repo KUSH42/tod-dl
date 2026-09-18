@@ -274,18 +274,24 @@ def legacy_relative_path(url: str) -> PurePosixPath | None:
         return None
 
 
-def read_queues(paths: list[Path]):
+def read_queues(paths: list[Path], on_reject=None):
     seen: set[str] = set()
     for path in paths:
         with path.open(encoding="utf-8", errors="replace") as handle:
             for line in handle:
                 url = line.strip()
-                if not url or url.startswith("#") or url in seen:
+                if not url or url.startswith("#"):
+                    continue
+                if url in seen:
+                    if on_reject:
+                        on_reject(url, "duplicate URL")
                     continue
                 seen.add(url)
                 try:
                     yield url, relative_path(url)
-                except ValueError:
+                except ValueError as exc:
+                    if on_reject:
+                        on_reject(url, str(exc))
                     continue
 
 
@@ -312,6 +318,16 @@ def is_connectivity_failure(error: str) -> bool:
         "NO ROUTE TO HOST",
         "CONNECTION TIMED OUT",
     ))
+
+
+def is_incomplete_body_failure(error: str) -> bool:
+    """Identify a source that closed the stream before sending the full body.
+
+    aria2 reports this as errorCode=1 ("Got EOF from the server"), the same
+    generic code it uses for other unrelated failures, so match on the
+    specific message rather than the code alone.
+    """
+    return "GOT EOF FROM THE SERVER" in error.upper()
 
 
 def review_code_for_error(error: OSError) -> str | None:
@@ -1334,7 +1350,11 @@ class Downloader:
 
     def import_queues(self, db: sqlite3.Connection) -> int:
         count = 0
-        for url, rel in read_queues(self.args.queue):
+
+        def report_rejection(url: str, reason: str) -> None:
+            print(f"[queue-rejected] {url}: {reason}", flush=True)
+
+        for url, rel in read_queues(self.args.queue, on_reject=report_rejection):
             stored, _ = self.resolved_storage_target(rel, url)
             db.execute("INSERT OR IGNORE INTO downloads (url, relative_path, "
                        "storage_path, staging_path, updated_at) VALUES (?, ?, ?, ?, ?)",
@@ -1792,6 +1812,16 @@ class Downloader:
         control = Path(str(staging) + ".aria2")
         if not ok or not staging.exists() or control.exists():
             size = staging.stat().st_size if staging.exists() else 0
+            if staging.exists() and size > 0 and is_incomplete_body_failure(error):
+                self.attempt_event(db, url, attempts + 1, attempt_started_at,
+                                   "validation_failed")
+                candidate = self.move_candidate(staging)
+                self.candidate_event(url, staging, candidate, None, "incomplete_body")
+                self.transition(db, url, "review_required", error,
+                                bytes=candidate.stat().st_size, last_error=error)
+                self.clear_transfer_telemetry(url)
+                print(f"[review] {rel}: incomplete transfer: {error}", flush=True)
+                return "review"
             if is_connectivity_failure(error):
                 with self.cooldown_lock:
                     self.cooldown_until = max(self.cooldown_until,
