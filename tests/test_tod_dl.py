@@ -1570,6 +1570,30 @@ class AcquisitionFaultRecoveryTests(unittest.TestCase):
             self.assertEqual(candidates[0].read_bytes(), self.payload[:len(self.payload) // 2])
             db.close()
 
+    def test_disk_full_stops_admission_without_consuming_a_retry_attempt(self):
+        """ENOSPC must stop admission and not count as a network retry."""
+        with FaultRoot() as root:
+            downloader, db, _ = self.make_controller(root)
+            staging = downloader.staging_path(self.url)
+
+            def enospc(*_args):
+                staging.parent.mkdir(parents=True, exist_ok=True)
+                staging.write_bytes(self.payload[:3])
+                return False, "errorCode=13 No space left on device"
+
+            downloader.run_aria2 = enospc
+            row = downloader.next_pending(db)
+            attempts_before = row[4]
+            self.assertEqual(downloader.transfer(row, db), "local_failure")
+            self.assertTrue(downloader.admission_paused.is_set())
+            updated = db.execute(
+                "SELECT status, attempts, last_error FROM downloads WHERE url=?",
+                (self.url,)).fetchone()
+            self.assertEqual(updated[0], "queued")
+            self.assertEqual(updated[1], attempts_before)
+            self.assertIn("No space left on device", updated[2])
+            db.close()
+
     def test_retry_now_wakes_admission_with_an_active_transfer(self):
         with FaultRoot() as root:
             downloader, db, _ = self.make_controller(root)

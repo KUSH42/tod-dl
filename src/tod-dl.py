@@ -372,6 +372,16 @@ def is_incomplete_body_failure(error: str) -> bool:
     return "GOT EOF FROM THE SERVER" in error.upper()
 
 
+def is_disk_full_failure(error: str) -> bool:
+    """Identify a local ENOSPC surfaced through aria2's error log line.
+
+    aria2 relays the libc errno string verbatim when a write fails, so match
+    the standard "No space left on device" text rather than an aria2 error
+    code (its codes are not ENOSPC-specific).
+    """
+    return "NO SPACE LEFT ON DEVICE" in error.upper()
+
+
 def hit_failpoint(name: str) -> None:
     """Exit immediately if TOD_DL_FAILPOINT names this boundary (test only).
 
@@ -2002,6 +2012,20 @@ class Downloader:
                 # (errorCode=1 "Got EOF from the server"), so retry once with
                 # --continue=true and only give up when a retry makes no
                 # further progress.
+            if is_disk_full_failure(error):
+                # Spec: disk full stops admission and reports a local failure;
+                # it must not consume a network retry attempt, so put the item
+                # back to `queued` with its original attempt count restored
+                # rather than the incremented one recorded at attempt start.
+                self.admission_paused.set()
+                self.attempt_event(db, url, attempts + 1, attempt_started_at, "local_failure")
+                self.transition(db, url, "queued", error, attempts=attempts,
+                                bytes=size, last_error=error, next_retry_at=0)
+                if self.telemetry:
+                    self.telemetry.event("error", "local_failure", error, url, worker_id)
+                self.clear_transfer_telemetry(url)
+                print(f"[stopped] {rel}: local failure: {error}", flush=True)
+                return "local_failure"
             if is_connectivity_failure(error):
                 with self.cooldown_lock:
                     self.cooldown_until = max(self.cooldown_until,
