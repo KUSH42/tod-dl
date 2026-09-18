@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import sqlite3
 import stat
@@ -608,6 +609,7 @@ class Downloader:
         self.next_newnym_at = 0.0
         self.next_worker_start = 0.0
         self.stop_requested = threading.Event()
+        self.sigterm_received = threading.Event()
         self.admission_paused = threading.Event()
         self.drain_requested = threading.Event()
         self.control_wake = threading.Event()
@@ -2201,11 +2203,18 @@ class Downloader:
         self.incoming.mkdir(parents=True, exist_ok=True)
         self.candidates.mkdir(parents=True, exist_ok=True)
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        lock = (self.state / "acquisition.lock").open("a+")
+        lock = (self.destination / "acquisition.lock").open("a+")
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise RuntimeError("another acquisition supervisor holds the lock") from exc
+
+        def handle_sigterm(signum, frame) -> None:
+            self.sigterm_received.set()
+            self.stop_requested.set()
+            self.control_wake.set()
+
+        previous_sigterm = signal.signal(signal.SIGTERM, handle_sigterm)
         try:
             ports = verify_tor_isolation(self.args.tor_control_address,
                                          self.args.tor_control_cookie)
@@ -2350,7 +2359,8 @@ class Downloader:
                         "GROUP BY status", (self.run_id,)
                     ).fetchall()
                 durable_outcomes = {status: count for status, count in outcome_rows}
-                close_reason = ("time_limit" if self.deadline is not None and self.stop_requested.is_set()
+                close_reason = ("sigterm" if self.sigterm_received.is_set()
+                                else "time_limit" if self.deadline is not None and self.stop_requested.is_set()
                                 else "finished" if not unresolved else "stopped")
                 if self.provenance:
                     self.provenance.close(self.queue_inputs, {"max_files": self.args.max_files},
@@ -2369,8 +2379,11 @@ class Downloader:
                 db.close()
             print("Run summary: " + ", ".join(
                 f"{key}={value}" for key, value in sorted(results.items())))
+            if self.sigterm_received.is_set():
+                return 143
             return 1 if unresolved else 0
         finally:
+            signal.signal(signal.SIGTERM, previous_sigterm)
             fcntl.flock(lock, fcntl.LOCK_UN)
             lock.close()
 

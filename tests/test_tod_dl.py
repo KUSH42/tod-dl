@@ -5,11 +5,13 @@ from __future__ import annotations
 import tempfile
 import unittest
 import os
+import fcntl
 import hashlib
 import errno
 import importlib.util
 import json
 import shutil
+import signal
 import sys
 import time
 from contextlib import redirect_stdout
@@ -1724,6 +1726,61 @@ class TelemetryTests(unittest.TestCase):
             self.assertIsNone(stopped)
             publisher.update_sample("https://fixture.test/item", 10, 20, 1, 1)
             self.assertEqual(publisher.time_status_copy()[0], recorded)
+
+
+class ShutdownSignalTests(unittest.TestCase):
+    def test_sigterm_during_run_exits_143_and_records_close_reason(self):
+        url = "https://fixture.test/first/data/item.bin"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            queue = root / "queue.txt"
+            queue.write_text(url + "\n", encoding="utf-8")
+            args = make_args(root, queue)
+            args.tor_control_address = "127.0.0.1:9051"
+            args.tor_control_cookie = root / "control.authcookie"
+            args.retry_now = False
+            args.time_limit = 0
+            args.progress_interval = 30
+            args.reserve_bytes = 0
+            downloader = Downloader(args)
+
+            original_verify = tod_dl.verify_tor_isolation
+
+            def raise_sigterm_then_verify(address, cookie):
+                os.kill(os.getpid(), signal.SIGTERM)
+                return ["9050"]
+
+            tod_dl.verify_tor_isolation = raise_sigterm_then_verify
+            try:
+                exit_code = downloader.run()
+            finally:
+                tod_dl.verify_tor_isolation = original_verify
+
+            self.assertEqual(exit_code, 143)
+            self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_DFL)
+            events = downloader.provenance.events_path.read_text(encoding="utf-8").splitlines()
+            closed = [json.loads(line) for line in events if '"run_closed"' in line][0]
+            self.assertEqual(closed["close_reason"], "sigterm")
+
+    def test_exclusive_ownership_conflicts_across_state_dirs_sharing_destination(self):
+        url = "https://fixture.test/first/data/item.bin"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            queue = root / "queue.txt"
+            queue.write_text(url + "\n", encoding="utf-8")
+            args_second = make_args(root, queue)
+            args_second.state = root / "state-b"
+            downloader_second = Downloader(args_second)
+            root.joinpath("destination").mkdir(parents=True)
+            held_lock = (root / "destination" / "acquisition.lock").open("a+")
+            fcntl.flock(held_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                with self.assertRaisesRegex(
+                        RuntimeError, "another acquisition supervisor holds the lock"):
+                    downloader_second.run()
+            finally:
+                fcntl.flock(held_lock, fcntl.LOCK_UN)
+                held_lock.close()
 
 
 if __name__ == "__main__":
