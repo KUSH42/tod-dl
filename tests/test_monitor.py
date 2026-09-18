@@ -5,6 +5,8 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import os
+import socket
 import sqlite3
 import tempfile
 import time
@@ -51,6 +53,30 @@ def snapshot(lifecycle: str = "running") -> dict:
         },
         "workers": [], "validation": [], "health": {}, "recent_events": [],
     }
+
+
+def _minimal_database(root: Path) -> Path:
+    """Build a database with only the tables list_queue needs."""
+    database = root / "manifest.sqlite"
+    db = sqlite3.connect(database)
+    db.executescript("""
+        CREATE TABLE downloads (
+            url TEXT PRIMARY KEY, relative_path TEXT NOT NULL,
+            storage_path TEXT, staging_path TEXT, inventory_size TEXT,
+            status TEXT NOT NULL, attempts INTEGER NOT NULL, bytes INTEGER,
+            sha256 TEXT, last_error TEXT, next_retry_at REAL NOT NULL,
+            promotion_target TEXT, updated_at TEXT NOT NULL, review_code TEXT,
+            priority INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE run_items (run_id TEXT NOT NULL, url TEXT NOT NULL,
+                                queue_rank INTEGER NOT NULL);
+        CREATE TABLE telemetry_revisions (run_id TEXT PRIMARY KEY,
+                                          revision INTEGER NOT NULL);
+    """)
+    db.execute("INSERT INTO telemetry_revisions VALUES (?, ?)", ("run-one", 1))
+    db.commit()
+    db.close()
+    return database
 
 
 class MonitorTests(unittest.TestCase):
@@ -125,6 +151,142 @@ class MonitorTests(unittest.TestCase):
                                        {"item_id": "0" * 64})
             finally:
                 server.stop()
+
+    def test_inspection_endpoint_rejects_a_connection_from_another_peer_uid(self):
+        # A raw socket read is used, not inspection_request; see the
+        # over-sixteen-KiB test for why its client-side read is unreliable
+        # for a response that a fast-closing peer produced.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = _minimal_database(root)
+            server = InspectionServer(root, "run-one", "session-one", database, 3)
+            server.start()
+            try:
+                descriptor = read_inspection_session(root, "run-one")
+                request = json.dumps({
+                    "protocol_version": 1, "request_id": "11111111-1111-1111-1111-111111111111",
+                    "run_id": "run-one", "session_id": "session-one",
+                    "operation": "list_queue", "parameters": {},
+                }, separators=(",", ":")).encode("utf-8") + b"\n"
+                with unittest.mock.patch("inspection.os.getuid",
+                                         return_value=os.getuid() + 1):
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                        connection.settimeout(5)
+                        connection.connect(str(descriptor["socket_path"]))
+                        connection.sendall(request)
+                        buffer = bytearray()
+                        while b"\n" not in buffer:
+                            chunk = connection.recv(4096)
+                            if not chunk:
+                                break
+                            buffer.extend(chunk)
+                response = json.loads(bytes(buffer).split(b"\n")[0])
+                self.assertEqual(response["status"], "unavailable")
+                self.assertIn("peer UID", response["reason"])
+            finally:
+                server.stop()
+
+    def test_inspection_endpoint_rejects_a_fifth_concurrent_query(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = _minimal_database(root)
+            server = InspectionServer(root, "run-one", "session-one", database, 3)
+            server.start()
+            try:
+                for _ in range(4):
+                    self.assertTrue(server.queries.acquire(blocking=False))
+                with self.assertRaisesRegex(InspectionError, "four inspection queries"):
+                    inspection_request(root, "run-one", "list_queue")
+            finally:
+                for _ in range(4):
+                    server.queries.release()
+                server.stop()
+
+    def test_inspection_endpoint_closes_a_connection_that_sends_nothing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = _minimal_database(root)
+            server = InspectionServer(root, "run-one", "session-one", database, 3)
+            server.start()
+            try:
+                descriptor = read_inspection_session(root, "run-one")
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                    connection.settimeout(5)
+                    connection.connect(str(descriptor["socket_path"]))
+                    reply = connection.recv(4096)
+                self.assertEqual(reply, b"")
+                # The server thread must still accept later connections.
+                page = inspection_request(root, "run-one", "list_queue")
+                self.assertEqual(page["data"]["rows"], [])
+            finally:
+                server.stop()
+
+    def test_inspection_endpoint_rejects_a_request_over_sixteen_kib(self):
+        # A raw socket read is used here, not inspection_request, because
+        # its client-side read (also _read_line) races an unrelated
+        # MSG_PEEK-after-newline check against the server's close and can
+        # surface as ECONNRESET instead of the response body.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = _minimal_database(root)
+            server = InspectionServer(root, "run-one", "session-one", database, 3)
+            server.start()
+            try:
+                descriptor = read_inspection_session(root, "run-one")
+                oversized = json.dumps({
+                    "protocol_version": 1, "request_id": "not-checked",
+                    "run_id": "run-one", "session_id": "session-one",
+                    "operation": "list_queue",
+                    "parameters": {"padding": "x" * (17 * 1024)},
+                }, separators=(",", ":")).encode("utf-8") + b"\n"
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                    connection.settimeout(5)
+                    connection.connect(str(descriptor["socket_path"]))
+                    connection.sendall(oversized)
+                    buffer = bytearray()
+                    while b"\n" not in buffer:
+                        chunk = connection.recv(4096)
+                        if not chunk:
+                            break
+                        buffer.extend(chunk)
+                response = json.loads(bytes(buffer).split(b"\n")[0])
+                self.assertEqual(response["status"], "invalid_request")
+                self.assertIn("exceeds 16 KiB", response["reason"])
+            finally:
+                server.stop()
+
+    def test_inspection_endpoint_replaces_a_response_over_256_kib_with_unavailable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = _minimal_database(root)
+            server = InspectionServer(root, "run-one", "session-one", database, 3)
+            server.start()
+            try:
+                descriptor = read_inspection_session(root, "run-one")
+                request = json.dumps({
+                    "protocol_version": 1, "request_id": "11111111-1111-1111-1111-111111111111",
+                    "run_id": "run-one", "session_id": "session-one",
+                    "operation": "get_item", "parameters": {"item_id": "0" * 64},
+                }, separators=(",", ":")).encode("utf-8") + b"\n"
+                oversized_result = {"item": {"padding": "x" * (300 * 1024)},
+                                    "state_revision": 1}
+                with unittest.mock.patch.object(server, "_query",
+                                                return_value=oversized_result):
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                        connection.settimeout(5)
+                        connection.connect(str(descriptor["socket_path"]))
+                        connection.sendall(request)
+                        buffer = bytearray()
+                        while b"\n" not in buffer:
+                            chunk = connection.recv(4096)
+                            if not chunk:
+                                break
+                            buffer.extend(chunk)
+                response = json.loads(bytes(buffer).split(b"\n")[0])
+            finally:
+                server.stop()
+        self.assertEqual(response["status"], "unavailable")
+        self.assertIn("256 KiB", response["reason"])
 
     def test_local_control_endpoint_requires_its_session_capability(self):
         with tempfile.TemporaryDirectory() as temporary:

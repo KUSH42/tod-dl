@@ -3,9 +3,9 @@
 Status: partially implemented, September 18, 2026. This specification
 defines the shared data interface for the console views. `InspectionServer`
 implements the socket, session descriptor, peer check, and the `get_item`,
-`get_worker`, `list_queue`, and `list_attempts` operations; the acceptance
-tests for peer rejection, the concurrent-query bound, connection timeouts,
-and request and response byte bounds remain outstanding.
+`get_worker`, `list_queue`, and `list_attempts` operations. Acceptance tests
+now cover peer rejection, the concurrent-query bound, connection timeouts,
+and request and response byte bounds.
 
 The [console UI](SPEC-console-ui.md) owns navigation and display rules.
 [Item details](SPEC-console-item-details.md),
