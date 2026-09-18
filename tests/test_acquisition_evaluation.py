@@ -23,6 +23,7 @@ from acquisition_evaluation import (DeterministicBytes, EvaluationError, Fixture
                                     generate_synthetic_queue_rows, manifest_hash,
                                     process_rss_bytes, process_tree_pids,
                                     wait_for_bytes_written, write_manifest)
+from run_acquisition_evaluation import _read_run_items
 
 
 class DeterministicFixtureTests(unittest.TestCase):
@@ -143,6 +144,30 @@ class ResourceSamplerTests(unittest.TestCase):
         self.assertGreaterEqual(len(sampler.samples), 3)
         self.assertGreater(peak, 0)
         self.assertEqual(peak, max(sampler.samples))
+
+
+class RunItemsReaderTests(unittest.TestCase):
+    def test_returns_empty_mapping_when_the_database_does_not_exist_yet(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            self.assertEqual(_read_run_items(Path(temporary), "some-run"), {})
+
+    def test_returns_urls_in_queue_rank_order_scoped_to_the_run_id(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            with sqlite3.connect(state / "manifest.sqlite") as db:
+                db.execute("CREATE TABLE run_items (run_id TEXT, url TEXT, queue_rank INTEGER)")
+                db.executemany(
+                    "INSERT INTO run_items (run_id, url, queue_rank) VALUES (?, ?, ?)",
+                    [("run-a", "http://x/2", 1), ("run-a", "http://x/1", 0),
+                     ("run-b", "http://x/9", 0)],
+                )
+                db.commit()
+            self.assertEqual(_read_run_items(state, "run-a"),
+                             {"http://x/1": 0, "http://x/2": 1})
+            self.assertEqual(list(_read_run_items(state, "run-a")),
+                             ["http://x/1", "http://x/2"])
+            self.assertEqual(_read_run_items(state, "run-c"), {})
 
 
 class EvaluationReportTests(unittest.TestCase):

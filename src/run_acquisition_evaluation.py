@@ -666,6 +666,88 @@ def e13_concurrency_timing(base: Path, torsocks_conf: Path) -> ScenarioResult:
                           detail, str(events))
 
 
+def _read_run_items(state: Path, run_id: str) -> dict[str, int]:
+    """Return run_items rows for run_id as {url: queue_rank}, in queue_rank order."""
+    database = state / "manifest.sqlite"
+    if not database.exists():
+        return {}
+    with sqlite3.connect(database) as db:
+        rows = db.execute(
+            "SELECT url, queue_rank FROM run_items WHERE run_id=? ORDER BY queue_rank",
+            (run_id,),
+        ).fetchall()
+    return {url: rank for url, rank in rows}
+
+
+def e11_five_item_scoped_run(base: Path, torsocks_conf: Path) -> ScenarioResult:
+    """Select exactly five items from a ten-item queue; never a sixth, including
+
+    after a due retry and a restart with the same --run-id. Drives the
+    boundary through the controller's existing --max-files 5 flag
+    (Downloader.scope_run(), src/tod-dl.py); this piece adds no controller
+    code, only this scenario function and its harness-side assertions, per
+    this specification's Section 6.
+    """
+    root = scenario_root(base, "E11")
+    run_id = "e11-five-item-run"
+    fixtures = [Fixture.create(f"e11-{i}.bin", f"e11-{i}", 4096) for i in range(10)]
+    write_manifest(root / "fixture-manifest.json", fixtures)
+    events = root / "fixture-events.json"
+    destination, state = isolated_dirs(root)
+    retry_fixture = fixtures[4]
+    scripts = {retry_fixture.name: [ResponseScript(status=503), ResponseScript()]}
+    with fixture_server(fixtures, events, scripts=scripts) as server:
+        urls = [server.url(f.name) for f in fixtures]
+        selected_urls = urls[:5]
+        retry_url = urls[4]
+        queue = write_queue_file(root / "queue.txt", urls)
+        extra_args = ["--run-id", run_id]
+        result1 = run_downloader(queue=queue, destination=destination, state=state,
+                                 max_files=5, reserve_bytes=0,
+                                 tor_control_address=TOR_CONTROL_ADDRESS,
+                                 tor_control_cookie=TOR_CONTROL_COOKIE,
+                                 torsocks_conf=torsocks_conf, extra_args=extra_args,
+                                 time_limit=15, timeout=30)
+        run_items_after_first = _read_run_items(state, run_id)
+        # Force the 503'd item's retry due now, per E08/E13's pattern, instead of
+        # waiting out the normal >=60s backoff.
+        with sqlite3.connect(state / "manifest.sqlite") as db:
+            db.execute("UPDATE downloads SET next_retry_at=0 WHERE url=?", (retry_url,))
+            db.commit()
+        result2 = run_downloader(queue=queue, destination=destination, state=state,
+                                 max_files=5, reserve_bytes=0,
+                                 tor_control_address=TOR_CONTROL_ADDRESS,
+                                 tor_control_cookie=TOR_CONTROL_COOKIE,
+                                 torsocks_conf=torsocks_conf, extra_args=extra_args,
+                                 time_limit=15, timeout=30)
+        logged = json.loads(events.read_text())["events"] if events.exists() else []
+    run_items_after_restart = _read_run_items(state, run_id)
+    requested_urls = {server.url(event["fixture"]) for event in logged}
+    rows = read_downloads(state)
+    unselected_urls = urls[5:]
+    checks = {
+        "five_selected_completed": all(rows.get(url, {}).get("status") == "complete"
+                                       for url in selected_urls),
+        "no_sixth_url_ever_requested": not (requested_urls & set(unselected_urls)),
+        "no_sixth_url_ever_selected": not (set(run_items_after_restart) & set(unselected_urls)),
+        "run_items_stable_across_restart": (run_items_after_first == run_items_after_restart
+                                            and list(run_items_after_first) == selected_urls),
+    }
+    detail = (f"exit1={result1.returncode} exit2={result2.returncode} "
+             f"requested_urls={sorted(requested_urls)} "
+             f"run_items_after_first={run_items_after_first} "
+             f"run_items_after_restart={run_items_after_restart} "
+             f"statuses={ {u: rows.get(u, {}).get('status') for u in urls} } "
+             f"checks={checks}")
+    if all(checks.values()):
+        return ScenarioResult("E11", "pass",
+                              "E11: exactly five scoped items, including after a due retry "
+                              "and a restart", detail, str(events))
+    return ScenarioResult("E11", "fail",
+                          "E11: exactly five scoped items, including after a due retry and "
+                          "a restart", detail, str(events))
+
+
 NOT_RUN = {
     "E02": "harness built and wired, but not run to completion this session. The "
           "deterministic fixture generator's throughput (Section 1's open question in "
@@ -679,8 +761,6 @@ NOT_RUN = {
           "The is_incomplete_body fix itself is confirmed working (the staging file "
           "grew well past the 256 MiB interrupt point, i.e. it resumed instead of "
           "routing to review_required). Run E02 to completion next.",
-    "E11": "no harness built yet for a five-item run selected from a larger queue; "
-          "see specs/SPEC-acquisition-tool-evaluation.md's scenario table.",
 }
 
 
@@ -713,6 +793,7 @@ def main() -> int:
         e08_checksum_mismatch_review,
         e09_disk_exhaustion,
         e10_million_row_admission_and_resources,
+        e11_five_item_scoped_run,
         e12_encoded_names_and_duplicates,
         e13_concurrency_timing,
         e14_tor_admission_guard,

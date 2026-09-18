@@ -1,6 +1,13 @@
 # Specification: acquisition evaluation infrastructure
 
-Status: implemented, September 18, 2026. All five pieces are built: the
+Status: implemented, September 18, 2026. All six pieces are built. Per
+[the second evaluation report](reports/acquisition-tool-evaluation-2026-09-18b.md),
+E11 had no harness at that report's writing; Section 6's harness
+(`e11_five_item_scoped_run`, `src/run_acquisition_evaluation.py`) closes that
+gap, wired into `main()`, with a corresponding unit test for its new
+`_read_run_items` helper in `tests/test_acquisition_evaluation.py`. Per this
+specification's scope, E11 has not been run yet; running it and recording a
+result belongs to a later evaluation report. The five other built pieces: the
 streaming 8 GiB fixture pass for E02 (`Fixture`, `FixtureServer`, and
 `e02_large_file_interrupted_resume`, `src/run_acquisition_evaluation.py`);
 the kill-injection harness for E05 (`start_downloader`,
@@ -57,14 +64,14 @@ limit. E02 has not yet been run to completion with the fixed generator.
 
 Define the test infrastructure that
 [the acquisition tool evaluation specification](SPEC-acquisition-tool-evaluation.md)
-requires to run E02, E05, E06, E10, and E13. This specification does not
+requires to run E02, E05, E06, E10, E11, and E13. This specification does not
 change any required result in that specification's scenario table. It does
 not evaluate a candidate and does not select a configuration. Build each
 piece as an addition to the existing harness (`src/acquisition_evaluation.py`)
 and the existing adapter and runner (`src/aria2_evaluation_adapter.py`,
 `src/run_acquisition_evaluation.py`), not as a separate harness.
 
-Implement the five pieces in the order listed below. Each piece stands alone:
+Implement the six pieces in the order listed below. Each piece stands alone:
 a later piece must not depend on an earlier piece beyond shared harness code
 that already exists.
 
@@ -118,7 +125,7 @@ E02's "resume, no full restart" requirement. This is a controller-side gap:
 `is_incomplete_body_failure()` cannot become more precise using only aria2's
 output, so the fix (if any) must live in what the controller does with a
 nonzero-size, `GOT EOF`-classified staging file, not in a more precise
-error match. Closing that gap is outside this specification's five pieces,
+error match. Closing that gap is outside this specification's six pieces,
 per the scope line above ("This specification does not change any required
 result"); E02 cannot pass until a decision is made and implemented
 separately. Do not implement any change to `is_incomplete_body_failure()` or
@@ -339,26 +346,75 @@ deliberate staggering, cooldown, storage pause, and validation backpressure."
   against the five-second refill target directly, whichever the
   implementation finds simpler to make objectively checkable.
 
+## 6. Five-item scoped run assertion (for E11)
+
+Requirement: "Five-item run selected from a larger queue... Only those five
+distinct items may transfer, including after retries and restart." (parent
+specification, scenario table.)
+
+- Build a queue file with more than five distinct URLs (for example, ten).
+  Drive the run with the controller's existing `--max-files 5` flag rather
+  than a new selection mechanism: `Downloader.scope_run()` (`src/tod-dl.py`)
+  already populates `run_items` with the first five queue-order rows whose
+  target does not already exist, and every later admission and retry path
+  joins against `run_items`. No controller-code change is needed for the
+  boundary itself; this piece is a harness invocation and an assertion, not
+  new controller logic.
+- Pass the same explicit `--run-id` value on the initial run and on the
+  restart. `scope_run()` is idempotent only when `run_id` matches an
+  existing `run_items` population: it returns early when `previous` (the
+  existing row count for that `run_id`) is nonzero. Without an explicit
+  `--run-id`, the controller derives a new timestamp-based run ID on
+  restart, which would let `scope_run()` reselect up to five different rows
+  from the larger queue instead of resuming the same five. Confirm this
+  during implementation before writing the assertion; a harness that omits
+  `--run-id` would silently test the wrong thing.
+- Include, among the five selected items, one row already in `retry_wait`
+  with a due retry at run start, so the requirement's "including after
+  retries" clause is exercised, not only inferred from the restart case.
+- Restart the controller once, against the same isolated destination and
+  state directories, the same queue file, and the same `--run-id`, after the
+  five selected items reach a terminal or in-progress state.
+- Assert, from the fixture server's request log, that the set of distinct
+  URLs requested is exactly the five selected URLs, both before and after
+  the restart — never a sixth URL from the larger queue file, and never
+  fewer than five once the run completes.
+- Assert, from durable state, that `run_items` for this `run_id` contains
+  exactly the same five URLs before and after the restart, in the same
+  `queue_rank` order.
+
+Resolved: a `downloads` row exists for every queue URL, including the
+sixth-and-later rows never selected into `run_items`. `Downloader.run()`
+calls `import_queues(db)` unconditionally before `scope_run()`
+(`src/tod-dl.py`), and `import_queues()` inserts a row for every URL read
+from the queue file (`INSERT OR IGNORE INTO downloads ...`) regardless of
+whether `scope_run()` later selects it. The sixth-and-later rows therefore
+do have a `downloads` row; `scope_run()` only decides which URLs get a
+`run_items` row and are ever transferred. Assert that the sixth-and-later
+URLs are never requested and never gain a `run_items` row, not that no
+`downloads` row exists for them.
+
 ## Deliverables
 
 Extend `src/acquisition_evaluation.py`, `src/aria2_evaluation_adapter.py`,
 `src/run_acquisition_evaluation.py`, and the controller finalization path in
-`src/tod-dl.py` to add the five pieces above. In `src/tod-dl.py`, this means
+`src/tod-dl.py` to add the six pieces above. In `src/tod-dl.py`, this means
 the three failpoints (Section 3) and the `reconcile_promotions()` extension
 for failpoint (a) resolved in that section's open question; it does not mean
 a fix for the E02 `is_incomplete_body_failure()` gap (Section 1), which
-stays out of scope for this specification. Add
+stays out of scope for this specification. Section 6 adds no controller
+code, only a scenario function (`e11_five_item_scoped_run`, for example) in
+`src/run_acquisition_evaluation.py` and its harness-side assertions. Add
 corresponding entries to `tests/test_acquisition_evaluation.py` for harness
 behavior that unit tests can cover (generator determinism, sampler interval
 correctness, failpoint gating) separately from the end-to-end scenario runs
 that only `src/run_acquisition_evaluation.py` can produce. Do not run E02,
-E05, E06, E10, or E13 as part of this specification; running them and
+E05, E06, E10, E11, or E13 as part of this specification; running them and
 recording results belongs to a later evaluation report, per
 [the acquisition tool evaluation specification](SPEC-acquisition-tool-evaluation.md).
 
 ## Next steps
 
-Wait for an explicit instruction to implement before writing code against
-this specification. After implementation, update this specification's status
-to `partially implemented` or `implemented` and record which of the five
-pieces landed, matching the neighboring specifications' status-header style.
+All six pieces are built. Run E02, E05, E06, E10, E11, and E13 and record
+results in a later evaluation report, per
+[the acquisition tool evaluation specification](SPEC-acquisition-tool-evaluation.md).
