@@ -51,8 +51,8 @@ The current specification status is grouped below.
 - Implemented: `SPEC-tor-circuit-recovery.md` and worker details.
 - Partially implemented: acquisition tool evaluation, acquisition fault
   recovery, provenance, console UI, controller controls, download telemetry,
-  reliable acquisition, item details, and queue view.
-- Planned: inventory discovery, console inspection, and console visual style.
+  reliable acquisition, item details, queue view, and console visual style.
+- Planned: inventory discovery and console inspection.
 
 ## Next steps
 

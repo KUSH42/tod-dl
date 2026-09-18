@@ -691,9 +691,16 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
         out against the repeated placeholder text.
         """
         visual = Text()
+        placeholder = "Matching count unavailable"
 
         def append_value(text: str) -> None:
-            visual.append(text, style="dim" if text.lstrip().startswith("?") else None)
+            index = text.find(placeholder)
+            if index == -1:
+                visual.append(text, style="dim" if text.lstrip().startswith("?") else None)
+                return
+            visual.append(text[:index], style="dim" if text[:index].lstrip().startswith("?") else None)
+            visual.append(placeholder, style="dim")
+            visual.append(text[index + len(placeholder):])
 
         for line_number, line in enumerate(output.splitlines()):
             if line in section_labels:
@@ -708,6 +715,10 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             if line_number < len(output.splitlines()) - 1:
                 visual.append("\n")
         return visual
+
+    def retry_status_visual(text: str) -> Text:
+        """Dim a retry status message; a retry countdown value stays default style."""
+        return Text(text, style="dim" if "remaining)" not in text else None)
 
     class ActionConfirmation(ModalScreen[bool]):
         BINDINGS = [("y", "confirm", "Yes"), ("n", "dismiss", "No"),
@@ -1107,13 +1118,14 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
 
         def update_header(self) -> None:
             run = self.app.current
-            self.query_one("#queue-header", Static).update(
+            self.query_one("#queue-header", Static).update(detail_visual(
                 queue_header_text(run.get("run_id"), run["run"].get("selected_count"),
                                   len(self.rows), self.active_filters_label(),
-                                  self.read_at, self.revision))
+                                  self.read_at, self.revision)))
 
         def set_banner(self, text: str) -> None:
-            self.query_one("#queue-banner", Static).update(literal_text(text))
+            style = "bold" if text == "Results changed" else None
+            self.query_one("#queue-banner", Static).update(Text(literal_text(text), style=style))
 
         def reload(self, reset: bool) -> None:
             if reset:
@@ -1195,6 +1207,7 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                 cells = queue_row_cells(row, cooldown_active)
                 if not self.wide:
                     cells = (cells[0], cells[1], cells[2], cells[3], cells[6])
+                cells = cells[:-1] + (retry_status_visual(cells[-1]),)
                 table.add_row(*cells, key=row["item_id"])
             if self.rows and any(row["item_id"] == self.selected_item_id for row in self.rows):
                 index = next(i for i, row in enumerate(self.rows)

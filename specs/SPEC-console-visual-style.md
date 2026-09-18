@@ -1,6 +1,6 @@
 # Specification: console visual style
 
-Status: planned, September 18, 2026. This document collects the label, value,
+Status: partially implemented, September 18, 2026. This document collects the label, value,
 emphasis, and highlight rules for the acquisition console's Textual UI into
 one shared reference. It defines display rules only. It does not authorize a
 source request or an acquisition action.
