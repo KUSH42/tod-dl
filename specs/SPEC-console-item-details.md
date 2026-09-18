@@ -6,7 +6,8 @@ selected item's identity, acquisition state, attempts, and validation results.
 The view supplements the [console UI](SPEC-console-ui.md) and uses the
 [read-only inspection interface](SPEC-console-inspection.md).
 It defines display requirements only. It does not define an acquisition or
-evidence action.
+evidence action. It must render labels, values, headers, and highlights under
+[SPEC-console-visual-style.md](SPEC-console-visual-style.md).
 
 ## Entry and identity
 

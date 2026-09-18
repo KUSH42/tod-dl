@@ -53,7 +53,7 @@ The current specification status is grouped below.
   recovery, provenance, console UI, controller controls, download telemetry,
   and reliable acquisition.
 - Planned: inventory discovery, console inspection, item details, worker
-  details, and queue view.
+  details, queue view, and console visual style.
 
 ## Next steps
 

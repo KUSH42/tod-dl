@@ -4,7 +4,9 @@ Status: implemented, September 17, 2026. This view explains one worker slot and
 the controller's reason for its current activity or wait.
 
 The view supplements the [console UI](SPEC-console-ui.md) and uses the
-[read-only inspection interface](SPEC-console-inspection.md).
+[read-only inspection interface](SPEC-console-inspection.md). It must render
+labels, values, headers, and highlights under
+[SPEC-console-visual-style.md](SPEC-console-visual-style.md).
 
 ## Entry and slot identity
 
