@@ -15,39 +15,43 @@ with every requirement in the related specifications.
 
 ## Remaining work
 
-Finish the acquisition tool evaluation. The local fixture harness and an
-adapter that drives the real per-URL aria2 process configuration are
-available. A second evaluation report
-(`specs/reports/acquisition-tool-evaluation-2026-09-18b.md`) ran 12 of 14
-scenarios: E01, E03, E04, E07, E08, E09, E10, E12, E13, and E14 pass; E05 and
-E06 fail on two distinct, real, confirmed controller gaps. E02 (8 GiB
-interrupted transfer) did not run this session — the deterministic fixture
-generator sustained only ~3.4 MB/s, too slow to finish within the harness's
-600s per-attempt time limit; this is a still-unmeasured generator-throughput
-question, not a controller gap (the `is_incomplete_body_failure()` resume fix
-itself is confirmed working). E11 (five-item run from a larger queue) has no
-harness built yet. The two confirmed gaps:
+The acquisition tool evaluation's local phase is done. The third evaluation
+report (`specs/reports/acquisition-tool-evaluation-2026-09-18c.md`) ran all
+14 scenarios (E01 through E14) against the current per-URL aria2 candidate;
+all 14 pass, and engineering targets (RSS, admission bound, status latency,
+shutdown time) are met. `selection_eligible` is `true`. The selected
+configuration is the current one: one aria2 process per URL through Tor. Do
+not add a long-lived RPC worker; nothing in the report identifies a
+mandatory scheduling, recovery, or resource gap that would justify one.
 
-- **E05/E06 share a root-cause family in `scope_run()`/`reconcile_promotions()`
-  ordering.** `scope_run()` (`src/tod-dl.py`) runs before
-  `reconcile_promotions()` and unconditionally stamps `existing_unverified`
-  on any queued URL whose final path already exists on disk, regardless of
-  its durable status. This pre-empts `reconcile_promotions()`'s dedicated
-  handling of a `promoting`-status row left by a killed supervisor: that
-  branch only ever fires when the crash happens before the final file link
-  exists (E06's `post_validation_intent` failpoint), never after
-  (`post_final_file_creation`, `post_completion_commit`). E05's
-  engine-kill sub-case hits the same bug, plus a second, related one where a
-  fully-completed `--continue=true` retry can leave a stale `.aria2` control
-  file behind that `Downloader.transfer()` misreads as failure despite
-  `ok=True`. See the report's "Remaining gaps" section for the full trace.
+Since the second report, two real bugs were found and fixed:
 
-Rerun E02 and build E11's harness before selecting a configuration. Fix the
-`scope_run()`/`reconcile_promotions()` ordering gap (and the related stale
-`.aria2`-control-file false-failure) before re-running E05/E06. Add a
-long-lived RPC worker only when the results show a mandatory scheduling,
-recovery, or resource gap unrelated to the above. Do not run a source pilot
-until the evaluation selects a configuration.
+- **`scope_run()`/`reconcile_promotions()` ordering and clobber gap
+  (E05/E06).** `scope_run()` was reordered to run after
+  `reconcile_promotions()` (commit `8a873d4`), then a second, distinct part
+  of the same gap was fixed: `scope_run()` unconditionally re-stamped
+  `existing_unverified` on any row whose final file already existed on
+  disk, even when a prior run had already settled that row to a terminal
+  status (`complete`, `review_required`, `excluded`, `unavailable`,
+  `existing_unverified`). Fixed by checking the row's current status first
+  (`SCOPE_RUN_TRACKED_STATUSES`, `src/tod-dl.py`). E05 and E06 both pass now.
+- **Fixture-generator throughput (E02) and a second, distinct generator bug
+  (E10).** Throughput was fixed earlier (commit `3853ab3`, module-level
+  block cache, `shake_256`). This session found that `_generate_block`
+  still always requested a full 1 MiB digest per block regardless of a
+  fixture's actual length — E10's 1,000,000 32-byte fixtures made
+  `Fixture.create` alone request roughly 1,000,000 × 1 MiB of digest output,
+  so the scenario never finished constructing its fixture list. Fixed by
+  bounding the digest length to what each block actually needs.
+
+Two gaps remain open, neither blocking selection under the specification's
+stated gate:
+
+- E08's HTML-200-error and post-hash-mismatch sub-cases have no scenario
+  yet; only the short-body sub-case ran.
+- The source pilot (at most five URLs, separate state, verified SOCKS
+  routing evidence) has not run. Do not treat the candidate as validated for
+  production use until it does.
 
 Complete the reliable-acquisition contract after tool selection. The remaining
 work includes full engine lifecycle checks, bounded large-queue admission,
@@ -90,7 +94,8 @@ The current specification status is grouped below.
 
 ## Next steps
 
-Fix the `scope_run()`/`reconcile_promotions()` ordering gap behind E05 and
-E06's failures, measure and speed up E02's fixture generator, build E11's
-harness, and rerun all 14 scenarios. Record the selected engine
-configuration before you expand acquisition behavior.
+Add E08's HTML-200-error and post-hash-mismatch sub-cases, then run the
+separately scheduled source pilot (at most five URLs, separate state,
+verified SOCKS routing evidence) before treating the aria2 candidate as
+validated for production use. Do not run the pilot without an explicit
+instruction to do so.

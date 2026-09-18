@@ -1,10 +1,13 @@
 # Specification: acquisition tool evaluation
 
-Status: partially implemented, September 16, 2026. The local fixture harness
+Status: partially implemented, September 18, 2026. The local fixture harness
 implements deterministic content, immutable manifests, scripted HTTP behavior,
-event logs, and structured reports. No candidate has run E01 through E14.
-This specification defines how you select an existing transfer tool before
-expanding custom code. It does not authorize a production download.
+event logs, and structured reports. E01 through E14 ran against the current
+per-URL aria2 candidate; all 14 pass and the engineering targets are met
+(`specs/reports/acquisition-tool-evaluation-2026-09-18c.md`). The separately
+scheduled source pilot required before this specification is complete has
+not run. This specification defines how you select an existing transfer tool
+before expanding custom code. It does not authorize a production download.
 
 ## Outcome and scope
 

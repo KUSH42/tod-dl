@@ -52,10 +52,10 @@ two real gaps (E08, E12), both since fixed
 | E08 | **pass** | Block automatic promotion; retain review candidate. | Short body correctly reaches `review_required` after a second, no-growth attempt (see `is_incomplete_body_failure()` fix, above). Only the short-body sub-case ran this session, not the HTML-200-error or post-hash-mismatch sub-cases. |
 | E09 | **pass** | Stop admission; report local storage failure. | `--reserve-bytes` set above actual free space stopped admission before any transfer request. |
 | E10 | **pass** | Meet resource/responsiveness targets; do not request every URL. | Peak RSS 219 MB (target < 512 MB), max status latency 0.00s (target < 2s), shutdown 0.0s (target < 30s), 54 of 1,000,000 rows requested. |
+| E11 | not run | Five-item run selected from a larger queue; only those transfer, including after retries/restart. | No harness built yet. |
 | E12 | **pass** | Stable mapping; explicit rejection/collision reports; enforced source scope. | Duplicate URL and unsafe traversal path both rejected before queueing with an explicit `[queue-rejected]` report; Unicode name transferred correctly. (The harness's own E12 check was stale from before the rejection-report fix landed and always returned "fail" regardless of outcome; fixed this session to actually check for the report.) |
 | E13 | **pass** | Refill idle slots promptly; the large file does not block unrelated work. | All small files and the due retry completed; retry refilled promptly; small files completed before the large file. Needed two harness fixes first (below). |
 | E14 | **pass** | Refuse source traffic when Tor is absent; no direct fallback. | Real Tor control-port preflight failed immediately on a deliberately unreachable control address; zero fixture requests. |
-| E11 | not run | Five-item run selected from a larger queue; only those transfer, including after retries/restart. | No harness built yet. |
 
 ## Remaining gaps
 
