@@ -183,6 +183,7 @@ Display phases refine durable states; they do not redefine completion.
 | Attempt ceiling reached | Exhausted; retain the underlying recorded status. |
 | Complete | Complete only after the durable completion commit. |
 | Existing unverified, review required, unavailable | Separate unresolved buckets. The `unavailable` bucket's durable-status trigger, and its resume transition to `active`, `review_required`, or `queued`, are defined in [SPEC-reliable-acquisition.md](SPEC-reliable-acquisition.md), not here. |
+| Excluded | Separate unresolved bucket for an operator-excluded item. Its durable-status trigger is the controller's `exclude_item` action, defined in [SPEC-controller-control-ui.md](SPEC-controller-control-ui.md) and [SPEC-reliable-acquisition.md](SPEC-reliable-acquisition.md); this release defines no transition back to another bucket. |
 | Unrecognized legacy state | Unknown state, visible and unresolved. |
 
 Every selected item belongs to exactly one display bucket. Their sum must

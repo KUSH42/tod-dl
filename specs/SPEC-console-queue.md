@@ -37,8 +37,8 @@ The summary must use published run totals for retained bytes, known remaining
 bytes, and unknown-size items. Label these values **Whole selected run**.
 Filtered rows must not change those totals. Every non-complete display bucket
 must remain visible as unfinished or unresolved work, including
-`review_required`, `unavailable`, `exhausted`, `existing_unverified`, and
-`unknown`.
+`review_required`, `unavailable`, `exhausted`, `existing_unverified`,
+`excluded`, and `unknown`.
 
 At 80 columns, retain rank, basename, short item ID, display bucket, and
 retry deadline. Move phase and received/total bytes into item details. Below
@@ -49,7 +49,8 @@ labels visible. Refresh and resize must preserve selection by item ID.
 
 The state filter must support **All** (wire value `bucket=all`) and each
 telemetry display bucket: `queued`, `busy`, `retry`, `exhausted`, `complete`,
-`existing_unverified`, `review_required`, `unavailable`, and `unknown`.
+`existing_unverified`, `review_required`, `unavailable`, `excluded`, and
+`unknown`.
 The service must use the same state-to-bucket mapping as snapshot counts.
 [SPEC-download-telemetry.md](SPEC-download-telemetry.md) owns the durable
 status values that map to `unavailable`; this view must not define them.
@@ -206,7 +207,46 @@ Selection and filtering must never submit a retry command. The existing `r`
 control must retain the controller-confirmed scope defined in
 [SPEC-controller-control-ui.md](SPEC-controller-control-ui.md). A filtered queue must not imply that a
 run-scoped action applies only to visible rows.
-Row-scoped retry, reordering, removal, export, and queue editing are planned.
+Row-scoped retry, reordering, removal, export, and queue editing are planned,
+scoped as follows.
+
+Row-scoped retry sends the existing `retry_now` action with an `item_ids`
+parameter limited to the focused or multi-selected rows, instead of every
+selected retryable item. The confirmation modal must show the row-scoped
+count, not the run-wide count, per the controller-confirmation requirement in
+[SPEC-controller-control-ui.md](SPEC-controller-control-ui.md).
+
+Reordering sends the new `set_item_priority` action. It sets a
+scheduler-preference hint distinct from queue rank; it must not renumber
+rank or change the ranks shown in this view, since rank must retain
+controller values per "Scope and layout" above. The queue must show priority
+as a separate indicator, not by moving rows within a page.
+
+Removal sends the new `exclude_item` action. It moves selected items to the
+`excluded` durable state and display bucket, stopping future admission and
+retry for those items. [SPEC-reliable-acquisition.md](SPEC-reliable-acquisition.md)
+owns that state's trigger and terminality; this view must not redefine it.
+Exclusion must not remove the item from the selected set's audit history or
+renumber remaining ranks; the immutable selected set stays the record of
+what the run originally selected.
+
+Queue editing sends the new `set_retry_cooldown` action, scoped to adjusting
+a selected item's retry-cooldown override within controller-defined bounds.
+It must not bypass the existing global or origin cooldown, and it must not
+accept an operator-supplied destination path or any other manifest field.
+
+Export is read-only and requires no controller action: it writes the
+currently loaded page, or every row matching the active filters across a
+full paginated scan, to a local file the operator chooses. It must not
+retry, reorder, exclude, or edit any item, and it must not bypass the rule
+above against source URLs and absolute private paths appearing in rows.
+
+Row-scoped retry, reordering, removal, and queue editing each follow the
+same controller-confirmation, nonce, and audit pattern as `retry_now`,
+scoped by `item_ids` to the rows the operator explicitly selected. A
+filtered or paginated view must not silently apply a row-scoped action to
+hidden rows: the UI must send only the explicitly selected item IDs, never
+"every row matching the current filter."
 
 ## Acceptance criteria
 
@@ -224,6 +264,12 @@ Tests must use temporary manifests and synthetic pages, without source access.
 - Verify details return, selection retention, keyboard focus, and resizing.
 - Verify retry countdowns do not imply admission or trigger commands.
 - Verify filters do not change selection, totals, or command scope.
+- Verify row-scoped retry, reordering, removal, and queue editing each
+  require controller confirmation, scope only the explicitly selected item
+  IDs, never apply to filtered-but-hidden rows, and leave queue rank and
+  the selected set's audit history unchanged.
+- Verify export contains only loaded or filter-matching rows, excludes
+  source URLs and absolute private paths, and triggers no controller action.
 - Verify the Visual style rules in monochrome: the active tab and the
   focused row remain identifiable by their reverse-video highlight alone,
   dim labels and retry-status text stay distinguishable from default-style

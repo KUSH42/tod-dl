@@ -33,8 +33,9 @@ Select **No**, press `n`, or press Escape to cancel. The controller accepts the
 request only while its 60-second, single-use confirmation nonce remains valid.
 
 > **Warning:** The UI must never execute a shell command, edit SQLite directly,
-> signal a process by PID, overwrite a final, alter a queue, change immutable
-> selection settings, or accept an operator-supplied destination path.
+> signal a process by PID, overwrite a final, renumber queue rank, remove an
+> item from the immutable selected set's audit history, or accept an
+> operator-supplied destination path.
 
 ## Local command transport and authentication
 
@@ -76,10 +77,13 @@ precondition at execution time; the UI state is advisory and can be stale.
 | `prepare_confirmation` | Returns one confirmation nonce and authoritative action scope. | None. |
 | `pause_admission` | Stops new admissions after the current scheduler step. Active transfers continue. | Required. |
 | `resume_admission` | Reopens admission only for the immutable selected run. | Required. |
-| `retry_now` | Makes selected retryable items eligible now; it does not expand selection. | Required. |
+| `retry_now` | Makes selected retryable items eligible now; it does not expand selection. Accepts an optional `item_ids` scope; when present, it applies only to those items instead of every selected retryable item. | Required. |
 | `renew_tor_circuits` | Requests `NEWNYM` subject to the configured rate limit. | Required. |
 | `drain_and_stop` | Stops admission and exits after active validation and promotion reach durable states. | Required. |
 | `checkpoint_stop` | Requests bounded checkpointing, terminates active engines safely, and exits. | Required. |
+| `set_item_priority` | Sets a scheduler-preference hint on selected items. It does not change queue rank, manifest order, or pagination order. | Required. |
+| `exclude_item` | Moves selected items to the `excluded` durable state, defined in [SPEC-reliable-acquisition.md](SPEC-reliable-acquisition.md), stopping future admission and retry. It does not remove the item from the selected set's audit history or renumber remaining ranks. | Required. |
+| `set_retry_cooldown` | Sets a per-item retry-cooldown override within controller-defined bounds. It does not bypass the existing global or origin cooldown. | Required. |
 
 Before any mutating action, the UI asks the controller for an action-specific
 confirmation nonce and displays the authoritative scope, expected effect, and
@@ -92,6 +96,16 @@ outcome, state revision, and UTC timestamp. It also appends a bounded control
 transition and emits a sanitized telemetry event after acceptance. It records
 only selected `retry_wait` and `failed` items as immediately eligible; it
 doesn't alter queue inputs, selection, final evidence, or review items.
+
+For `set_item_priority`, `exclude_item`, and `set_retry_cooldown`, the
+controller records the same durable audit fields as `retry_now`: request ID,
+action, outcome, state revision, and UTC timestamp, plus a bounded control
+transition and a sanitized telemetry event. Each action requires `item_ids`
+and validates every ID against the immutable selected set at execution time;
+an ID outside that set, or an item whose current state makes the action
+inapplicable, is rejected per item, and the response reports the per-item
+outcome. None of the three changes queue rank, manifest order, the selected
+set's membership, or an item's destination path.
 
 Automatic safe-path remediation remains governed by
 [the telemetry specification](SPEC-download-telemetry.md). The command channel
@@ -164,6 +178,12 @@ not contact a source, Tor, or aria2.
   controller-side precondition checks, and audit records for every outcome.
 - Verify each action cannot alter queue inputs, immutable selection, final
   evidence, or an unapproved safe-path review item.
+- Verify `exclude_item` rejects an item ID outside the confirmed selected set,
+  moves the item to the terminal `excluded` state, and cannot be reversed or
+  resumed by any other action. Verify `set_item_priority` and
+  `set_retry_cooldown` reject an out-of-bounds value, never renumber rank or
+  alter another item's cooldown, and produce an audit record for every
+  outcome.
 - Verify a 30-FPS render loop reads snapshots and control state no more than
   twice per second, drops late frames, and keeps input latency below 150 ms at
   the 95th percentile on documented hardware.

@@ -109,14 +109,29 @@ long` text) is the value it stores for the promotion-failure cause below.
 | `review_required` — promotion blocked by a filesystem name-length failure (`ENAMETOOLONG`) | Retain the value. Entering this state is defined in Validation and finalization below, not the outage/retry table. The failure is a destination-naming problem, not a representation change; the staged bytes remain valid, so nothing needs clearing. |
 | `unavailable`, with a staging generation already recorded | Retain the value. A routine recheck alone never changes the staging generation. The resume transition below states what happens once the item becomes available again. |
 | `unavailable`, with no staging generation recorded | The field has no value to clear, since it was never staged. A later recheck that admits the item as fresh work follows the same admission rule as any newly selected item, in Selection and resource controls below. |
+| `excluded` | Retain the value. Exclusion is an operator decision, not a new finding about the item; any prior categorized error stays informational. |
 
 No other terminal state or cause clears the field.
 
 Persist transitions through `queued`, `active`, `retry_wait`, `validating`,
 `promoting`, and `complete`. Also support `existing_unverified`,
-`review_required`, and `unavailable`. Run-level states include storage pause,
-source cooldown, stopped, and finished. Persist state changes transactionally;
-restart reconciliation must handle every interrupted transition.
+`review_required`, `unavailable`, and `excluded`. Run-level states include
+storage pause, source cooldown, stopped, and finished. Persist state changes
+transactionally; restart reconciliation must handle every interrupted
+transition.
+
+`excluded` is entered only through the controller's confirmed `exclude_item`
+action, defined in
+[SPEC-controller-control-ui.md](SPEC-controller-control-ui.md); no outage,
+retry, validation, or promotion outcome enters it automatically. It is
+reachable directly from `queued`, `active`, `retry_wait`, `review_required`,
+or `unavailable`, and it preserves whatever staging generation and digest
+were already recorded. It is terminal: no automatic recheck, retry, or
+remediation resumes an excluded item, and this release defines no controller
+action that returns one to active work. Unlike `review_required`, entry
+requires no detected problem; unlike the attempt-ceiling outcome, it does
+not depend on retry count. Excluding an item does not alter the immutable
+selected set, the recorded queue rank, or any other item's state.
 
 ## Selection and resource controls
 
@@ -333,6 +348,11 @@ cannot be established, stop safely with state intact. The old RFC's curl
 rollback instruction is not an operational rollback plan.
 
 ## Acceptance and next steps
+
+Verify that `exclude_item` moves an item to `excluded` from each reachable
+source state, retains its last categorized error value, leaves the selected
+set, queue rank, and every other item's state unchanged, and that no outage,
+retry, validation, or promotion path enters `excluded` automatically.
 
 All E01 through E14 scenarios in the evaluation must pass for the selected
 implementation. Record results in a dated report, including unresolved source
