@@ -447,8 +447,10 @@ class InspectionServer:
                            "sample_at": runtime.get("sample_at"),
                            "sample_age_s": runtime.get("sample_age_s")},
                 "bytes": {"received": byte_count, "resume_baseline": runtime.get("resume_baseline_bytes"),
-                          "transfer_total": runtime.get("total_bytes"),
-                          "transfer_total_source": runtime.get("total_source"),
+                          "transfer_total": runtime.get("total_bytes") if runtime.get("total_bytes") is not None
+                                             else (byte_count if status == "complete" else None),
+                          "transfer_total_source": runtime.get("total_source") if runtime.get("total_bytes") is not None
+                                                    else ("completed" if status == "complete" else None),
                           "trusted_expected": None, "inventory_size": inventory_size,
                           "retained_item_bytes": byte_count,
                           "committed_completion_bytes": byte_count if status == "complete" else None},
@@ -572,11 +574,14 @@ class InspectionServer:
                         and query not in item_id):
                     continue
                 sample = runtime.get(url)
+                total_bytes = sample.get("total_bytes") if sample else None
+                if total_bytes is None and row_bucket == "complete":
+                    total_bytes = received
                 output.append({"item_id": item_id, "queue_rank": rank,
                                "basename": Path(logical).name, "bucket": row_bucket,
                                "phase": sample.get("phase") if sample else None,
                                "received_bytes": received,
-                               "total_bytes": sample.get("total_bytes") if sample else None,
+                               "total_bytes": total_bytes,
                                "retry_at": retry_at, "priority": priority})
                 if len(output) == size:
                     filled = True
