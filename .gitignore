@@ -16,3 +16,5 @@
 *.pyc
 # Backup copies of case-specific inventory policies.
 policy-ber-*.json.bak
+# Case-specific inventory policies; never store them in Git.
+/inventory-policies/
