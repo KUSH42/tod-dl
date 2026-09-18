@@ -1235,6 +1235,8 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             self.read_at: Any = None
             self.revision: Any = None
             self.selected_item_id: str | None = None
+            self.marquee_item_id: str | None = None
+            self.marquee_started_at: float = 0.0
             self.request_active = False
             self.export_active = False
             self.export_path: str | None = None
@@ -1441,14 +1443,19 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
         def animate_marquee(self) -> None:
             """Scroll the selected row's basename in place while it stays long."""
             if not self.selected_item_id:
+                self.marquee_item_id = None
                 return
+            if self.selected_item_id != self.marquee_item_id:
+                self.marquee_item_id = self.selected_item_id
+                self.marquee_started_at = time.monotonic()
             row = next((row for row in self.rows if row["item_id"] == self.selected_item_id),
                       None)
             if row is None or len(literal_text(row.get("basename"))) <= 32:
                 return
+            offset = int((time.monotonic() - self.marquee_started_at) * 3)
             self.query_one("#queue-table", DataTable).update_cell(
                 self.selected_item_id, "basename",
-                marquee_filename(row.get("basename"), int(time.monotonic() * 3), width=32),
+                marquee_filename(row.get("basename"), offset, width=32),
                 update_width=False)
 
         def action_focus_search(self) -> None:
@@ -1864,6 +1871,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             self.last_disk_signature: str | None = None
             self.last_event_signature: str | None = None
             self.rendered_rows: dict[str, tuple[str, ...]] = {}
+            self.marquee_state: dict[str, tuple[Any, float]] = {}
             self.last_control_poll = 0.0
             self.control_state: dict[str, Any] | None = None
             self.control_error: str | None = None
@@ -1918,6 +1926,17 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
                 self.call_from_thread(finish)
             threading.Thread(target=worker, name="monitor-inspection", daemon=True).start()
 
+        def worker_marquee_text(self, worker_id: Any, item_id: Any, basename: Any,
+                                width: int) -> str:
+            """Scroll a worker's basename from its start, not from process uptime."""
+            row_key = str(worker_id)
+            previous_item_id, started_at = self.marquee_state.get(row_key, (None, 0.0))
+            if item_id != previous_item_id:
+                started_at = time.monotonic()
+                self.marquee_state[row_key] = (item_id, started_at)
+            offset = int((time.monotonic() - started_at) * 3)
+            return marquee_filename(basename, offset, width=width)
+
         def populate(self, current: dict[str, Any], force: bool = False) -> None:
             if not self.query("#summary"):
                 # A queued render tick can still fire while the app is
@@ -1950,7 +1969,8 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
                 item_id = worker.get("item_id")
                 values = (
                     str(worker.get("worker_id", "?")),
-                    marquee_filename(worker.get("basename"), int(time.monotonic() * 3), width=36)
+                    self.worker_marquee_text(worker.get("worker_id"), item_id,
+                                             worker.get("basename"), width=36)
                     if item_id else "idle",
                     worker_phase_label(worker, current),
                     f"{format_bytes(worker.get('received_bytes'))} / "
