@@ -25,25 +25,16 @@ Complete the reliable-acquisition contract after tool selection. The remaining
 work includes full engine lifecycle checks, bounded large-queue admission,
 representation-change handling, migration support, and acceptance evidence.
 
+Complete the provenance and fault-recovery acceptance suites. Compare the
+existing implementation with both specifications. Add each missing fixture
+case before you claim complete compliance.
+
 Complete telemetry integration. Use the read-only aria2 RPC interface for exact
 live transfer counters. Add tests for stale samples, snapshot failures, and all
 required metric-quality states.
 
 Complete the monitor and control UI. Add the planned dashboard and review
-views. [Item details](SPEC-console-item-details.md) is implemented,
-including arrow-key attempt selection. Every command in the
-[controller command channel](SPEC-controller-control-ui.md), including
-pause, resume, drain, and checkpoint-stop, has its confirmation, audit,
-telemetry event, and headless-Textual interaction test; the row-scoped
-[queue view](SPEC-console-queue.md) actions (`retry_now`, `exclude_item`,
-`set_item_priority`, `set_retry_cooldown`) now have headless-Textual
-interaction tests in addition to their controller-side contract tests. The
-queue view's million-item scale test remains a scaled-down CI stand-in; a
-literal million-row run needs a separate, environment-sized benchmark.
-
-Complete the provenance and fault-recovery acceptance suites. Compare the
-existing implementation with both specifications. Add each missing fixture
-case before you claim complete compliance.
+views. 
 
 Add inventory discovery last. Implement local snapshot parsing, reproducible
 manifest generation, and safe queue export. Add bounded network refresh and
