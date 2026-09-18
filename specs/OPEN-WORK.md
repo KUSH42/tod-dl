@@ -30,12 +30,7 @@ live transfer counters. Add tests for stale samples, snapshot failures, and all
 required metric-quality states.
 
 Complete the monitor and control UI. Add the planned dashboard and review
-views. [Read-only inspection](SPEC-console-inspection.md) now has acceptance
-tests for peer rejection, the concurrent-query bound, connection timeouts,
-request and response byte bounds, stale-response rejection, durable-state
-immutability, the absence of SQLite in the monitor and the snapshot
-publisher, old-versus-final snapshot labels, and a generic secret scan.
-Finish the remaining contract and headless UI test gaps in
+views. Finish the remaining contract and headless UI test gaps in
 [item details](SPEC-console-item-details.md), the
 [queue view](SPEC-console-queue.md), and the
 [controller command channel](SPEC-controller-control-ui.md). Every command
