@@ -37,11 +37,12 @@ class EvaluationError(ValueError):
 
 
 @lru_cache(maxsize=8)
-def _generate_block(seed: bytes, index: int) -> bytes:
+def _generate_block(seed: bytes, index: int, size: int) -> bytes:
     """Derive one deterministic block. Cached because callers read sequentially
     and each Fixture.generator access builds a fresh DeterministicBytes, so an
-    instance-level cache would never hit."""
-    return hashlib.shake_256(seed + index.to_bytes(16, "big")).digest(GENERATOR_BLOCK_SIZE)
+    instance-level cache would never hit. `size` is bounded by the fixture's
+    own length, so a short fixture never pays for a full 1 MiB digest."""
+    return hashlib.shake_256(seed + index.to_bytes(16, "big")).digest(size)
 
 
 class DeterministicBytes:
@@ -56,7 +57,8 @@ class DeterministicBytes:
         self.length = length
 
     def _block(self, index: int) -> bytes:
-        return _generate_block(self.seed, index)
+        size = min(GENERATOR_BLOCK_SIZE, self.length - index * GENERATOR_BLOCK_SIZE)
+        return _generate_block(self.seed, index, size)
 
     def read(self, offset: int, length: int) -> bytes:
         """Return a bounded byte range from the generated representation."""

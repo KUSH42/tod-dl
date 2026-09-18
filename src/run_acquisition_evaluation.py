@@ -394,11 +394,14 @@ def e02_large_file_interrupted_resume(base: Path, torsocks_conf: Path) -> Scenar
     rows = read_downloads(state)
     row = next(iter(rows.values()), None)
     logged = json.loads(events.read_text())["events"] if events.exists() else []
-    second_range = next((e["range"] for e in logged[1:] if e["fixture"] == body.name), None)
+    fixture_events = [e for e in logged if e["fixture"] == body.name][1:]
+    resumed = any(e["range"] and not e["range"].startswith("bytes=0-") for e in fixture_events)
+    full_restart = any((not e["range"] or e["range"].startswith("bytes=0-"))
+                       and e["transmitted_bytes"] > 1024 * 1024 for e in fixture_events)
     detail = (f"run1_exit={result1.returncode} run2_exit={result2.returncode} row={row} "
-             f"second_request_range={second_range}")
+             f"later_requests={fixture_events}")
     if (row and row["status"] == "complete" and row["sha256"] == body.sha256
-            and second_range and not second_range.startswith("bytes=0-")):
+            and resumed and not full_restart):
         return ScenarioResult("E02", "pass", "E02: resume a large interrupted transfer",
                               f"resumed with a nonzero Range and a matching digest, no full "
                               f"restart from byte 0 | {detail}", str(events))
