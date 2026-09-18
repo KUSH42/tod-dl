@@ -153,9 +153,10 @@ class MonitorTests(unittest.TestCase):
                 server.stop()
 
     def test_inspection_endpoint_rejects_a_connection_from_another_peer_uid(self):
-        # A raw socket read is used, not inspection_request; see the
-        # over-sixteen-KiB test for why its client-side read is unreliable
-        # for a response that a fast-closing peer produced.
+        # A raw socket read is used, not inspection_request, because this
+        # early rejection carries request_id: null and inspection_request
+        # treats any reply whose request_id does not match the one it sent
+        # as a malformed response.
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             database = _minimal_database(root)
@@ -213,8 +214,15 @@ class MonitorTests(unittest.TestCase):
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
                     connection.settimeout(5)
                     connection.connect(str(descriptor["socket_path"]))
-                    reply = connection.recv(4096)
-                self.assertEqual(reply, b"")
+                    buffer = bytearray()
+                    while b"\n" not in buffer:
+                        chunk = connection.recv(4096)
+                        if not chunk:
+                            break
+                        buffer.extend(chunk)
+                response = json.loads(bytes(buffer).split(b"\n")[0])
+                self.assertEqual(response["status"], "unavailable")
+                self.assertIn("connection", response["reason"])
                 # The server thread must still accept later connections.
                 page = inspection_request(root, "run-one", "list_queue")
                 self.assertEqual(page["data"]["rows"], [])
@@ -222,10 +230,9 @@ class MonitorTests(unittest.TestCase):
                 server.stop()
 
     def test_inspection_endpoint_rejects_a_request_over_sixteen_kib(self):
-        # A raw socket read is used here, not inspection_request, because
-        # its client-side read (also _read_line) races an unrelated
-        # MSG_PEEK-after-newline check against the server's close and can
-        # surface as ECONNRESET instead of the response body.
+        # A raw socket read is used here, not inspection_request; see
+        # test_inspection_endpoint_rejects_a_connection_from_another_peer_uid
+        # for why.
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             database = _minimal_database(root)

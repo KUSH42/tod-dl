@@ -241,6 +241,17 @@ class InspectionServer:
                 connection.sendall(encoded)
             except OSError:
                 pass
+            self._drain(connection)
+
+    def _drain(self, connection: socket.socket) -> None:
+        """Discard unread bytes so the kernel closes with a FIN, not a
+        RST that would corrupt the response already sent to the peer."""
+        connection.settimeout(0.05)
+        try:
+            while connection.recv(65536):
+                pass
+        except OSError:
+            pass
 
     def _error(self, request_id: str | None, status: str, reason: str) -> dict[str, Any]:
         return {"request_id": request_id, "status": status,
@@ -288,6 +299,8 @@ class InspectionServer:
             return self._error(request_id, "invalid_request", str(exc))
         except sqlite3.OperationalError as exc:
             return self._error(request_id, "unavailable", f"durable read unavailable: {exc}")
+        except OSError as exc:
+            return self._error(request_id, "unavailable", f"connection error: {exc}")
 
     def _validate_request(self, request: dict[str, Any]) -> None:
         required = {"protocol_version", "request_id", "run_id", "session_id", "operation", "parameters"}
