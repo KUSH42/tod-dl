@@ -400,6 +400,84 @@ def is_unavailable_failure(error: str) -> bool:
     return "RESOURCE NOT FOUND" in upper or bool(re.search(r"STATUS=(404|410)\b", upper))
 
 
+def is_access_denied_failure(error: str) -> bool:
+    """Identify an HTTP 401 or 403 from aria2's error log line.
+
+    aria2 reports 401 as errorCode=24 "Authorization failed". It reports 403
+    as errorCode=22 with "status=403" in the message.
+    """
+    upper = error.upper()
+    return "AUTHORIZATION FAILED" in upper or bool(re.search(r"STATUS=(401|403)\b", upper))
+
+
+NO_RESPONSE_FIELDS = {
+    "final_url": None, "redirect_chain": [], "http_status": None,
+    "response_content_length": None, "response_content_range": None,
+    "response_content_type": None, "response_etag": None, "response_last_modified": None,
+}
+RESPONSE_HEADER_FIELDS = {
+    "content-length": "response_content_length", "content-range": "response_content_range",
+    "content-type": "response_content_type", "etag": "response_etag",
+    "last-modified": "response_last_modified",
+}
+
+
+def parse_aria2_response_log(text: str, source_url: str) -> dict:
+    """Extract the last HTTP response and the redirect path from an aria2 info log.
+
+    Returns an empty dict when the log holds no response. Redirect URLs with
+    user-info credentials are never returned; the URL fields stay null instead.
+    """
+    urls = [source_url]
+    response = None
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line.endswith("Response received:"):
+            status_line = lines[index + 1] if index + 1 < len(lines) else ""
+            headers: dict[str, str] = {}
+            index += 2
+            while index < len(lines) and lines[index].strip():
+                name, separator, value = lines[index].partition(":")
+                if separator:
+                    headers.setdefault(name.strip().lower(), value.strip())
+                index += 1
+            match = re.match(r"HTTP/\d(?:\.\d)? (\d{3})\b", status_line)
+            if match:
+                response = (int(match.group(1)), headers)
+            continue
+        redirect = re.search(r"- Redirecting to (\S+)$", line)
+        if redirect:
+            urls.append(redirect.group(1))
+        index += 1
+    if response is None:
+        return {}
+    status, headers = response
+    fields = {"http_status": status if 100 <= status <= 599 else None}
+    for header, field in RESPONSE_HEADER_FIELDS.items():
+        fields[field] = headers.get(header)
+    credentialed = any(parts.username is not None or parts.password is not None
+                       for parts in map(urlsplit, urls))
+    fields["final_url"] = None if credentialed else urls[-1]
+    fields["redirect_chain"] = [] if credentialed else urls[1:-1]
+    return fields
+
+
+def expected_size_from_response(response: dict) -> int | None:
+    """Return the exact full-body size a response announced, if it announced one."""
+    status = response.get("http_status")
+    length = response.get("response_content_length")
+    if status == 200 and isinstance(length, str) and length.isdecimal():
+        return int(length)
+    content_range = response.get("response_content_range")
+    if status == 206 and isinstance(content_range, str):
+        match = re.fullmatch(r"bytes \d+-\d+/(\d+)", content_range.strip())
+        if match:
+            return int(match.group(1))
+    return None
+
+
 def is_disk_full_failure(error: str) -> bool:
     """Identify a local ENOSPC surfaced through aria2's error log line.
 
@@ -660,6 +738,8 @@ class Downloader:
         self.active: dict[str, Path] = {}
         self.worker_ids: dict[str, int] = {}
         self.active_attempts: dict[str, int] = {}
+        self.attempt_responses: dict[str, dict] = {}
+        self.resume_confirmed: set[str] = set()
         self.telemetry: TelemetryPublisher | None = None
         self.projection: TelemetryStateProjection | None = None
         self.cooldown_lock = threading.Lock()
@@ -711,11 +791,11 @@ class Downloader:
         self.provenance_event(
             "attempt_finished", item_id=self.item_id(url), source_url=url,
             attempt_number=number, request_started_at=started_at,
-            request_finished_at=utc_now(), final_url=None, redirect_chain=[],
-            http_status=None, outcome=outcome, response_content_length=None,
-            response_content_range=None, response_content_type=None,
-            response_etag=None, response_last_modified=None,
+            request_finished_at=utc_now(), outcome=outcome,
+            **{**NO_RESPONSE_FIELDS, **self.attempt_responses.get(url, {})},
         )
+        if outcome != "success":
+            self.attempt_responses.pop(url, None)
         attempt_id = hashlib.sha256(
             f"{self.run_id}:{url}:{number}".encode("utf-8")).hexdigest()
         with self.db_lock:
@@ -736,10 +816,25 @@ class Downloader:
                        (self.run_id, url, number, attempt_id, started_at))
             db.commit()
 
-    def finalized_event(self, url: str, logical: str, stored: str,
+    def finalized_event(self, db: sqlite3.Connection, url: str, logical: str, stored: str,
                         byte_count: int, sha256: str,
                         expected_sha256: str | None = None) -> None:
         unavailable = {"available": False, "compared": False, "value": None}
+        response = self.attempt_responses.pop(url, {})
+        resume_confirmed = url in self.resume_confirmed
+        self.resume_confirmed.discard(url)
+        with self.db_lock:
+            row = db.execute("SELECT etag, last_modified FROM downloads WHERE url=?",
+                             (url,)).fetchone()
+        etag, last_modified = row if row else (None, None)
+        etag = etag or response.get("response_etag")
+        last_modified = last_modified or response.get("response_last_modified")
+        expected_size = expected_size_from_response(response)
+
+        def validator(value, compared=False):
+            if value is None:
+                return unavailable
+            return {"available": True, "compared": compared, "value": value}
         expected_checksum = (
             {"available": True, "compared": True, "value": expected_sha256}
             if expected_sha256 else unavailable
@@ -748,8 +843,10 @@ class Downloader:
             "finalized", item_id=self.item_id(url), source_url=url,
             logical_relative_path=logical, final_relative_path=stored,
             byte_count=byte_count, sha256=sha256, validation_method_version="1",
-            finalized_at=utc_now(), expected_size=unavailable,
-            expected_checksum=expected_checksum, etag=unavailable, last_modified=unavailable,
+            finalized_at=utc_now(), expected_size=validator(expected_size),
+            expected_checksum=expected_checksum,
+            etag=validator(etag, compared=resume_confirmed),
+            last_modified=validator(last_modified),
         )
 
     def candidate_event(self, url: str, staging: Path, candidate: Path | None,
@@ -1650,7 +1747,7 @@ class Downloader:
                             sha256=digest, bytes=byte_count,
                             last_error="checksum mismatch", review_code="checksum_mismatch")
             return
-        self.finalized_event(url, logical, stored, byte_count, digest, expected_sha256)
+        self.finalized_event(db, url, logical, stored, byte_count, digest, expected_sha256)
         self.transition(db, url, "complete", "final already exists and verified",
                         bytes=byte_count, sha256=digest)
 
@@ -1935,7 +2032,8 @@ class Downloader:
                                 remediation_outcome="manual_error")
                 self.remediation_event("warning", "safe-path remediation requires manual review", url)
                 continue
-            self.finalized_event(url, relative_text, stored.as_posix(), target.stat().st_size, digest)
+            self.finalized_event(db, url, relative_text, stored.as_posix(), target.stat().st_size,
+                                 digest)
             self.transition(db, url, "complete", "automatic safe-path remediation complete",
                             bytes=target.stat().st_size, sha256=digest,
                             remediation_outcome="complete",
@@ -2185,10 +2283,30 @@ class Downloader:
         self.clear_transfer_telemetry(url)
         print(f"[review] {rel}: {detail}", flush=True)
 
+    def capture_response(self, url: str, response_log: Path) -> None:
+        """Keep the parsed HTTP response of one attempt, then delete the raw log.
+
+        The raw log holds request and response headers, which may carry
+        cookies. Only the fields the provenance schema names leave this method.
+        """
+        text = ""
+        try:
+            text = response_log.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            # no log means no response evidence; the attempt records null fields
+            pass
+        try:
+            response_log.unlink(missing_ok=True)
+        except OSError:
+            # the raw log stays on disk under the private run directory
+            pass
+        self.attempt_responses[url] = parse_aria2_response_log(text, url)
+
     def run_aria2(self, url: str, staging: Path, attempt: int) -> tuple[bool, str]:
         staging.parent.mkdir(parents=True, exist_ok=True)
         name = hashlib.sha256(url.encode()).hexdigest()[:12]
         log_path = self.run_dir / f"aria2-{name}-{attempt}.log"
+        response_log = self.run_dir / f"aria2-{name}-{attempt}.response.log"
         rpc_port = allocate_loopback_port() if getattr(self.args, "aria2_rpc", False) else None
         rpc_secret = uuid.uuid4().hex if rpc_port else None
         command = [
@@ -2198,7 +2316,8 @@ class Downloader:
             "--max-connection-per-server=1", "--file-allocation=none", "--max-tries=1",
             "--async-dns=false",
             f"--connect-timeout={self.args.connect_timeout}",
-            f"--timeout={self.args.timeout}", url,
+            f"--timeout={self.args.timeout}", f"--log={response_log}",
+            "--log-level=info", url,
         ]
         if rpc_port:
             command.extend(("--enable-rpc=true", "--rpc-listen-all=false",
@@ -2253,9 +2372,11 @@ class Downloader:
                         # the process ignored SIGTERM; escalate to SIGKILL
                         process.kill()
                         process.wait()
+                    self.capture_response(url, response_log)
                     return False, "run time limit or stop requested"
                 time.sleep(0.2)
             code = process.returncode
+        self.capture_response(url, response_log)
         lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
         diagnostic = next((line for line in reversed(lines) if "errorCode=" in line), None)
         if rpc_outcome is not None:
@@ -2290,6 +2411,7 @@ class Downloader:
             self.transition(db, url, "existing_unverified", "final already exists",
                             bytes=target.stat().st_size)
             return "existing"
+        self.resume_confirmed.discard(url)
         # Reserve the controller slot before a shared cooldown or stagger wait.
         # This makes the published worker state agree with the durable
         # ``admitted`` count instead of falsely rendering occupied slots idle.
@@ -2330,6 +2452,7 @@ class Downloader:
             if decision != "confirmed_unchanged":
                 self.enter_representation_review(db, url, rel, staging, decision, observed)
                 return "review"
+            self.resume_confirmed.add(url)
         attempt_started_at = utc_now()
         self.transition(db, url, "active", attempts=attempts + 1, **active_fields)
         self.record_attempt_start(db, url, attempts + 1, attempt_started_at)
@@ -2380,6 +2503,17 @@ class Downloader:
                 self.clear_transfer_telemetry(url)
                 print(f"[stopped] {rel}: local failure: {error}", flush=True)
                 return "local_failure"
+            if is_access_denied_failure(error):
+                # Spec: HTTP 401/403 pauses the item for review. Never retry
+                # or try to get around the access control.
+                self.attempt_event(db, url, attempts + 1, attempt_started_at, "access_denied")
+                self.transition(db, url, "review_required", error, bytes=size,
+                                last_error=error, review_code="access_denied")
+                if self.telemetry:
+                    self.telemetry.event("warning", "access_denied", error, url, worker_id)
+                self.clear_transfer_telemetry(url)
+                print(f"[review] {rel}: access denied: {error}", flush=True)
+                return "review"
             if is_unavailable_failure(error):
                 # Spec: HTTP 404/410 records `unavailable` at once, with no
                 # retry backoff. The staging partial and generation stay as
@@ -2487,8 +2621,8 @@ class Downloader:
             return "review"
         hit_failpoint("post_final_file_creation")
         self.flush_directory(target.parent)
-        self.finalized_event(url, rel.as_posix(), stored_text, target.stat().st_size, digest,
-                             expected_sha256)
+        self.finalized_event(db, url, rel.as_posix(), stored_text, target.stat().st_size,
+                             digest, expected_sha256)
         self.clear_transfer_telemetry(url)
         self.transition(db, url, "complete", bytes=target.stat().st_size, sha256=digest)
         hit_failpoint("post_completion_commit")
@@ -2534,8 +2668,8 @@ class Downloader:
                 continue
             if target_matches:
                 stored = stored_text or Path(target).relative_to(self.destination).as_posix()
-                self.finalized_event(url, relative_text, stored, target.stat().st_size, digest,
-                                     expected_sha256)
+                self.finalized_event(db, url, relative_text, stored, target.stat().st_size,
+                                     digest, expected_sha256)
                 self.transition(db, url, "complete", "reconciled promotion intent",
                                 bytes=target.stat().st_size, sha256=digest)
                 if staging and staging.exists() and staging.is_file():
@@ -2561,8 +2695,8 @@ class Downloader:
                         continue
                     self.flush_directory(target.parent)
                     stored = stored_text or Path(target).relative_to(self.destination).as_posix()
-                    self.finalized_event(url, relative_text, stored, target.stat().st_size, digest,
-                                         expected_sha256)
+                    self.finalized_event(db, url, relative_text, stored, target.stat().st_size,
+                                         digest, expected_sha256)
                     self.transition(db, url, "complete", "reconciled promotion intent",
                                     bytes=target.stat().st_size, sha256=digest)
                     os.unlink(staging)

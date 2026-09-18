@@ -2688,6 +2688,154 @@ class ProvenanceControllerTests(unittest.TestCase):
                                     self.public_key(root, downloader), None), [])
             db.close()
 
+    REDIRECT_LOG = (
+        "2026-09-18 20:36:58.901715 [INFO] [HttpConnection.cc:163] CUID#7 - Response received:\n"
+        "HTTP/1.0 302 Found\nLocation: /hop\n\n\n"
+        "2026-09-18 20:36:58.901759 [NOTICE] [HttpResponse.cc:168] CUID#7 - "
+        "Redirecting to http://example.test/hop\n"
+        "2026-09-18 20:36:58.902361 [INFO] [HttpConnection.cc:163] CUID#7 - Response received:\n"
+        "HTTP/1.1 302 Found\nLocation: /f\n\n\n"
+        "2026-09-18 20:36:58.902400 [NOTICE] [HttpResponse.cc:168] CUID#7 - "
+        "Redirecting to http://example.test/f\n"
+        "2026-09-18 20:36:58.903000 [INFO] [HttpConnection.cc:163] CUID#7 - Response received:\n"
+        "HTTP/1.1 206 Partial Content\nContent-Range: bytes 10-99/100\nContent-Length: 90\n"
+        "ETag: \"v1\"\nLast-Modified: Wed, 01 Jan 2025 00:00:00 GMT\n"
+        "Content-Type: application/octet-stream\nSet-Cookie: secret=1\n\n\n")
+
+    def test_response_log_yields_the_last_response_and_the_intermediate_redirects(self):
+        parsed = tod_dl.parse_aria2_response_log(self.REDIRECT_LOG, "http://example.test/a")
+        self.assertEqual(parsed["final_url"], "http://example.test/f")
+        self.assertEqual(parsed["redirect_chain"], ["http://example.test/hop"])
+        self.assertEqual(parsed["http_status"], 206)
+        self.assertEqual(parsed["response_content_range"], "bytes 10-99/100")
+        self.assertEqual(parsed["response_content_length"], "90")
+        self.assertEqual(parsed["response_etag"], '"v1"')
+        self.assertEqual(parsed["response_last_modified"], "Wed, 01 Jan 2025 00:00:00 GMT")
+        self.assertNotIn("secret", json.dumps(parsed))
+        self.assertEqual(tod_dl.expected_size_from_response(parsed), 100)
+
+    def test_response_log_never_returns_a_url_with_credentials(self):
+        log = self.REDIRECT_LOG.replace("http://example.test/hop", "http://user:pw@example.test/hop")
+        parsed = tod_dl.parse_aria2_response_log(log, "http://example.test/a")
+        self.assertIsNone(parsed["final_url"])
+        self.assertEqual(parsed["redirect_chain"], [])
+        self.assertNotIn("pw", json.dumps(parsed))
+
+    def test_response_log_without_a_response_is_empty(self):
+        self.assertEqual(tod_dl.parse_aria2_response_log("", "http://example.test/a"), {})
+
+    def test_full_body_length_is_the_expected_size_only_for_a_200_response(self):
+        self.assertEqual(tod_dl.expected_size_from_response(
+            {"http_status": 200, "response_content_length": "12"}), 12)
+        self.assertIsNone(tod_dl.expected_size_from_response(
+            {"http_status": 206, "response_content_length": "12"}))
+        self.assertIsNone(tod_dl.expected_size_from_response({}))
+
+    def test_capture_response_keeps_parsed_fields_and_deletes_the_raw_log(self):
+        with FaultRoot() as root:
+            downloader, db, engine, staging = self.make_controller(root)
+            raw = root / "aria2.response.log"
+            raw.write_text(self.REDIRECT_LOG, encoding="utf-8")
+            downloader.capture_response(self.url, raw)
+            self.assertFalse(raw.exists())
+            self.assertEqual(downloader.attempt_responses[self.url]["http_status"], 206)
+            downloader.capture_response(self.url, raw)
+            self.assertEqual(downloader.attempt_responses[self.url], {})
+            db.close()
+
+    def test_attempt_and_finalized_events_record_the_observed_response(self):
+        with FaultRoot() as root:
+            downloader, db, engine, staging = self.make_controller(root)
+
+            def run(*_):
+                downloader.attempt_responses[self.url] = tod_dl.parse_aria2_response_log(
+                    self.REDIRECT_LOG.replace("100", str(len(self.payload))).replace(
+                        "bytes 10-", "bytes 0-"), self.url)
+                return engine.complete(staging)
+            downloader.run_aria2 = run
+            self.assertEqual(downloader.transfer(downloader.next_pending(db), db), "complete")
+            attempt, finalized = self.events(downloader)[1:]
+            self.assertEqual(attempt["http_status"], 206)
+            self.assertEqual(attempt["response_etag"], '"v1"')
+            self.assertEqual(attempt["redirect_chain"], ["http://example.test/hop"])
+            self.assertEqual(finalized["etag"], {"available": True, "compared": False,
+                                                 "value": '"v1"'})
+            self.assertEqual(finalized["expected_size"],
+                             {"available": True, "compared": False, "value": len(self.payload)})
+            self.assertEqual(finalized["last_modified"]["value"], "Wed, 01 Jan 2025 00:00:00 GMT")
+            downloader.provenance.close([], {"max_files": 1}, 1, {"complete": 1}, "finished")
+            self.assertEqual(verify(downloader.provenance.directory, downloader.destination,
+                                    self.public_key(root, downloader), None), [])
+            db.close()
+
+    def test_finalized_event_marks_the_etag_compared_only_after_a_confirmed_resume(self):
+        with FaultRoot() as root:
+            downloader, db, engine, staging = self.make_controller(root)
+            engine.partial(staging)
+            db.execute("UPDATE downloads SET etag='\"v1\"' WHERE url=?", (self.url,))
+            db.commit()
+            downloader.check_representation = lambda *_: ("confirmed_unchanged", {"etag": '"v1"'})
+            self.assertEqual(downloader.transfer(downloader.next_pending(db), db), "complete")
+            finalized = self.events(downloader)[-1]
+            self.assertEqual(finalized["etag"], {"available": True, "compared": True,
+                                                 "value": '"v1"'})
+            self.assertEqual(finalized["expected_size"]["available"], False)
+            db.close()
+
+    def test_finalized_event_reports_unavailable_validators_when_none_were_observed(self):
+        with FaultRoot() as root:
+            downloader, db, engine, staging = self.make_controller(root)
+            self.assertEqual(downloader.transfer(downloader.next_pending(db), db), "complete")
+            finalized = self.events(downloader)[-1]
+            unavailable = {"available": False, "compared": False, "value": None}
+            for field in ("expected_size", "etag", "last_modified"):
+                self.assertEqual(finalized[field], unavailable)
+            db.close()
+
+    def test_403_and_401_are_access_denied_and_are_not_retried(self):
+        self.assertTrue(tod_dl.is_access_denied_failure(
+            "errorCode=22 The response status is not successful. status=403"))
+        self.assertTrue(tod_dl.is_access_denied_failure("errorCode=24 Authorization failed."))
+        self.assertFalse(tod_dl.is_access_denied_failure(
+            "errorCode=22 The response status is not successful. status=4030"))
+        for error in ("errorCode=22 The response status is not successful. status=403",
+                      "errorCode=24 Authorization failed."):
+            with FaultRoot() as root:
+                downloader, db, engine, staging = self.make_controller(root)
+
+                def run(*_):
+                    downloader.attempt_responses[self.url] = {"http_status": 403,
+                                                              "final_url": self.url}
+                    return False, error
+                downloader.run_aria2 = run
+                with redirect_stdout(StringIO()):
+                    self.assertEqual(downloader.transfer(downloader.next_pending(db), db),
+                                     "review")
+                status, code, retry_at = db.execute(
+                    "SELECT status, review_code, next_retry_at FROM downloads WHERE url=?",
+                    (self.url,)).fetchone()
+                self.assertEqual((status, code), ("review_required", "access_denied"))
+                self.assertFalse(retry_at)
+                attempt = self.events(downloader)[-1]
+                self.assertEqual((attempt["outcome"], attempt["http_status"]), ("access_denied", 403))
+                db.close()
+
+    def test_unavailable_attempt_records_the_response_status(self):
+        with FaultRoot() as root:
+            downloader, db, engine, staging = self.make_controller(root)
+
+            def run(*_):
+                downloader.attempt_responses[self.url] = {"http_status": 404}
+                return False, "errorCode=3 Resource not found"
+            downloader.run_aria2 = run
+            with redirect_stdout(StringIO()):
+                self.assertEqual(downloader.transfer(downloader.next_pending(db), db),
+                                 "unavailable")
+            attempt = self.events(downloader)[-1]
+            self.assertEqual((attempt["outcome"], attempt["http_status"]), ("unavailable", 404))
+            self.assertIsNone(attempt["final_url"])
+            db.close()
+
     def test_failed_record_write_stops_admission_and_leaves_the_item_unresolved(self):
         with FaultRoot() as root:
             downloader, db, engine, staging = self.make_controller(root)

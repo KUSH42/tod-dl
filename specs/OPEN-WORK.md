@@ -106,10 +106,11 @@ a staging-cleanup error moved a completed item to `review_required`.
 
 Still open before the two specs can become `implemented`:
 
-- `attempt_finished` always records `null` response fields, `final_url`, and
-  `http_status`, and never records `unavailable` or `access_denied`.
-- `finalized` always reports `expected_size`, `etag`, and `last_modified` as
-  unavailable, although the controller stores an ETag for resume checks.
+- The controller does not compare `expected_size` with the staged byte count.
+  The specification requires an exact size match when the size is available.
+- HTTP 401 and 403 now move the single item to `review_required` with review
+  code `access_denied`. The specification also says to pause the affected
+  scope. The scope is undefined, and no code pauses other items.
 - `candidate_created` never records `unsafe_path` or `promotion_error`.
 - The writer rejects user-info URLs only. Queue import does not reject them,
   and no rule exists for query values that grant access.

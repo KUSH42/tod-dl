@@ -92,6 +92,12 @@ field, even when its value is `null`.
 | `outcome` | One of `success`, `retryable_failure`, `unavailable`, `access_denied`, `validation_failed`, or `stopped`. |
 | `response_content_length`, `response_content_range`, `response_content_type`, `response_etag`, `response_last_modified` | Raw response-field string, or `null`. |
 
+`redirect_chain` lists the URLs between `source_url` and `final_url`, in order.
+It is empty when the request had no redirect. The controller takes the response
+fields from the last HTTP response of the attempt. If a redirect URL carries
+user-info credentials, `final_url` is `null` and `redirect_chain` is empty.
+`access_denied` records an HTTP 401 or 403 response.
+
 The record must never include request cookies, authorization values, Tor
 control cookies, RPC secrets, or monitor capability tokens. The controller must
 reject a source or redirect URL with user-info credentials or query values that
@@ -111,6 +117,15 @@ and `last_modified` validation object. Each object must contain `available` and
 `available` is false. `compared` must be false when `available` is false.
 When available, `expected_size.value` is a nonnegative integer.
 `expected_checksum.value`, `etag.value`, and `last_modified.value` are strings.
+
+The controller sets `etag.value` and `last_modified.value` from the values
+stored for resume checks. If none are stored, it uses the response fields of the
+final attempt. `etag.compared` is true only when a resume check confirmed the
+stored ETag against the source. `expected_size.value` is the exact full size
+that the final response announced: `Content-Length` of a 200 response, or the
+total in `Content-Range` of a 206 response. An inventory size token is never an
+expected size. `expected_size.compared` and `last_modified.compared` stay false
+until the controller compares them.
 
 `candidate_created` must include `item_id`, `staging_relative_path`,
 `candidate_relative_path`, `sha256`, and `finalization_failure_reason`.
