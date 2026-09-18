@@ -77,12 +77,17 @@ Tor must provide `IsolateSOCKSAuth` on the configured SocksPort. The controller
 must verify Tor isolation before it admits a transfer.
 
 The monitor can request `retry_now`, `renew_tor_circuits`, `pause_admission`,
-`resume_admission`, `drain_and_stop`, and `checkpoint_stop` only after user
-confirmation. A Tor renewal affects future streams. It must not change active
-transfers or claim that Tor selected a new route. `drain_and_stop` and
-`checkpoint_stop` end the run and cannot be undone; `drain_and_stop` lets
-active transfers reach a durable state first, `checkpoint_stop` terminates
-them immediately after a checkpoint. Do not log or commit Tor control
+`resume_admission`, `drain_and_stop`, `checkpoint_stop`, and the row-scoped
+`exclude_item`, `set_item_priority`, and `set_retry_cooldown` only after user
+confirmation. The controller also accepts `resume_new_generation` for a
+`review_required` item flagged by a changed remote representation, but no
+monitor keybinding exists for it yet. A Tor renewal affects future streams.
+It must not change active transfers or claim that Tor selected a new route.
+`drain_and_stop` and `checkpoint_stop` end the run and cannot be undone;
+`drain_and_stop` lets active transfers reach a durable state first,
+`checkpoint_stop` terminates them immediately after a checkpoint. `exclude_item`
+is a durable, one-way removal from the selected set; it does not delete
+already-staged bytes. Do not log or commit Tor control
 cookies, monitor capability tokens, or aria2 RPC secrets.
 
 ## Provenance safety

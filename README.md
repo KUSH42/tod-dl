@@ -95,6 +95,43 @@ under `download-state/redownload-candidates/`. The controller hashes one
 staged file at a time; a lagging hash holds its worker slot and pauses new
 admission until the hash finishes.
 
+## Recover from low storage
+
+The controller stops admission when free space at the destination and state
+filesystem falls below the reserve (10 GiB by default). No queued transfer
+starts until space is available again. An admitted transfer that hits
+`ENOSPC` mid-transfer resets to `queued` without consuming a retry attempt.
+
+To recover, free space on the destination filesystem, then resume the run
+with the same run ID as shown above. The controller re-checks free space
+before it admits the next transfer; no restart-specific flag is needed.
+
+## Review a candidate
+
+An item enters `review_required` when TOD-DL cannot safely promote it
+automatically: a checksum mismatch, a name that exceeds the filesystem limit
+(`ENAMETOOLONG`), an incomplete body after a single retry, or (for a resumed
+transfer with a recorded ETag or Last-Modified baseline) a changed or
+unconfirmed remote representation. Use `--status` to list `review_required`
+items and read each item's `review_code` and `last_error`.
+
+Two row-scoped actions apply to a `review_required` item, both durable and
+confirmed before the controller applies them:
+
+- `exclude_item` durably moves the item to `excluded`. It leaves every other
+  item's state, selected set, and queue rank unchanged, and it never fires
+  automatically from any outage, retry, validation, or promotion path. In
+  the monitor's Queue tab (`src/monitor.py --control`), select the item and
+  press `x`, then confirm.
+- `resume_new_generation` applies only to a `changed_remote_representation`
+  or `no_reliable_version_protection` review item. It clears the review code
+  and returns the item to `queued` under a new staging generation, so the
+  next attempt starts a fresh download instead of resuming stale bytes. It
+  is controller-API-only in this release; `src/monitor.py` has no keybinding
+  for it yet. Drive it with the same confirmed request/response protocol the
+  monitor uses (`prepare_confirmation` then the action with its returned
+  `nonce`), addressed to the run's control socket.
+
 ## Resume a run
 
 Use the same run ID, queue files, and `--max-files` value to resume a stopped

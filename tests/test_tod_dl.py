@@ -9,7 +9,9 @@ import fcntl
 import hashlib
 import errno
 import importlib.util
+import inspect
 import json
+import re
 import shutil
 import signal
 import sys
@@ -557,6 +559,48 @@ class RunSelectionTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT status FROM downloads WHERE url=?",
                                         (first_url,)).fetchone()[0], "complete")
             db.close()
+
+    def test_control_exclude_item_from_every_reachable_state_retains_error(self):
+        for source_status in sorted(tod_dl.EXCLUDABLE_STATUSES):
+            with self.subTest(source_status=source_status):
+                target_url = "https://fixture.test/first/data/item.bin"
+                other_url = "https://fixture.test/first/data/other.bin"
+                with tempfile.TemporaryDirectory() as temporary:
+                    downloader, db = self.prepare(Path(temporary), [target_url, other_url])
+                    downloader.scope_run(db)
+                    downloader.update(
+                        db, "UPDATE downloads SET status=?, last_error='connection reset', "
+                            "priority=2 WHERE url=?", (source_status, target_url))
+                    other_status, other_priority = db.execute(
+                        "SELECT status, priority FROM downloads WHERE url=?",
+                        (other_url,)).fetchone()
+                    other_rank = db.execute(
+                        "SELECT queue_rank FROM run_items WHERE url=?", (other_url,)).fetchone()[0]
+                    request = {"request_id": f"request-{source_status}", "session_id": "session-one",
+                              "parameters": {"item_ids": [downloader.item_id(target_url)]}}
+
+                    response = downloader.control_exclude_item(db, request)
+
+                    self.assertEqual(response["outcome"], "completed")
+                    self.assertEqual(response["items"][downloader.item_id(target_url)], "excluded")
+                    row = db.execute("SELECT status, last_error FROM downloads WHERE url=?",
+                                     (target_url,)).fetchone()
+                    self.assertEqual(row[0], "excluded")
+                    self.assertEqual(row[1], "connection reset")
+                    self.assertEqual(
+                        db.execute("SELECT status, priority FROM downloads WHERE url=?",
+                                  (other_url,)).fetchone(), (other_status, other_priority))
+                    self.assertEqual(
+                        db.execute("SELECT queue_rank FROM run_items WHERE url=?",
+                                  (other_url,)).fetchone()[0], other_rank)
+                    db.close()
+
+    def test_only_control_exclude_item_ever_sets_excluded_status(self):
+        source = Path(tod_dl.__file__).read_text(encoding="utf-8")
+        assignments = re.findall(r"""status\s*=\s*['"]excluded['"]""", source)
+        self.assertEqual(len(assignments), 2)
+        method_source = inspect.getsource(tod_dl.Downloader.control_exclude_item)
+        self.assertEqual(len(re.findall(r"""status\s*=\s*['"]excluded['"]""", method_source)), 2)
 
     def test_control_exclude_item_rejects_malformed_item_ids(self):
         url = "https://fixture.test/first/data/item.bin"

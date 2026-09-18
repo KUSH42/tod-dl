@@ -10,7 +10,7 @@ The controller has durable selected-run state, no-overwrite finalization,
 recovery tests, signed provenance records, telemetry snapshots, and local
 confirmed controls for retry, Tor renewal, pause admission, resume
 admission, drain and stop, and checkpoint and stop. The repository test
-suite runs 198 local tests. These features do not establish compliance
+suite runs 204 local tests. These features do not establish compliance
 with every requirement in the related specifications.
 
 A process-ownership review closed five gaps in this session and the four
@@ -68,9 +68,25 @@ stated gate:
   routing evidence) has not run. Do not treat the candidate as validated for
   production use until it does.
 
-Complete the reliable-acquisition contract after tool selection. The remaining
-work includes full engine lifecycle checks, bounded large-queue admission,
-representation-change handling, migration support, and acceptance evidence.
+Complete the reliable-acquisition contract after tool selection. Engine
+lifecycle checks (SIGINT parity with SIGTERM), bounded large-queue admission
+(met per E10/E11 and the reserve-accounting, disk-full, and hashing-
+backpressure fixes), migration support (`ALTER TABLE` column migrations in
+`src/tod-dl.py`), and representation-change handling for the resume path
+(`probe_representation()`, `check_representation()`, the
+`resume_new_generation` controller action) are done. The 404/410
+daily-recheck path that also wires in representation checks
+(`SPEC-reliable-acquisition.md:190-217`) is still greenfield.
+
+Acceptance evidence is partly done: `exclude_item` is now verified from all
+8 reachable source states (`tests/test_tod_dl.py`), and the runbook covers
+storage recovery and candidate review (`README.md`). Still open: rerun
+E01 through E14 against the current tree (the latest report,
+`acquisition-tool-evaluation-2026-09-18c.md`, predates the SIGINT,
+disk-full, hashing-backpressure, reserve-accounting, and
+representation-change changes), and the isolated-test/pilot byte-hash
+comparison, which requires an actual transfer run. See
+`specs/reports/reliable-acquisition-acceptance-2026-09-18.md`.
 
 Complete the provenance and fault-recovery acceptance suites. Compare the
 existing implementation with both specifications. Add each missing fixture
