@@ -38,7 +38,8 @@ last_error TEXT, next_retry_at REAL NOT NULL DEFAULT 0, promotion_target TEXT,
 promotion_intent_at TEXT, cleanup_completed_at TEXT, review_code TEXT,
 remediation_reason TEXT, remediation_mapping_version TEXT,
 remediation_outcome TEXT, remediation_started_at TEXT,
-remediation_completed_at TEXT, updated_at TEXT NOT NULL)"""
+remediation_completed_at TEXT, priority INTEGER NOT NULL DEFAULT 0,
+updated_at TEXT NOT NULL)"""
 RUN_SCHEMA = """
 CREATE TABLE IF NOT EXISTS run_items (
     run_id TEXT NOT NULL,
@@ -83,6 +84,8 @@ RETRY_DELAYS = (60, 120, 240, 300, 300, 300)
 EXCLUDABLE_STATUSES = frozenset({"pending", "queued", "active", "admitted",
                                  "retry_wait", "failed", "review_required",
                                  "unavailable"})
+PRIORITIZABLE_STATUSES = EXCLUDABLE_STATUSES
+PRIORITY_MIN, PRIORITY_MAX = -5, 5
 ADMISSION_POLL_SECONDS = 0.25
 SAFE_PATH_MAPPING_VERSION = "v1"
 DISPLAY_BUCKETS = ("queued", "busy", "retry", "exhausted", "complete",
@@ -596,6 +599,7 @@ class Downloader:
                 "get_control_state": "available",
                 "retry_now": "available",
                 "exclude_item": "available",
+                "set_item_priority": "available",
                 "renew_tor_circuits": "available" if renewal_available else "unavailable",
             },
         }
@@ -607,6 +611,8 @@ class Downloader:
             return self.control_retry_now(db, request)
         if request.get("action") == "exclude_item":
             return self.control_exclude_item(db, request)
+        if request.get("action") == "set_item_priority":
+            return self.control_set_item_priority(db, request)
         if request.get("action") == "renew_tor_circuits":
             return self.control_renew_tor_circuits(db, request)
         return {"outcome": "rejected", "reason": "action is unavailable"}
@@ -744,6 +750,72 @@ class Downloader:
         return {"outcome": "completed", "reason": reason, "state_revision": revision,
                 "items": item_outcomes}
 
+    def control_set_item_priority(self, db: sqlite3.Connection,
+                                  request: dict[str, object]) -> dict[str, object]:
+        """Durably set a scheduler-preference hint; never renumbers queue rank."""
+        request_id = request["request_id"]
+        session_id = request["session_id"]
+        if not isinstance(request_id, str) or not isinstance(session_id, str):
+            return {"outcome": "rejected", "reason": "invalid control request"}
+        parameters = request.get("parameters")
+        item_ids = parameters.get("item_ids") if isinstance(parameters, dict) else None
+        priority = parameters.get("priority") if isinstance(parameters, dict) else None
+        if (not isinstance(item_ids, list) or not item_ids
+                or not all(isinstance(item_id, str) and item_id for item_id in item_ids)):
+            return {"outcome": "rejected", "reason": "item_ids must be a non-empty list of strings"}
+        if (isinstance(priority, bool) or not isinstance(priority, int)
+                or not PRIORITY_MIN <= priority <= PRIORITY_MAX):
+            return {"outcome": "rejected",
+                    "reason": f"priority must be an integer between {PRIORITY_MIN} and {PRIORITY_MAX}"}
+        with self.db_lock:
+            existing = db.execute("SELECT outcome, reason, state_revision FROM control_requests "
+                                  "WHERE request_id=?", (request_id,)).fetchone()
+            if existing:
+                outcome, reason, revision = existing
+                return {"outcome": outcome, "reason": reason, "state_revision": revision}
+            selected_rows = db.execute(
+                "SELECT downloads.url, downloads.status FROM downloads JOIN run_items "
+                "ON run_items.url=downloads.url WHERE run_items.run_id=?",
+                (self.run_id,),
+            ).fetchall()
+            by_id = {self.item_id(row[0]): row for row in selected_rows}
+            item_outcomes: dict[str, str] = {}
+            changed_urls = []
+            for item_id in item_ids:
+                row = by_id.get(item_id)
+                if row is None:
+                    item_outcomes[item_id] = "rejected: item is outside the selected set"
+                elif row[1] not in PRIORITIZABLE_STATUSES:
+                    item_outcomes[item_id] = f"rejected: item is in {row[1]}, not prioritizable"
+                else:
+                    item_outcomes[item_id] = "prioritized"
+                    changed_urls.append(row[0])
+            if changed_urls:
+                placeholders = ",".join("?" * len(changed_urls))
+                db.execute(
+                    f"UPDATE downloads SET priority=?, updated_at=? WHERE url IN ({placeholders})",
+                    (priority, now(), *changed_urls),
+                )
+            reason = (f"set priority to {priority} for {len(changed_urls)} of "
+                      f"{len(item_ids)} requested item(s)")
+            db.execute("INSERT INTO download_transitions "
+                       "(url, run_id, from_status, to_status, detail, recorded_at) "
+                       "VALUES (?, ?, ?, ?, ?, ?)",
+                       ("__control__", self.run_id, "control", "control", reason, now()))
+            revision = self.advance_telemetry_revision(db)
+            db.execute("INSERT INTO control_requests "
+                       "(request_id, run_id, session_id, action, outcome, reason, "
+                       "state_revision, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                       (request_id, self.run_id, session_id, "set_item_priority", "completed",
+                        reason, revision, now()))
+            db.commit()
+        if self.projection:
+            self.projection.set_revision(revision)
+        if self.telemetry:
+            self.telemetry.event("info", "control", "set item priority accepted")
+        return {"outcome": "completed", "reason": reason, "state_revision": revision,
+                "items": item_outcomes}
+
     def admission_wait_timeout(self) -> float:
         """Return a short wait so eligible retries can fill idle worker slots."""
         timeout = ADMISSION_POLL_SECONDS
@@ -859,6 +931,8 @@ class Downloader:
                 db.execute(f"ALTER TABLE downloads ADD COLUMN {column} TEXT")
         if "next_retry_at" not in columns:
             db.execute("ALTER TABLE downloads ADD COLUMN next_retry_at REAL NOT NULL DEFAULT 0")
+        if "priority" not in columns:
+            db.execute("ALTER TABLE downloads ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
         db.execute("PRAGMA journal_mode=WAL")
         db.execute("PRAGMA busy_timeout=60000")
         return db

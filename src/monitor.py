@@ -17,7 +17,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
-from controller import ControlError, control_request, get_control_state
+from controller import (ControlError, PRIORITY_MAX, PRIORITY_MIN, control_request,
+                        get_control_state)
 from inspection import InspectionError, inspection_request
 
 
@@ -547,14 +548,17 @@ def queue_retry_status(bucket: Any, retry_at: Any, cooldown_active: bool = False
 
 
 def queue_row_cells(row: dict[str, Any], cooldown_active: bool = False,
-                    reference_time: float | None = None) -> tuple[str, str, str, str, str, str, str]:
+                    reference_time: float | None = None
+                    ) -> tuple[str, str, str, str, str, str, str, str]:
     """Render one queue row's literal-safe display cells in column order."""
     bucket = row.get("bucket", "unknown")
+    priority = row.get("priority", 0)
     return (
         str(row.get("queue_rank", "?")),
         truncate_filename(row.get("basename"), 32),
         short_item_id(row.get("item_id")),
         literal_text(bucket),
+        f"{priority:+d}" if isinstance(priority, int) else "0",
         literal_text(row.get("phase")) if row.get("phase") else "—",
         f"{format_bytes(row.get('received_bytes'))} / {format_bytes(row.get('total_bytes'))}",
         queue_retry_status(bucket, row.get("retry_at"), cooldown_active, reference_time),
@@ -1055,6 +1059,10 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             Binding("g", "first_page", "First page", show=False),
             Binding("R", "prepare_retry_selected", "Retry row", show=True),
             Binding("x", "prepare_exclude_selected", "Exclude row", show=True),
+            Binding("right_square_bracket", "prepare_raise_priority_selected",
+                   "Raise priority", show=True),
+            Binding("left_square_bracket", "prepare_lower_priority_selected",
+                   "Lower priority", show=True),
             Binding("l", "logs", "Logs"),
             Binding("question_mark", "help", "Help", show=True),
         ]
@@ -1115,6 +1123,7 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             table.add_column("Basename", key="basename", width=32)
             table.add_column("Item ID", key="item_id", width=12)
             table.add_column("Bucket", key="bucket", width=18)
+            table.add_column("Priority", key="priority", width=9)
             if wide:
                 table.add_column("Phase", key="phase", width=13)
                 table.add_column("Received / total", key="bytes", width=21)
@@ -1222,7 +1231,7 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             for row in self.rows:
                 cells = queue_row_cells(row, cooldown_active)
                 if not self.wide:
-                    cells = (cells[0], cells[1], cells[2], cells[3], cells[6])
+                    cells = (cells[0], cells[1], cells[2], cells[3], cells[4], cells[7])
                 cells = cells[:-1] + (retry_status_visual(cells[-1]),)
                 table.add_row(*cells, key=row["item_id"])
             if self.rows and any(row["item_id"] == self.selected_item_id for row in self.rows):
@@ -1300,7 +1309,8 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
         def action_help(self) -> None:
             self.app.notify(
                 "/ search   Enter apply   Escape cancel   PageUp/PageDown page   "
-                "Enter opens item details   R retry row   x exclude row   l logs   "
+                "Enter opens item details   R retry row   x exclude row   "
+                "] raise priority   [ lower priority   l logs   "
                 "c clear filters   f refresh results   g first page",
                 title="Queue help")
 
@@ -1330,6 +1340,32 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                 return
             self.app.prepare_row_scoped_exclude(self.selected_item_id)
 
+        def priority_selected_eligible(self, delta: int) -> bool:
+            """Return whether the focused row's priority can move by `delta`.
+
+            Eligibility is advisory only; the controller validates the item's
+            actual prioritizable state and bounds at execution time.
+            """
+            if not (control and state and self.selected_item_id):
+                return False
+            row = next((row for row in self.rows if row["item_id"] == self.selected_item_id), None)
+            current = row.get("priority", 0) if row else 0
+            return PRIORITY_MIN <= current + delta <= PRIORITY_MAX
+
+        def selected_priority(self) -> int:
+            row = next((row for row in self.rows if row["item_id"] == self.selected_item_id), None)
+            return row.get("priority", 0) if row else 0
+
+        def action_prepare_raise_priority_selected(self) -> None:
+            if not self.priority_selected_eligible(1):
+                return
+            self.app.prepare_row_scoped_priority(self.selected_item_id, self.selected_priority() + 1)
+
+        def action_prepare_lower_priority_selected(self) -> None:
+            if not self.priority_selected_eligible(-1):
+                return
+            self.app.prepare_row_scoped_priority(self.selected_item_id, self.selected_priority() - 1)
+
         def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
             if action == "next_page" and not self.next_cursor:
                 return None
@@ -1343,6 +1379,10 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             if action == "prepare_retry_selected" and not self.retry_selected_eligible():
                 return None
             if action == "prepare_exclude_selected" and not self.exclude_selected_eligible():
+                return None
+            if action == "prepare_raise_priority_selected" and not self.priority_selected_eligible(1):
+                return None
+            if action == "prepare_lower_priority_selected" and not self.priority_selected_eligible(-1):
                 return None
             return True
 
@@ -1719,6 +1759,12 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                 return
             self.pending_item_ids = [item_id]
             self.prepare_action("exclude_item", {"item_ids": [item_id]})
+
+        def prepare_row_scoped_priority(self, item_id: str, priority: int) -> None:
+            if not (control and state):
+                return
+            self.pending_item_ids = [item_id]
+            self.prepare_action("set_item_priority", {"item_ids": [item_id], "priority": priority})
 
         def prepare_action(self, action: str, parameters: dict[str, Any] | None = None) -> None:
             self.submit_control_request(

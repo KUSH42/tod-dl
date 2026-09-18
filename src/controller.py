@@ -19,6 +19,8 @@ from typing import Any, Callable
 
 PROTOCOL_VERSION = 1
 MAX_MESSAGE_BYTES = 64 * 1024
+PRIORITY_MIN = -5
+PRIORITY_MAX = 5
 
 
 class ControlError(RuntimeError):
@@ -201,7 +203,8 @@ class ControlServer:
                         "control_state": self.state_provider()}
             if action == "prepare_confirmation":
                 return self._prepare_confirmation(request_id, request.get("parameters"))
-            if (action not in {"retry_now", "exclude_item", "renew_tor_circuits"}
+            if (action not in {"retry_now", "exclude_item", "set_item_priority",
+                                "renew_tor_circuits"}
                     or self.action_handler is None):
                 raise ControlError("action is unavailable")
             return self._confirmed_action(action, request_id, request.get("parameters"), request)
@@ -212,26 +215,34 @@ class ControlServer:
         if not isinstance(parameters, dict):
             raise ControlError("confirmation parameters must be an object")
         action = parameters.get("action")
-        if action not in {"retry_now", "exclude_item", "renew_tor_circuits"}:
+        if action not in {"retry_now", "exclude_item", "set_item_priority",
+                          "renew_tor_circuits"}:
             raise ControlError("action is unavailable")
         item_ids: tuple[str, ...] | None = None
-        if action in {"retry_now", "exclude_item"} and (
-                action == "exclude_item" or "item_ids" in parameters):
+        if action in {"retry_now", "exclude_item", "set_item_priority"} and (
+                action in {"exclude_item", "set_item_priority"} or "item_ids" in parameters):
             raw_item_ids = parameters.get("item_ids")
             if (not isinstance(raw_item_ids, list) or not raw_item_ids
                     or not all(isinstance(item_id, str) and item_id for item_id in raw_item_ids)):
                 raise ControlError("item_ids must be a non-empty list of strings")
             item_ids = tuple(raw_item_ids)
+        priority: int | None = None
+        if action == "set_item_priority":
+            priority = parameters.get("priority")
+            if (isinstance(priority, bool) or not isinstance(priority, int)
+                    or not PRIORITY_MIN <= priority <= PRIORITY_MAX):
+                raise ControlError(
+                    f"priority must be an integer between {PRIORITY_MIN} and {PRIORITY_MAX}")
         if action == "retry_now":
             scope = (f"{len(item_ids)} selected item(s) in the immutable selected run"
                       if item_ids else "retryable items in the immutable selected run")
-        elif action == "exclude_item":
+        elif action in {"exclude_item", "set_item_priority"}:
             scope = f"{len(item_ids)} selected item(s) in the immutable selected run"
         else:
             scope = "future Tor streams only"
         nonce = secrets.token_urlsafe(24)
         with self.command_lock:
-            self.confirmations[nonce] = (action, time.monotonic() + 60, item_ids)
+            self.confirmations[nonce] = (action, time.monotonic() + 60, item_ids, priority)
         return {"request_id": request_id, "outcome": "completed", "confirmation": {
             "nonce": nonce, "action": action, "expires_in_s": 60, "scope": scope,
         }}
@@ -251,8 +262,12 @@ class ControlServer:
                     or confirmation != action):
                 raise ControlError(f"{action} confirmation is invalid or expired")
             item_ids = prepared[2]
+            priority = prepared[3]
             if item_ids is not None:
-                request = {**request, "parameters": {**parameters, "item_ids": list(item_ids)}}
+                parameters = {**parameters, "item_ids": list(item_ids)}
+            if priority is not None:
+                parameters = {**parameters, "priority": priority}
+            request = {**request, "parameters": parameters}
             response = self.action_handler(request)
             if not isinstance(response, dict) or response.get("outcome") not in {
                     "completed", "rejected", "failed"}:

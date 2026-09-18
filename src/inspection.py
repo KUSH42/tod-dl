@@ -533,13 +533,13 @@ class InspectionServer:
                 started, "durable read exceeded one second; narrow your search")
             rows = db.execute(
                 "SELECT r.queue_rank,d.url,d.relative_path,d.storage_path,d.status,d.attempts,"
-                "d.bytes,d.next_retry_at FROM run_items r JOIN downloads d ON d.url=r.url "
+                "d.bytes,d.next_retry_at,d.priority FROM run_items r JOIN downloads d ON d.url=r.url "
                 "WHERE r.run_id=? AND (r.queue_rank>? OR (r.queue_rank=? AND item_id(d.url)>?)) "
                 "ORDER BY r.queue_rank, item_id(d.url) LIMIT ?",
                 (self.run_id, after_rank, after_rank, after_item, QUEUE_SCAN_BATCH)).fetchall()
             if not rows:
                 break
-            for rank, url, logical, stored, status, attempts, received, retry_at in rows:
+            for rank, url, logical, stored, status, attempts, received, retry_at, priority in rows:
                 item_id = hashlib.sha256(url.encode()).hexdigest()
                 after_rank, after_item = rank, item_id
                 row_bucket = self._bucket(status, attempts)
@@ -553,7 +553,7 @@ class InspectionServer:
                                "phase": sample.get("phase") if sample else None,
                                "received_bytes": received,
                                "total_bytes": sample.get("total_bytes") if sample else None,
-                               "retry_at": retry_at})
+                               "retry_at": retry_at, "priority": priority})
                 if len(output) == size:
                     filled = True
                     break

@@ -65,7 +65,8 @@ class MonitorTests(unittest.TestCase):
                     storage_path TEXT, staging_path TEXT, inventory_size TEXT,
                     status TEXT NOT NULL, attempts INTEGER NOT NULL, bytes INTEGER,
                     sha256 TEXT, last_error TEXT, next_retry_at REAL NOT NULL,
-                    promotion_target TEXT, updated_at TEXT NOT NULL, review_code TEXT
+                    promotion_target TEXT, updated_at TEXT NOT NULL, review_code TEXT,
+                    priority INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE run_items (run_id TEXT NOT NULL, url TEXT NOT NULL,
                                         queue_rank INTEGER NOT NULL);
@@ -76,9 +77,9 @@ class MonitorTests(unittest.TestCase):
                     recorded_at TEXT);
             """)
             source = "http://user:secret@example.onion/a/file.txt?token=secret"
-            db.execute("INSERT INTO downloads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            db.execute("INSERT INTO downloads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                        (source, "a/file.txt", "safe/file.txt", None, None, "pending",
-                        0, None, None, None, 0, None, "2026-09-17T00:00:00Z", None))
+                        0, None, None, None, 0, None, "2026-09-17T00:00:00Z", None, 0))
             db.execute("INSERT INTO run_items VALUES (?, ?, ?)",
                        ("run-one", source, 1))
             db.execute("INSERT INTO telemetry_revisions VALUES (?, ?)",
@@ -225,6 +226,40 @@ class MonitorTests(unittest.TestCase):
                                 {"nonce": prepared["nonce"], "confirmation": "exclude_item",
                                  "item_ids": ["b", "c"]})
                 self.assertEqual(commands[0]["parameters"]["item_ids"], ["a"])
+            finally:
+                server.stop()
+
+    def test_set_item_priority_requires_bounded_priority_and_confirms_scope(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            commands = []
+            server = ControlServer(root, "run-one", "session-one", lambda: {},
+                                   lambda request: commands.append(request) or {
+                                       "outcome": "completed", "reason": "prioritized",
+                                       "state_revision": 5,
+                                   })
+            server.start()
+            try:
+                with self.assertRaisesRegex(ControlError, "item_ids must be"):
+                    control_request(root, "run-one", "prepare_confirmation",
+                                    {"action": "set_item_priority", "priority": 1})
+                with self.assertRaisesRegex(ControlError, "priority must be"):
+                    control_request(root, "run-one", "prepare_confirmation",
+                                    {"action": "set_item_priority", "item_ids": ["a"],
+                                     "priority": 99})
+                prepared = control_request(
+                    root, "run-one", "prepare_confirmation",
+                    {"action": "set_item_priority", "item_ids": ["a"], "priority": 2}
+                )["confirmation"]
+                self.assertIn("1 selected item(s)", prepared["scope"])
+                # The final request must not be able to widen scope or change the
+                # confirmed priority: the controller re-injects both regardless of
+                # what the client resends.
+                control_request(root, "run-one", "set_item_priority",
+                                {"nonce": prepared["nonce"], "confirmation": "set_item_priority",
+                                 "item_ids": ["b", "c"], "priority": -3})
+                self.assertEqual(commands[0]["parameters"]["item_ids"], ["a"])
+                self.assertEqual(commands[0]["parameters"]["priority"], 2)
             finally:
                 server.stop()
 
@@ -505,13 +540,14 @@ class MonitorTests(unittest.TestCase):
 
     def test_queue_row_cells_are_literal_safe_and_mark_unknown_phase(self):
         row = {"queue_rank": 3, "basename": "<tag>\x1b[31m", "item_id": "a" * 64,
-              "bucket": "queued", "phase": None, "received_bytes": 0, "total_bytes": None,
-              "retry_at": None}
+              "bucket": "queued", "priority": 0, "phase": None, "received_bytes": 0,
+              "total_bytes": None, "retry_at": None}
         cells = queue_row_cells(row)
         self.assertEqual(cells[0], "3")
         self.assertIn("\\x1b[31m", cells[1])
-        self.assertEqual(cells[4], "—")
-        self.assertIn("not recorded", cells[6])
+        self.assertEqual(cells[4], "+0")
+        self.assertEqual(cells[5], "—")
+        self.assertIn("not recorded", cells[7])
 
     def test_queue_header_always_shows_matching_count_unavailable(self):
         header = queue_header_text("run-one", 5, 5, "none", "2026-09-17T00:00:00Z", 4)
@@ -528,14 +564,15 @@ class MonitorTests(unittest.TestCase):
                 storage_path TEXT, staging_path TEXT, inventory_size TEXT,
                 status TEXT NOT NULL, attempts INTEGER NOT NULL, bytes INTEGER,
                 sha256 TEXT, last_error TEXT, next_retry_at REAL NOT NULL,
-                promotion_target TEXT, updated_at TEXT NOT NULL, review_code TEXT);
+                promotion_target TEXT, updated_at TEXT NOT NULL, review_code TEXT,
+                priority INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE run_items (run_id TEXT, url TEXT, queue_rank INTEGER);
             CREATE TABLE telemetry_revisions (run_id TEXT PRIMARY KEY, revision INTEGER);
         """)
         for status, url, rank in rows:
-            db.execute("INSERT INTO downloads VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            db.execute("INSERT INTO downloads VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                        (url, url.rsplit("/", 1)[-1], None, None, None, status, 0, rank, None,
-                        None, 0, None, "2026-09-17T00:00:00Z", None))
+                        None, 0, None, "2026-09-17T00:00:00Z", None, 0))
             db.execute("INSERT INTO run_items VALUES (?,?,?)", ("run-one", url, rank))
         db.execute("INSERT INTO telemetry_revisions VALUES (?,?)", ("run-one", revision))
         db.commit()

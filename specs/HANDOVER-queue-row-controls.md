@@ -45,10 +45,20 @@ to the exact sections that define correct behavior.
   and `renew_tor_circuits`. `_prepare_confirmation` restricts confirmation to
   those three mutating actions and requires non-empty `item_ids` for
   `exclude_item`.
+- Reordering (step 3) is implemented: the `priority` column exists on
+  `downloads` (migrated for existing databases); `control_set_item_priority`
+  in `src/tod-dl.py` validates `item_ids` against `PRIORITIZABLE_STATUSES`
+  (same set as `EXCLUDABLE_STATUSES`) and a bounded `priority` parameter
+  (`PRIORITY_MIN`/`PRIORITY_MAX`, -5 to 5 in `src/controller.py`), sets the
+  hint, and reports a per-item outcome map; it never touches `queue_rank`.
+  `ControlServer` binds both `item_ids` and `priority` to the confirmation
+  nonce and re-injects them at execution time. `QueuePane` binds `]`/`[` to
+  raise/lower the focused row's priority by one, each going through the
+  standard confirmation flow; `list_queue` and the queue table now surface a
+  `Priority` column.
 - `src/monitor.py`: `QueuePane`'s `BINDINGS` have no key bindings or actions
-  for reordering, export, or queue editing.
-- No `set_item_priority` or `set_retry_cooldown` handling exists anywhere in
-  `src/`.
+  for export or queue editing.
+- No `set_retry_cooldown` handling exists anywhere in `src/`.
 
 ## Implementation order
 
