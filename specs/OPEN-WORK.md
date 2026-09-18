@@ -10,7 +10,7 @@ The controller has durable selected-run state, no-overwrite finalization,
 recovery tests, signed provenance records, telemetry snapshots, and local
 confirmed controls for retry, Tor renewal, pause admission, resume
 admission, drain and stop, and checkpoint and stop. The repository test
-suite runs 149 local tests. These features do not establish compliance
+suite runs 167 local tests. These features do not establish compliance
 with every requirement in the related specifications.
 
 ## Remaining work
@@ -30,15 +30,16 @@ live transfer counters. Add tests for stale samples, snapshot failures, and all
 required metric-quality states.
 
 Complete the monitor and control UI. Add the planned dashboard and review
-views. Finish the remaining contract and headless UI test gaps in
-[item details](SPEC-console-item-details.md), the
-[queue view](SPEC-console-queue.md), and the
-[controller command channel](SPEC-controller-control-ui.md). Every command
-in that channel, including pause, resume, drain, and checkpoint-stop, has
-its confirmation, audit, telemetry event, and headless-Textual interaction
-test. Item details has its header, mapping and trusted-size fields, a
-session-poll reload, and a logs key binding; arrow-key attempt selection
-remains unimplemented.
+views. [Item details](SPEC-console-item-details.md) is implemented,
+including arrow-key attempt selection. Every command in the
+[controller command channel](SPEC-controller-control-ui.md), including
+pause, resume, drain, and checkpoint-stop, has its confirmation, audit,
+telemetry event, and headless-Textual interaction test; the row-scoped
+[queue view](SPEC-console-queue.md) actions (`retry_now`, `exclude_item`,
+`set_item_priority`, `set_retry_cooldown`) now have headless-Textual
+interaction tests in addition to their controller-side contract tests. The
+queue view's million-item scale test remains a scaled-down CI stand-in; a
+literal million-row run needs a separate, environment-sized benchmark.
 
 Complete the provenance and fault-recovery acceptance suites. Compare the
 existing implementation with both specifications. Add each missing fixture
@@ -52,11 +53,12 @@ directory discovery only after the basic acquisition workflow is reliable.
 
 The current specification status is grouped below.
 
-- Implemented: `SPEC-tor-circuit-recovery.md` and worker details.
+- Implemented: `SPEC-tor-circuit-recovery.md`, worker details, and item
+  details.
 - Partially implemented: acquisition tool evaluation, acquisition fault
   recovery, provenance, console UI, controller controls, download telemetry,
-  reliable acquisition, item details, queue view, console visual style, and
-  console inspection.
+  reliable acquisition, queue view, console visual style, and console
+  inspection.
 - Planned: inventory discovery.
 
 ## Next steps

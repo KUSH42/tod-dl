@@ -742,6 +742,8 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
         for line_number, line in enumerate(output.splitlines()):
             if line in section_labels:
                 visual.append(line, style="bold white")
+            elif line.startswith("→ "):
+                visual.append(line, style="reverse")
             else:
                 position = 0
                 for match in re.finditer(r"(?:^|  )([^:\n]{1,40}:)", line):
@@ -866,6 +868,10 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
         """Read-only view bound to one immutable run and item identity."""
         BINDINGS = [("escape", "dismiss", "Back"), ("r", "reveal_source", "Reveal source"),
                     ("n", "next_attempts", "Next attempts"), ("l", "logs", "Logs"),
+                    Binding("up", "select_previous_attempt", "Prev attempt", show=False,
+                           priority=True),
+                    Binding("down", "select_next_attempt", "Next attempt", show=False,
+                           priority=True),
                     Binding("q", "disabled_control", show=False),
                     Binding("t", "disabled_control", show=False),
                     Binding("p", "disabled_control", show=False),
@@ -883,6 +889,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             self.revision: Any = None
             self.cursor: str | None = None
             self.attempts: list[dict[str, Any]] = []
+            self.selected_attempt_index = 0
             self.revealed = False
             self.session_id: Any = None
             self.session_reload_pending = False
@@ -905,6 +912,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             self.session_id = current_session_id
             self.item = None
             self.attempts = []
+            self.selected_attempt_index = 0
             self.cursor = None
             self.revealed = False
             self.session_reload_pending = True
@@ -928,7 +936,9 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
                 output = item_details_text(self.item or {}, self.read_at, self.revision,
                                            freshness(self.app.current))
             if self.attempts:
+                selection_marker = "→"
                 output += "\n\nRecorded attempts\n" + "\n".join(
+                    f"{selection_marker if index == self.selected_attempt_index else ' '} "
                     f"#{detail_value(row.get('attempt_number'))} {detail_value(row.get('attempt_id'))} "
                     f"Generation: {detail_value(row.get('generation'))}  "
                     f"Started: {detail_value(row.get('started_at'))}  "
@@ -937,7 +947,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
                     f"Error: {detail_value(row.get('error_category'))} "
                     f"{detail_value(row.get('error_message'))}  "
                     f"Retry deadline: {format_retry_deadline(row.get('retry_at'))}"
-                    for row in self.attempts)
+                    for index, row in enumerate(self.attempts))
             self.query_one("#item-details-text", Static).update(detail_visual(output))
 
         def load_item(self) -> None:
@@ -998,6 +1008,21 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
                 return
             self.attempts.extend(row for row in rows if isinstance(row, dict))
             self.cursor = data.get("next_cursor") if isinstance(data.get("next_cursor"), str) else None
+            self.selected_attempt_index = min(self.selected_attempt_index, len(self.attempts) - 1)
+            self.update_details()
+
+        def action_select_previous_attempt(self) -> None:
+            if not self.attempts:
+                self.query_one("#item-details", VerticalScroll).scroll_up()
+                return
+            self.selected_attempt_index = max(0, self.selected_attempt_index - 1)
+            self.update_details()
+
+        def action_select_next_attempt(self) -> None:
+            if not self.attempts:
+                self.query_one("#item-details", VerticalScroll).scroll_down()
+                return
+            self.selected_attempt_index = min(len(self.attempts) - 1, self.selected_attempt_index + 1)
             self.update_details()
 
         def action_logs(self) -> None:

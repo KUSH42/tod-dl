@@ -13,6 +13,7 @@ import hashlib
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -201,6 +202,50 @@ class MonitorInteractionTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause(0.2)
                 self.assertEqual(len(app.screen_stack), 1)
             self.assertEqual(commands, [])
+
+    async def test_resume_admission_confirms_and_sends_request(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            commands = []
+            app, _server = self.make_app(
+                root,
+                lambda: available_actions("resume_admission"),
+                lambda request: commands.append(request) or {
+                    "outcome": "completed", "reason": "admission resumed",
+                    "state_revision": 2,
+                },
+            )
+            async with app.run_test() as pilot:
+                await pilot.pause(0.3)
+                await pilot.press("u")
+                await pilot.pause(0.2)
+                self.assertEqual(app.screen.__class__.__name__, "ActionConfirmation")
+                await pilot.press("y")
+                await pilot.pause(0.2)
+            self.assertEqual(len(commands), 1)
+            self.assertEqual(commands[0]["action"], "resume_admission")
+
+    async def test_checkpoint_stop_confirms_and_sends_request(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            commands = []
+            app, _server = self.make_app(
+                root,
+                lambda: available_actions("checkpoint_stop"),
+                lambda request: commands.append(request) or {
+                    "outcome": "completed", "reason": "checkpointing and stopping",
+                    "state_revision": 2,
+                },
+            )
+            async with app.run_test() as pilot:
+                await pilot.pause(0.3)
+                await pilot.press("k")
+                await pilot.pause(0.2)
+                self.assertEqual(app.screen.__class__.__name__, "ActionConfirmation")
+                await pilot.press("y")
+                await pilot.pause(0.2)
+            self.assertEqual(len(commands), 1)
+            self.assertEqual(commands[0]["action"], "checkpoint_stop")
 
     async def test_ineligible_action_opens_no_confirmation(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -541,6 +586,38 @@ class ItemDetailsInteractionTests(unittest.IsolatedAsyncioTestCase):
                 # A revision change must not mix pages: the count stays at the first page.
                 self.assertEqual(len(screen.attempts), 200)
 
+    async def test_arrow_keys_select_an_attempt_without_scrolling_other_sections(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = build_item_database(root)
+            url = "http://a.onion/three-attempts.bin"
+            insert_item(database, url, 1, "three-attempts.bin", status="retry_wait", attempts=3)
+            rows = [{"attempt_number": number, "attempt_id": f"a{number:04d}",
+                    "generation": "gen-1", "started_at": "2026-09-18T00:00:00Z",
+                    "ended_at": "2026-09-18T00:01:00Z", "outcome": "failed",
+                    "error_category": "network", "error_message": "connection reset"}
+                   for number in range(3, 0, -1)]
+            insert_attempts(database, url, rows)
+            app = self.make_item_app(root, database)
+            async with app.run_test() as pilot:
+                await self.open_queue_row(pilot, 0)
+                screen = app.screen
+                await pilot.press("n")
+                await pilot.pause(0.3)
+                self.assertEqual(screen.selected_attempt_index, 0)
+                await pilot.press("down")
+                await pilot.pause(0.1)
+                self.assertEqual(screen.selected_attempt_index, 1)
+                text = screen.query_one("#item-details-text").content.plain
+                self.assertIn("→ #2 a0002", text)
+                await pilot.press("down")
+                await pilot.press("down")  # clamps at the last attempt, no wraparound
+                await pilot.pause(0.1)
+                self.assertEqual(screen.selected_attempt_index, 2)
+                await pilot.press("up")
+                await pilot.pause(0.1)
+                self.assertEqual(screen.selected_attempt_index, 1)
+
     async def test_missing_attempt_history_leaves_no_attempts_shown(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -604,7 +681,8 @@ class ItemDetailsInteractionTests(unittest.IsolatedAsyncioTestCase):
                 await self.open_queue_row(pilot, 0)
                 binding_keys = {binding[0] if isinstance(binding, tuple) else binding.key
                                for binding in type(app.screen).BINDINGS}
-                self.assertEqual(binding_keys, {"escape", "r", "n", "l", "q", "t", "p", "u", "d", "k"})
+                self.assertEqual(binding_keys, {"escape", "r", "n", "l", "up", "down",
+                                                "q", "t", "p", "u", "d", "k"})
                 for key in ("q", "t", "p", "u", "d", "k"):
                     await pilot.press(key)
                     await pilot.pause(0.1)
@@ -689,6 +767,161 @@ class ItemDetailsInteractionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("reconnect.bin", text)
                 self.assertNotIn("Details unavailable", text)
                 self.assertNotIn("Last-known values retained", text)
+
+
+@unittest.skipUnless(TEXTUAL_AVAILABLE, "Textual is optional")
+class QueueRowScopedActionInteractionTests(unittest.IsolatedAsyncioTestCase):
+    """Headless coverage for row-scoped queue actions (SPEC-controller-control-ui.md)."""
+
+    def make_queue_app(self, root: Path, database: Path, executor, fps: int = 20):
+        control = ControlServer(root, "run-one", "session-one", lambda: available_actions(),
+                                executor)
+        control.start()
+        self.addCleanup(control.stop)
+        inspection = InspectionServer(root, "run-one", "session-one", database, 3)
+        inspection.start()
+        self.addCleanup(inspection.stop)
+        app_class = build_monitor_app(snapshot(), None, root, True, fps)
+        self.assertIsNotNone(app_class, "Textual is installed; build_monitor_app must succeed")
+        return app_class()
+
+    async def open_queue_tab(self, pilot, index: int = 0):
+        app = pilot.app
+        app.query_one("TabbedContent").active = "queue-tab"
+        await pilot.pause(0.3)
+        pane = app.query_one("#queue-pane")
+        table = app.query_one("#queue-table")
+        while not pane.rows:
+            await pilot.pause(0.1)
+        table.move_cursor(row=index)
+        await pilot.pause(0.05)
+        return pane
+
+    async def test_row_scoped_retry_sends_only_the_focused_item(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = build_item_database(root)
+            first, second = "http://a.onion/first.bin", "http://a.onion/second.bin"
+            insert_item(database, first, 1, "first.bin", status="retry_wait")
+            insert_item(database, second, 2, "second.bin", status="retry_wait")
+            commands = []
+            app = self.make_queue_app(
+                root, database,
+                lambda request: commands.append(request) or {"outcome": "completed"})
+            async with app.run_test() as pilot:
+                pane = await self.open_queue_tab(pilot, 1)
+                self.assertEqual(pane.selected_item_id, item_id_for(second))
+                await pilot.press("R")
+                await pilot.pause(0.2)
+                self.assertEqual(app.screen.__class__.__name__, "ActionConfirmation")
+                await pilot.press("y")
+                await pilot.pause(0.2)
+            self.assertEqual(len(commands), 1)
+            self.assertEqual(commands[0]["action"], "retry_now")
+            self.assertEqual(commands[0]["parameters"]["item_ids"], [item_id_for(second)])
+
+    async def test_row_scoped_exclude_sends_only_the_focused_item(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = build_item_database(root)
+            first, second = "http://a.onion/first.bin", "http://a.onion/second.bin"
+            insert_item(database, first, 1, "first.bin", status="queued")
+            insert_item(database, second, 2, "second.bin", status="queued")
+            commands = []
+            app = self.make_queue_app(
+                root, database,
+                lambda request: commands.append(request) or {"outcome": "completed"})
+            async with app.run_test() as pilot:
+                pane = await self.open_queue_tab(pilot, 0)
+                self.assertEqual(pane.selected_item_id, item_id_for(first))
+                await pilot.press("x")
+                await pilot.pause(0.2)
+                self.assertEqual(app.screen.__class__.__name__, "ActionConfirmation")
+                await pilot.press("y")
+                await pilot.pause(0.2)
+            self.assertEqual(len(commands), 1)
+            self.assertEqual(commands[0]["action"], "exclude_item")
+            self.assertEqual(commands[0]["parameters"]["item_ids"], [item_id_for(first)])
+
+    async def test_row_scoped_priority_raise_sends_only_the_focused_item(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = build_item_database(root)
+            first, second = "http://a.onion/first.bin", "http://a.onion/second.bin"
+            insert_item(database, first, 1, "first.bin", status="queued")
+            insert_item(database, second, 2, "second.bin", status="queued")
+            commands = []
+            app = self.make_queue_app(
+                root, database,
+                lambda request: commands.append(request) or {"outcome": "completed"})
+            async with app.run_test() as pilot:
+                pane = await self.open_queue_tab(pilot, 0)
+                self.assertEqual(pane.selected_item_id, item_id_for(first))
+                await pilot.press("]")
+                await pilot.pause(0.2)
+                self.assertEqual(app.screen.__class__.__name__, "ActionConfirmation")
+                await pilot.press("y")
+                await pilot.pause(0.2)
+            self.assertEqual(len(commands), 1)
+            self.assertEqual(commands[0]["action"], "set_item_priority")
+            self.assertEqual(commands[0]["parameters"]["item_ids"], [item_id_for(first)])
+            self.assertEqual(commands[0]["parameters"]["priority"], 1)
+
+    async def test_row_scoped_cooldown_lower_sends_only_the_focused_item(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = build_item_database(root)
+            first, second = "http://a.onion/first.bin", "http://a.onion/second.bin"
+            insert_item(database, first, 1, "first.bin", status="retry_wait",
+                       next_retry_at=time.time() + 60)
+            insert_item(database, second, 2, "second.bin", status="retry_wait",
+                       next_retry_at=time.time() + 60)
+            commands = []
+            app = self.make_queue_app(
+                root, database,
+                lambda request: commands.append(request) or {"outcome": "completed"})
+            async with app.run_test() as pilot:
+                pane = await self.open_queue_tab(pilot, 1)
+                self.assertEqual(pane.selected_item_id, item_id_for(second))
+                await pilot.press("{")
+                await pilot.pause(0.2)
+                self.assertEqual(app.screen.__class__.__name__, "ActionConfirmation")
+                await pilot.press("y")
+                await pilot.pause(0.2)
+            self.assertEqual(len(commands), 1)
+            self.assertEqual(commands[0]["action"], "set_retry_cooldown")
+            self.assertEqual(commands[0]["parameters"]["item_ids"], [item_id_for(second)])
+
+    async def test_row_scoped_action_ignores_filtered_out_rows(self):
+        # A bucket filter must not let the row-scoped action reach beyond the
+        # explicitly focused, visible row -- even though a second, filtered-out
+        # item also exists in the selected set.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = build_item_database(root)
+            visible, hidden = "http://a.onion/visible.bin", "http://a.onion/hidden.bin"
+            insert_item(database, visible, 1, "visible.bin", status="retry_wait")
+            insert_item(database, hidden, 2, "hidden.bin", status="complete")
+            commands = []
+            app = self.make_queue_app(
+                root, database,
+                lambda request: commands.append(request) or {"outcome": "completed"})
+            async with app.run_test() as pilot:
+                app.query_one("TabbedContent").active = "queue-tab"
+                await pilot.pause(0.3)
+                pane = app.query_one("#queue-pane")
+                pane.bucket = "retry"
+                app.query_one("#queue-bucket").value = "retry"
+                pane.reload(reset=True)
+                await pilot.pause(0.3)
+                self.assertEqual(len(pane.rows), 1)
+                self.assertEqual(pane.selected_item_id, item_id_for(visible))
+                await pilot.press("R")
+                await pilot.pause(0.2)
+                await pilot.press("y")
+                await pilot.pause(0.2)
+            self.assertEqual(len(commands), 1)
+            self.assertEqual(commands[0]["parameters"]["item_ids"], [item_id_for(visible)])
 
 
 if __name__ == "__main__":

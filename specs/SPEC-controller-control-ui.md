@@ -204,19 +204,27 @@ to add.
 
 `tests/test_monitor_interaction.py` adds headless-Textual interaction tests
 (`Pilot`/`run_test`) against a real `ControlServer` over a temporary socket,
-covering: a confirm/cancel round trip for a run-wide action; an ineligible
-action opening no confirmation; `p`/`u`/`d`/`k` disabled inside
-`WorkerDetails`; the control-state poll gate staying at or below two polls
-per second; activity-pane scroll position surviving a snapshot update; a
-terminal resize; and controller restart/reconnect recovering control state.
-Writing these tests found and fixed a real bug: a queued render tick could
-fire against an already-torn-down default screen during app shutdown,
-raising `NoMatches` (see `populate()`'s guard in `src/monitor.py`).
+covering: a confirm/cancel round trip for a run-wide action; dedicated
+confirm/send round trips for `pause_admission`, `resume_admission`,
+`drain_and_stop`, and `checkpoint_stop`; an ineligible action opening no
+confirmation; `p`/`u`/`d`/`k` disabled inside `WorkerDetails`; the
+control-state poll gate staying at or below two polls per second;
+activity-pane scroll position surviving a snapshot update; a terminal
+resize; and controller restart/reconnect recovering control state. Writing
+these tests found and fixed a real bug: a queued render tick could fire
+against an already-torn-down default screen during app shutdown, raising
+`NoMatches` (see `populate()`'s guard in `src/monitor.py`).
+
+Row-scoped queue actions now have Pilot-level interaction tests in
+`QueueRowScopedActionInteractionTests` (`tests/test_monitor_interaction.py`),
+driving a real `ControlServer` and `InspectionServer` over temporary
+sockets: `retry_now`, `exclude_item`, `set_item_priority`, and
+`set_retry_cooldown` each confirm the row-scoped `item_ids` sent to the
+executor matches only the focused row, and one test confirms a bucket
+filter that hides a second selected item does not widen that scope.
 
 Still unverified: the 30-FPS/150ms-p95 input-latency SLO on documented
 hardware (not meaningfully assertable in a CI unit test), a 60-FPS
 configuration specifically, and "kill the UI during every command stage"
 across the full command set (only the confirm/cancel/reconnect paths above
-are covered). Row-scoped queue actions (`retry_now`, `exclude_item`,
-`set_item_priority`, `set_retry_cooldown`) still have only controller-side
-contract tests, no Pilot-level interaction tests.
+are covered).

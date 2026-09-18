@@ -1,6 +1,6 @@
 # Specification: console item details
 
-Status: partially implemented, September 18, 2026. This view explains one
+Status: implemented, September 18, 2026. This view explains one
 selected item's identity, acquisition state, attempts, and validation results.
 
 The view supplements the [console UI](SPEC-console-ui.md) and uses the
@@ -79,7 +79,11 @@ clear the revealed value.
 Source URLs must not appear in breadcrumbs, queue rows, or activity messages.
 
 **Tab** and **Shift+Tab** must move between sections and actions. Arrow keys
-must scroll the focused section or select an attempt. **Escape** must return
+must scroll the focused section or select an attempt. `ItemDetails` in
+`src/monitor.py` binds **Up**/**Down** to move a highlighted-attempt index
+within the loaded attempt page, rendered with a `→` marker; with no
+attempts loaded, the same keys fall back to scrolling the details pane.
+**Escape** must return
 to the prior view and restore its selection, filter, page, and scroll position.
 **l** must open the selected item's logs under the parent console log rules.
 If logs are unavailable, the view must report the reason.
