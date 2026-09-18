@@ -197,9 +197,10 @@ restore the queue's filter, page, selection, and scroll position.
 Retry rows must show the recorded UTC deadline and a local countdown when
 freshness permits, applying the console's five-second stale and 15-second
 disconnected rules. At zero, show **Eligible; awaiting controller**.
-Freeze countdowns when stale. The `retry_access_denied` action can re-admit an access-denied review item,
-but no controller mechanism re-admits an exhausted item. The view must always
-show those buckets as not eligible, never a countdown.
+Freeze countdowns when stale. The `retry_access_denied` and
+`resume_new_generation` actions can re-admit a review item, but no controller
+mechanism re-admits an exhausted item. The view must always show the exhausted
+and review-required buckets as not eligible, never a countdown.
 Global or origin cooldown can delay an eligible item; show
 **Eligible; cooldown active** instead of **Eligible; awaiting controller**.
 
@@ -212,16 +213,10 @@ implemented, bound to `x` in the queue pane. Reordering is implemented, bound
 to `]` (raise) and `[` (lower) in the queue pane. Queue editing is
 implemented, bound to `}` (raise) and `{` (lower) in the queue pane, in
 30-second steps within the controller-defined bounds. Export is implemented,
-bound to `e` in the queue pane. All five are scoped as follows. Retrying an
-access-denied item is implemented as a sixth row-scoped action, bound to `A` in
-the queue pane. It sends `retry_access_denied` with `item_ids` limited to the
-focused row, and the key is offered only for a `review_required` row. The
-controller alone validates the `access_denied` review code. Restarting a
-review item under a new staging generation is implemented as a seventh
-row-scoped action, bound to `N` in the queue pane. It sends
-`resume_new_generation` with `item_ids` limited to the focused row, and the key
-is offered only for a `review_required` row. The controller alone validates the
-review code.
+bound to `e` in the queue pane. Retrying an access-denied item is implemented,
+bound to `A` in the queue pane. Restarting a review item under a new staging
+generation is implemented, bound to `N` in the queue pane. All seven are scoped
+as follows.
 
 Row-scoped retry sends the existing `retry_now` action with an `item_ids`
 parameter limited to the focused or multi-selected rows, instead of every
@@ -248,14 +243,21 @@ a selected item's retry-cooldown override within controller-defined bounds.
 It must not bypass the existing global or origin cooldown, and it must not
 accept an operator-supplied destination path or any other manifest field.
 
+Retrying an access-denied item sends the `retry_access_denied` action. It
+returns the item to `queued` and keeps its staged bytes. Restarting sends the
+`resume_new_generation` action. It returns the item to `queued` under a new
+staging generation. Each key is offered only for a `review_required` row, and
+each sends `item_ids` limited to the focused row. The controller alone
+validates the review code.
+
 Export is read-only and requires no controller action: it writes the
 currently loaded page, or every row matching the active filters across a
 full paginated scan, to a local file the operator chooses. It must not
 retry, reorder, exclude, or edit any item, and it must not bypass the rule
 above against source URLs and absolute private paths appearing in rows.
 
-Row-scoped retry, reordering, removal, and queue editing each follow the
-same controller-confirmation, nonce, and audit pattern as `retry_now`,
+Row-scoped retry, reordering, removal, queue editing, access-denied retry,
+and generation restart each follow the same controller-confirmation, nonce, and audit pattern as `retry_now`,
 scoped by `item_ids` to the rows the operator explicitly selected. A
 filtered or paginated view must not silently apply a row-scoped action to
 hidden rows: the UI must send only the explicitly selected item IDs, never
@@ -277,8 +279,8 @@ Tests must use temporary manifests and synthetic pages, without source access.
 - Verify details return, selection retention, keyboard focus, and resizing.
 - Verify retry countdowns do not imply admission or trigger commands.
 - Verify filters do not change selection, totals, or command scope.
-- Verify row-scoped retry, reordering, removal, and queue editing each
-  require controller confirmation, scope only the explicitly selected item
+- Verify row-scoped retry, reordering, removal, queue editing, access-denied
+  retry, and generation restart each require controller confirmation, scope only the explicitly selected item
   IDs, never apply to filtered-but-hidden rows, and leave queue rank and
   the selected set's audit history unchanged.
 - Verify export contains only loaded or filter-matching rows, excludes
