@@ -151,6 +151,136 @@ class ScenarioResult:
             raise EvaluationError("scenario requirement must not be empty")
 
 
+def process_tree_pids(root_pid: int) -> list[int]:
+    """Return every PID in the process tree rooted at root_pid, root included.
+
+    Walks /proc's PPid links rather than direct children only: a supervisor's
+    `torsocks -i aria2c` engine process may be a grandchild instead of a
+    direct child, depending on whether torsocks exec-replaces itself.
+    """
+    parents: dict[int, int] = {}
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdecimal():
+            continue
+        try:
+            status = (entry / "status").read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in status.splitlines():
+            if line.startswith("PPid:"):
+                parents[int(entry.name)] = int(line.split(":", 1)[1].strip())
+                break
+    tree = {root_pid}
+    changed = True
+    while changed:
+        changed = False
+        for pid, ppid in parents.items():
+            if ppid in tree and pid not in tree:
+                tree.add(pid)
+                changed = True
+    return sorted(tree)
+
+
+def process_command(pid: int) -> str:
+    """Return a PID's command line, or an empty string if it already exited."""
+    try:
+        raw = (Path("/proc") / str(pid) / "cmdline").read_bytes()
+    except OSError:
+        return ""
+    return raw.decode("utf-8", "replace").replace("\0", " ").strip()
+
+
+def process_rss_bytes(pid: int) -> int:
+    """Return one process's resident set size in bytes, or 0 if it already exited."""
+    try:
+        status = (Path("/proc") / str(pid) / "status").read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    for line in status.splitlines():
+        if line.startswith("VmRSS:"):
+            return int(line.split()[1]) * 1024
+    return 0
+
+
+def find_engine_pid(controller_pid: int) -> int | None:
+    """Return the aria2c process PID in the controller's tree, if it is running."""
+    for pid in process_tree_pids(controller_pid):
+        if pid != controller_pid and "aria2c" in process_command(pid):
+            return pid
+    return None
+
+
+def wait_for_bytes_written(path: Path, threshold: int, timeout: float,
+                           poll_interval: float = 0.05) -> bool:
+    """Poll a file's size until it reaches threshold bytes; return whether it did.
+
+    Used to trigger a reproducible kill point by observed bytes transferred,
+    not wall-clock delay: the fixture server's event log has no entry for an
+    in-progress transfer, so on-disk staging size is the only observable
+    signal during the transfer.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if path.stat().st_size >= threshold:
+                return True
+        except FileNotFoundError:
+            pass
+        time.sleep(poll_interval)
+    return False
+
+
+class ResourceSampler:
+    """Sample a process tree's summed RSS at a fixed interval, in a thread.
+
+    The interval is documented here (not standardized elsewhere) per the
+    parent specification's "document the interval" instruction: 1.0 second.
+    """
+
+    DEFAULT_INTERVAL_SECONDS = 1.0
+
+    def __init__(self, root_pid: int, interval_seconds: float | None = None) -> None:
+        self.root_pid = root_pid
+        self.interval_seconds = interval_seconds or self.DEFAULT_INTERVAL_SECONDS
+        self.samples: list[int] = []
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            total = sum(process_rss_bytes(pid) for pid in process_tree_pids(self.root_pid))
+            if total:
+                self.samples.append(total)
+            self._stop.wait(self.interval_seconds)
+
+    def start(self) -> "ResourceSampler":
+        self._thread = threading.Thread(target=self._run, name="rss-sampler", daemon=True)
+        self._thread.start()
+        return self
+
+    def stop(self) -> int:
+        """Stop sampling and return the maximum summed RSS observed, in bytes."""
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=5)
+        return max(self.samples, default=0)
+
+
+def generate_synthetic_queue_rows(count: int, body_length: int = 32,
+                                  seed_prefix: str = "e10") -> list[Fixture]:
+    """Build `count` syntactic fixture rows without materializing any body.
+
+    Each body is tiny; the fixture server synthesizes it on demand from the
+    same deterministic generator smaller fixtures use. This scenario tests
+    admission and resource bounds, not per-row transfer bandwidth, so a full
+    transfer of every row is not the point (parent specification, "do not
+    request every URL").
+    """
+    return [Fixture.create(f"{seed_prefix}-{index:07d}.bin", f"{seed_prefix}-{index}",
+                           body_length)
+           for index in range(count)]
+
+
 def canonical_json(value: Any) -> bytes:
     """Return stable JSON bytes for hashes and durable evaluation records."""
     return (json.dumps(value, sort_keys=True, separators=(",", ":"),

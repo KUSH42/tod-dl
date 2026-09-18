@@ -1,14 +1,28 @@
 # Specification: acquisition evaluation infrastructure
 
-Status: partially implemented, September 18, 2026. The
-`reconcile_promotions()` extension resolved under Section 3's open question
-is built (`Downloader.reconcile_promotions()` and `is_promotable_final_path()`,
-`src/tod-dl.py`); the three test-only failpoints and the other four
-evaluation-infrastructure pieces are not. [The evaluation report of
-September 18, 2026]
-(reports/acquisition-tool-evaluation-2026-09-18.md) ran 9 of 14 scenarios and
-left E02, E05, E06, E10, and E13 as `not run` because their harness pieces did
-not exist. This specification defines those five pieces.
+Status: implemented, September 18, 2026. All five pieces are built: the
+streaming 8 GiB fixture pass for E02 (`Fixture`, `FixtureServer`, and
+`e02_large_file_interrupted_resume`, `src/run_acquisition_evaluation.py`);
+the kill-injection harness for E05 (`start_downloader`,
+`src/aria2_evaluation_adapter.py`; `process_tree_pids`, `find_engine_pid`,
+`wait_for_bytes_written`, `src/acquisition_evaluation.py`;
+`e05_kill_injection`); the three named controller failpoints for E06
+(`hit_failpoint`, `FAILPOINTS`, `src/tod-dl.py`, gated by `TOD_DL_FAILPOINT`)
+plus the `reconcile_promotions()` extension for failpoint (a), already built
+before this specification (`Downloader.reconcile_promotions()` and
+`is_promotable_final_path()`, `src/tod-dl.py`); the one-million-row queue
+generator and resource sampler for E10 (`generate_synthetic_queue_rows`,
+`ResourceSampler`, `src/acquisition_evaluation.py`;
+`e10_million_row_admission_and_resources`); and the concurrency-timing
+assertions for E13 (`e13_concurrency_timing`), reading admission and
+completion timestamps from `download_transitions` via `read_transitions`
+(`src/aria2_evaluation_adapter.py`). Per this specification's scope, none of
+E02, E05, E06, E10, or E13 was run as part of this work; a later evaluation
+report must run them, per
+[the acquisition tool evaluation specification](SPEC-acquisition-tool-evaluation.md).
+E02 is expected to fail as built, per Section 1's resolved note: a
+mid-transfer connection cut is routed to `review_required`, foreclosing
+resume, and that controller-side gap stays out of this specification's scope.
 
 ## Outcome and scope
 

@@ -81,6 +81,8 @@ CREATE TABLE IF NOT EXISTS telemetry_revisions (
 );
 """
 RETRY_DELAYS = (60, 120, 240, 300, 300, 300)
+FAILPOINTS = frozenset({"post_validation_intent", "post_final_file_creation",
+                        "post_completion_commit"})
 EXCLUDABLE_STATUSES = frozenset({"pending", "queued", "active", "admitted",
                                  "retry_wait", "failed", "review_required",
                                  "unavailable"})
@@ -328,6 +330,18 @@ def is_incomplete_body_failure(error: str) -> bool:
     specific message rather than the code alone.
     """
     return "GOT EOF FROM THE SERVER" in error.upper()
+
+
+def hit_failpoint(name: str) -> None:
+    """Exit immediately if TOD_DL_FAILPOINT names this boundary (test only).
+
+    Simulates a process kill at an exact finalization step, for E06. Never
+    reachable in normal operation: the evaluation runner is the only caller
+    that sets TOD_DL_FAILPOINT.
+    """
+    assert name in FAILPOINTS, f"unknown failpoint {name!r}"
+    if os.environ.get("TOD_DL_FAILPOINT") == name:
+        os._exit(70)
 
 
 def review_code_for_error(error: OSError) -> str | None:
@@ -1873,6 +1887,7 @@ class Downloader:
             self.transition(db, url, "promoting", sha256=digest,
                             bytes=staging.stat().st_size, promotion_target=str(target),
                             promotion_intent_at=now())
+            hit_failpoint("post_validation_intent")
         except (OSError, RuntimeError) as exc:
             self.transition(db, url, "review_required", str(exc), sha256=digest,
                             bytes=staging.stat().st_size, last_error=str(exc),
@@ -1899,10 +1914,12 @@ class Downloader:
             self.clear_transfer_telemetry(url)
             print(f"[review] {rel}: promotion failed: {exc}", flush=True)
             return "review"
+        hit_failpoint("post_final_file_creation")
         self.flush_directory(target.parent)
         self.finalized_event(url, rel.as_posix(), stored_text, target.stat().st_size, digest)
         self.clear_transfer_telemetry(url)
         self.transition(db, url, "complete", bytes=target.stat().st_size, sha256=digest)
+        hit_failpoint("post_completion_commit")
         os.unlink(staging)
         self.transition(db, url, "complete", "staging cleanup complete",
                         cleanup_completed_at=now())

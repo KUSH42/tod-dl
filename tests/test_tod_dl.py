@@ -28,10 +28,10 @@ tod_dl = importlib.util.module_from_spec(module_spec)
 sys.modules["tod_dl"] = tod_dl
 module_spec.loader.exec_module(tod_dl)
 
-from tod_dl import (ADMISSION_POLL_SECONDS, Downloader, RETRY_DELAYS,
+from tod_dl import (ADMISSION_POLL_SECONDS, FAILPOINTS, Downloader, RETRY_DELAYS,
                     TelemetryStateProjection,
-                    aria2_log_terminal_status, aria2_rpc_job_status, relative_path,
-                    sha256sum, storage_relative)
+                    aria2_log_terminal_status, aria2_rpc_job_status, hit_failpoint,
+                    relative_path, sha256sum, storage_relative)
 from download_telemetry import (PUBLISH_INTERVAL_SECONDS, TelemetryPublisher,
                                 estimate_eta_seconds, reduce_metrics)
 from provenance import ProvenanceWriter
@@ -1122,6 +1122,39 @@ class LocalFakeTransferEngine:
         staging.write_bytes(self.payload + b" changed representation")
         Path(str(staging) + ".aria2").unlink(missing_ok=True)
         return True, "local fixture changed representation"
+
+
+class FailpointGatingTests(unittest.TestCase):
+    """TOD_DL_FAILPOINT must gate exactly the named boundary, for E06."""
+
+    def test_only_the_matching_failpoint_exits(self):
+        original_exit = os.environ.get("TOD_DL_FAILPOINT")
+        original_os_exit = tod_dl.os._exit
+        calls = []
+        tod_dl.os._exit = lambda code: calls.append(code)
+        try:
+            os.environ["TOD_DL_FAILPOINT"] = "post_final_file_creation"
+            hit_failpoint("post_validation_intent")
+            self.assertEqual(calls, [])
+            hit_failpoint("post_final_file_creation")
+            self.assertEqual(calls, [70])
+            del os.environ["TOD_DL_FAILPOINT"]
+            hit_failpoint("post_completion_commit")
+            self.assertEqual(calls, [70])
+        finally:
+            tod_dl.os._exit = original_os_exit
+            if original_exit is None:
+                os.environ.pop("TOD_DL_FAILPOINT", None)
+            else:
+                os.environ["TOD_DL_FAILPOINT"] = original_exit
+
+    def test_unknown_failpoint_name_is_rejected(self):
+        with self.assertRaises(AssertionError):
+            hit_failpoint("not_a_real_failpoint")
+
+    def test_all_three_failpoints_are_named_distinctly(self):
+        self.assertEqual(FAILPOINTS, {"post_validation_intent", "post_final_file_creation",
+                                      "post_completion_commit"})
 
 
 class AcquisitionFaultRecoveryTests(unittest.TestCase):

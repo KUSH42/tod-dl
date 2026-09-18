@@ -71,15 +71,10 @@ def write_queue_file(path: Path, urls: list[str]) -> Path:
     return path
 
 
-def run_downloader(*, queue: Path, destination: Path, state: Path,
-                    workers: int = 1, max_files: int = 0,
-                    reserve_bytes: int = 0, time_limit: float = 0,
-                    tor_control_address: str = "127.0.0.1:9051",
-                    tor_control_cookie: Path = Path("/run/tor/control.authcookie"),
-                    torsocks_conf: Path | None = None,
-                    extra_args: list[str] | None = None,
-                    timeout: float = 30) -> subprocess.CompletedProcess:
-    """Invoke the real downloader CLI as a subprocess and return its result."""
+def _downloader_command(*, queue: Path, destination: Path, state: Path, workers: int,
+                        max_files: int, reserve_bytes: int, time_limit: float,
+                        tor_control_address: str, tor_control_cookie: Path,
+                        extra_args: list[str] | None) -> list[str]:
     command = [
         sys.executable, str(DOWNLOADER),
         "--queue", str(queue),
@@ -99,16 +94,85 @@ def run_downloader(*, queue: Path, destination: Path, state: Path,
     if time_limit:
         command += ["--time-limit", str(time_limit)]
     command += extra_args or []
-    env = None
+    return command
+
+
+def _downloader_env(torsocks_conf: Path | None, failpoint: str | None) -> dict | None:
+    """Build the subprocess environment, adding TOD_DL_FAILPOINT only for E06.
+
+    TOD_DL_FAILPOINT is never reachable in normal operation; only this
+    evaluation adapter sets it, to exercise one named controller failpoint.
+    """
+    import os
+    if torsocks_conf is None and failpoint is None:
+        return None
+    env = dict(os.environ)
     if torsocks_conf is not None:
-        import os
-        env = dict(os.environ)
         env["TORSOCKS_CONF_FILE"] = str(torsocks_conf)
+    if failpoint is not None:
+        env["TOD_DL_FAILPOINT"] = failpoint
+    return env
+
+
+def run_downloader(*, queue: Path, destination: Path, state: Path,
+                    workers: int = 1, max_files: int = 0,
+                    reserve_bytes: int = 0, time_limit: float = 0,
+                    tor_control_address: str = "127.0.0.1:9051",
+                    tor_control_cookie: Path = Path("/run/tor/control.authcookie"),
+                    torsocks_conf: Path | None = None,
+                    extra_args: list[str] | None = None,
+                    failpoint: str | None = None,
+                    timeout: float = 30) -> subprocess.CompletedProcess:
+    """Invoke the real downloader CLI as a subprocess and return its result."""
+    command = _downloader_command(queue=queue, destination=destination, state=state,
+                                  workers=workers, max_files=max_files,
+                                  reserve_bytes=reserve_bytes, time_limit=time_limit,
+                                  tor_control_address=tor_control_address,
+                                  tor_control_cookie=tor_control_cookie,
+                                  extra_args=extra_args)
+    env = _downloader_env(torsocks_conf, failpoint)
     try:
         return subprocess.run(command, capture_output=True, text=True,
                               timeout=timeout, cwd=str(REPO_ROOT), env=env)
     except subprocess.TimeoutExpired as exc:
         raise AdapterError(f"downloader did not exit within {timeout}s: {exc}") from exc
+
+
+def start_downloader(*, queue: Path, destination: Path, state: Path,
+                     workers: int = 1, max_files: int = 0,
+                     reserve_bytes: int = 0, time_limit: float = 0,
+                     tor_control_address: str = "127.0.0.1:9051",
+                     tor_control_cookie: Path = Path("/run/tor/control.authcookie"),
+                     torsocks_conf: Path | None = None,
+                     extra_args: list[str] | None = None) -> subprocess.Popen:
+    """Start the real downloader CLI and return a live handle instead of blocking.
+
+    `run_downloader`'s `subprocess.run` blocks until the controller exits and
+    exposes no PID while it runs. Kill-injection (E05) needs the live PID.
+    """
+    command = _downloader_command(queue=queue, destination=destination, state=state,
+                                  workers=workers, max_files=max_files,
+                                  reserve_bytes=reserve_bytes, time_limit=time_limit,
+                                  tor_control_address=tor_control_address,
+                                  tor_control_cookie=tor_control_cookie,
+                                  extra_args=extra_args)
+    env = _downloader_env(torsocks_conf, None)
+    return subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, cwd=str(REPO_ROOT), env=env)
+
+
+def read_transitions(state: Path) -> list[dict[str, Any]]:
+    """Return every durable status transition, in recorded order."""
+    database = state / "manifest.sqlite"
+    if not database.exists():
+        return []
+    with sqlite3.connect(database) as db:
+        db.row_factory = sqlite3.Row
+        rows = db.execute(
+            "SELECT url, from_status, to_status, recorded_at FROM download_transitions "
+            "ORDER BY id"
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def read_downloads(state: Path) -> dict[str, dict[str, Any]]:

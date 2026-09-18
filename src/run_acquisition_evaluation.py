@@ -12,18 +12,25 @@ from __future__ import annotations
 
 import json
 import os
+import signal
+import sqlite3
 import stat
+import subprocess
 import sys
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from acquisition_evaluation import (Fixture, ResponseScript, ScenarioResult,
-                                    build_report, write_json, write_manifest)
+from acquisition_evaluation import (Fixture, ResourceSampler, ResponseScript,
+                                    ScenarioResult, build_report,
+                                    find_engine_pid, generate_synthetic_queue_rows,
+                                    wait_for_bytes_written, write_json, write_manifest)
 from aria2_evaluation_adapter import (FIXTURE_PREFIX, fixture_server, isolated_dirs,
-                                      read_downloads, run_downloader,
+                                      read_downloads, read_transitions, run_downloader,
+                                      start_downloader,
                                       write_local_fixture_torsocks_conf,
                                       write_queue_file)
+from inspection import inspection_request
 
 TOR_CONTROL_ADDRESS = "127.0.0.1:9051"
 TOR_CONTROL_COOKIE = Path("/run/tor/control.authcookie")
@@ -330,17 +337,264 @@ def e14_tor_admission_guard(base: Path, torsocks_conf: Path) -> ScenarioResult:
                           f"unexpected outcome | {detail}", str(events))
 
 
+def e02_large_file_interrupted_resume(base: Path, torsocks_conf: Path) -> ScenarioResult:
+    """Interrupt an 8 GiB streamed transfer at exactly 256 MiB, then resume.
+
+    Runs once per candidate, not part of the repeated failure-boundary set,
+    per the parent specification's large-file-fixture guidance. The fixture
+    server never materializes the representation; it streams bytes from the
+    deterministic generator at the requested offset, and the expected digest
+    comes from a second, independent streaming pass over the same generator
+    and seed (Fixture.create).
+
+    Per SPEC-acquisition-evaluation-infrastructure.md Section 1's resolved
+    note, this cannot currently pass: a connection cut mid-transfer is
+    classified the same as a genuinely short body and routed to
+    review_required, which forecloses resume. That controller-side gap is
+    out of this specification's scope.
+    """
+    root = scenario_root(base, "E02")
+    body = Fixture.create("e02.bin", "e02-body", 8 * 1024**3)
+    write_manifest(root / "fixture-manifest.json", [body])
+    events = root / "fixture-events.json"
+    destination, state = isolated_dirs(root)
+    scripts = {body.name: [ResponseScript(terminate_after_bytes=256 * 1024**2)]}
+    with fixture_server([body], events, scripts=scripts) as server:
+        queue = write_queue_file(root / "queue.txt", [server.url(body.name)])
+        result1 = run_downloader(queue=queue, destination=destination, state=state,
+                                 reserve_bytes=0, tor_control_address=TOR_CONTROL_ADDRESS,
+                                 tor_control_cookie=TOR_CONTROL_COOKIE,
+                                 torsocks_conf=torsocks_conf, time_limit=600, timeout=900)
+        result2 = run_downloader(queue=queue, destination=destination, state=state,
+                                 reserve_bytes=0, tor_control_address=TOR_CONTROL_ADDRESS,
+                                 tor_control_cookie=TOR_CONTROL_COOKIE,
+                                 torsocks_conf=torsocks_conf, time_limit=600, timeout=900)
+    rows = read_downloads(state)
+    row = next(iter(rows.values()), None)
+    logged = json.loads(events.read_text())["events"] if events.exists() else []
+    second_range = next((e["range"] for e in logged[1:] if e["fixture"] == body.name), None)
+    detail = (f"run1_exit={result1.returncode} run2_exit={result2.returncode} row={row} "
+             f"second_request_range={second_range}")
+    if (row and row["status"] == "complete" and row["sha256"] == body.sha256
+            and second_range and not second_range.startswith("bytes=0-")):
+        return ScenarioResult("E02", "pass", "E02: resume a large interrupted transfer",
+                              f"resumed with a nonzero Range and a matching digest, no full "
+                              f"restart from byte 0 | {detail}", str(events))
+    return ScenarioResult("E02", "fail", "E02: resume a large interrupted transfer",
+                          f"did not resume and complete with a matching digest | {detail}",
+                          str(events))
+
+
+def e05_kill_injection(base: Path, torsocks_conf: Path) -> ScenarioResult:
+    """Kill the engine, controller, and both mid-transfer; restart; verify durable state.
+
+    Triggers each kill by polling the staging file's on-disk size (never by
+    wall-clock delay), so the kill point is reproducible across runs; the
+    fixture server's event log has no entry for an in-progress transfer. The
+    "both" sub-case sends simultaneous SIGKILLs, per this specification's
+    resolved open question (the harder case first).
+    """
+    root = scenario_root(base, "E05")
+    kill_threshold = 4 * 1024**2
+    details = []
+    for sub_case in ("engine", "controller", "both"):
+        sub_root = root / sub_case
+        sub_root.mkdir(parents=True)
+        body = Fixture.create(f"e05-{sub_case}.bin", f"e05-{sub_case}", 32 * 1024**2)
+        write_manifest(sub_root / "fixture-manifest.json", [body])
+        events = sub_root / "fixture-events.json"
+        destination, state = isolated_dirs(sub_root)
+        scripts = {body.name: [ResponseScript(delay_seconds=0.01)]}
+        with fixture_server([body], events, scripts=scripts) as server:
+            queue = write_queue_file(sub_root / "queue.txt", [server.url(body.name)])
+            process = start_downloader(queue=queue, destination=destination, state=state,
+                                       reserve_bytes=0, tor_control_address=TOR_CONTROL_ADDRESS,
+                                       tor_control_cookie=TOR_CONTROL_COOKIE,
+                                       torsocks_conf=torsocks_conf)
+            staging = None
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline and staging is None:
+                rows = read_downloads(state)
+                row = next(iter(rows.values()), None)
+                if row and row.get("staging_path"):
+                    staging = Path(row["staging_path"])
+                else:
+                    time.sleep(0.1)
+            reached = staging is not None and wait_for_bytes_written(
+                staging, kill_threshold, timeout=30)
+            engine_pid = find_engine_pid(process.pid)
+            if sub_case in ("engine", "both") and engine_pid:
+                os.kill(engine_pid, signal.SIGKILL)
+            if sub_case in ("controller", "both"):
+                process.kill()
+            try:
+                process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=15)
+            result2 = run_downloader(queue=queue, destination=destination, state=state,
+                                     reserve_bytes=0, tor_control_address=TOR_CONTROL_ADDRESS,
+                                     tor_control_cookie=TOR_CONTROL_COOKIE,
+                                     torsocks_conf=torsocks_conf, time_limit=30, timeout=60)
+        rows = read_downloads(state)
+        row = next(iter(rows.values()), None)
+        details.append(f"{sub_case}: reached_threshold={reached} exit2={result2.returncode} "
+                       f"row={row}")
+    detail = " | ".join(details)
+    return ScenarioResult("E05", "not run", "E05: survive engine/controller/both kills",
+                          f"harness built, not executed this session | {detail}", None)
+
+
+def e06_controller_failpoints(base: Path, torsocks_conf: Path) -> ScenarioResult:
+    """Stop the controller at each of the three named finalization failpoints.
+
+    Sets TOD_DL_FAILPOINT (via run_downloader's `failpoint` parameter), which
+    only this evaluation runner sets; the environment variable is never
+    reachable in normal operation (Downloader.hit_failpoint, tod-dl.py).
+    """
+    root = scenario_root(base, "E06")
+    details = []
+    for failpoint in ("post_validation_intent", "post_final_file_creation",
+                      "post_completion_commit"):
+        sub_root = root / failpoint
+        sub_root.mkdir(parents=True)
+        body = Fixture.create(f"e06-{failpoint}.bin", f"e06-{failpoint}", 4096)
+        write_manifest(sub_root / "fixture-manifest.json", [body])
+        events = sub_root / "fixture-events.json"
+        destination, state = isolated_dirs(sub_root)
+        with fixture_server([body], events) as server:
+            queue = write_queue_file(sub_root / "queue.txt", [server.url(body.name)])
+            result1 = run_downloader(queue=queue, destination=destination, state=state,
+                                     reserve_bytes=0, tor_control_address=TOR_CONTROL_ADDRESS,
+                                     tor_control_cookie=TOR_CONTROL_COOKIE,
+                                     torsocks_conf=torsocks_conf, failpoint=failpoint,
+                                     time_limit=15, timeout=30)
+            result2 = run_downloader(queue=queue, destination=destination, state=state,
+                                     reserve_bytes=0, tor_control_address=TOR_CONTROL_ADDRESS,
+                                     tor_control_cookie=TOR_CONTROL_COOKIE,
+                                     torsocks_conf=torsocks_conf, time_limit=15, timeout=30)
+        rows = read_downloads(state)
+        row = next(iter(rows.values()), None)
+        details.append(f"{failpoint}: exit1={result1.returncode} exit2={result2.returncode} "
+                       f"row={row}")
+    detail = " | ".join(details)
+    return ScenarioResult("E06", "not run",
+                          "E06: unambiguous process boundaries at finalization",
+                          f"harness built, not executed this session | {detail}", None)
+
+
+def e10_million_row_admission_and_resources(base: Path, torsocks_conf: Path) -> ScenarioResult:
+    """One million rows; assert resource, admission, latency, and shutdown targets.
+
+    Generates the queue file fresh in this isolated run directory, per this
+    specification's resolved open question. The fixture server synthesizes
+    each tiny body on demand; nothing is requested for most of the million
+    rows, per the parent specification's "do not request every URL."
+    """
+    root = scenario_root(base, "E10")
+    run_id = "e10-admission-run"
+    fixtures = generate_synthetic_queue_rows(1_000_000)
+    events = root / "fixture-events.json"
+    destination, state = isolated_dirs(root)
+    with fixture_server(fixtures, events) as server:
+        urls = [server.url(fixture.name) for fixture in fixtures]
+        queue = write_queue_file(root / "queue.txt", urls)
+        process = start_downloader(queue=queue, destination=destination, state=state,
+                                   workers=4, reserve_bytes=0,
+                                   tor_control_address=TOR_CONTROL_ADDRESS,
+                                   tor_control_cookie=TOR_CONTROL_COOKIE,
+                                   torsocks_conf=torsocks_conf, time_limit=120,
+                                   extra_args=["--run-id", run_id])
+        sampler = ResourceSampler(process.pid).start()
+        status_latencies = []
+        run_deadline = time.monotonic() + 90
+        while time.monotonic() < run_deadline and process.poll() is None:
+            try:
+                started = time.monotonic()
+                inspection_request(state, run_id, "list_queue", {"limit": 1})
+                status_latencies.append(time.monotonic() - started)
+            except Exception:  # noqa: BLE001 - socket may not be up yet
+                pass
+            time.sleep(5)
+        peak_rss = sampler.stop()
+        shutdown_started = time.monotonic()
+        process.send_signal(signal.SIGTERM)
+        try:
+            process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=15)
+        shutdown_seconds = time.monotonic() - shutdown_started
+        logged = json.loads(events.read_text())["events"] if events.exists() else []
+    requested_urls = {event["fixture"] for event in logged}
+    max_status_latency = max(status_latencies, default=0.0)
+    detail = (f"requested_urls={len(requested_urls)} (bound=4 workers) "
+             f"peak_rss_bytes={peak_rss} (target<512 MiB) "
+             f"max_status_latency_s={max_status_latency:.2f} (target<2s) "
+             f"shutdown_seconds={shutdown_seconds:.1f} (target<30s)")
+    return ScenarioResult("E10", "not run",
+                          "E10: one million rows within resource and responsiveness targets",
+                          f"harness built, not executed this session | {detail}", str(events))
+
+
+def e13_concurrency_timing(base: Path, torsocks_conf: Path) -> ScenarioResult:
+    """Slow large file alongside small files and a due retry; assert prompt refill.
+
+    Records admission (`active`) and completion (`complete`) timestamps from
+    download_transitions, since the fixture event log carries no timestamp.
+    """
+    root = scenario_root(base, "E13")
+    large = Fixture.create("e13-large.bin", "e13-large", 8 * 1024**2)
+    retry_body = Fixture.create("e13-retry.bin", "e13-retry", 4096)
+    small = [Fixture.create(f"e13-small-{i}.bin", f"e13-small-{i}", 4096) for i in range(4)]
+    fixtures = [large, retry_body, *small]
+    write_manifest(root / "fixture-manifest.json", fixtures)
+    events = root / "fixture-events.json"
+    destination, state = isolated_dirs(root)
+    scripts = {
+        large.name: [ResponseScript(delay_seconds=8.0)],
+        retry_body.name: [ResponseScript(status=503), ResponseScript()],
+    }
+    with fixture_server(fixtures, events, scripts=scripts) as server:
+        retry_url = server.url(retry_body.name)
+        urls = [server.url(f.name) for f in (large, retry_body, *small)]
+        queue = write_queue_file(root / "queue.txt", urls)
+        result1 = run_downloader(queue=queue, destination=destination, state=state,
+                                 workers=4, reserve_bytes=0,
+                                 tor_control_address=TOR_CONTROL_ADDRESS,
+                                 tor_control_cookie=TOR_CONTROL_COOKIE,
+                                 torsocks_conf=torsocks_conf, time_limit=15, timeout=30)
+        # Force the retry due now instead of waiting out the normal >=60s backoff.
+        with sqlite3.connect(state / "manifest.sqlite") as db:
+            db.execute("UPDATE downloads SET next_retry_at=0 WHERE url=?", (retry_url,))
+            db.commit()
+        result2 = run_downloader(queue=queue, destination=destination, state=state,
+                                 workers=4, reserve_bytes=0,
+                                 tor_control_address=TOR_CONTROL_ADDRESS,
+                                 tor_control_cookie=TOR_CONTROL_COOKIE,
+                                 torsocks_conf=torsocks_conf, time_limit=20, timeout=40)
+    transitions = read_transitions(state)
+    admissions = {t["url"]: t["recorded_at"] for t in transitions if t["to_status"] == "active"}
+    completions = {t["url"]: t["recorded_at"] for t in transitions
+                  if t["to_status"] == "complete" and t["from_status"] != "complete"}
+    detail = (f"exit1={result1.returncode} exit2={result2.returncode} "
+             f"admissions={admissions} completions={completions}")
+    return ScenarioResult("E13", "not run",
+                          "E13: refill idle slots promptly under a slow transfer",
+                          f"harness built, not executed this session | {detail}", str(events))
+
+
 NOT_RUN = {
-    "E02": "needs the 8 GiB generated-file interrupted-transfer scenario and a streaming "
-          "digest pass; a later session should run it once, in isolation, given the runtime cost.",
-    "E05": "needs process-kill timing around engine/controller/both mid-transfer; a later "
-          "session needs a kill-injection harness around Downloader.transfer/run_aria2.",
-    "E06": "needs the controller failpoints between validation, link creation, and DB commit "
-          "that the spec asks the fixture harness to add; not yet implemented in this adapter.",
-    "E10": "needs a one-million-row synthetic queue and RSS sampling at a fixed interval; "
-          "a later session should build the queue generator and a sampler around the run.",
-    "E13": "needs concurrent slow-large-file plus small-file admission-timing assertions "
-          "(5-second idle-slot refill target); not attempted this session.",
+    "E02": "harness built this session (e02_large_file_interrupted_resume); not executed, "
+          "given the runtime cost, and cannot currently pass per this specification's "
+          "resolved Section 1 note (a mid-transfer connection cut is routed to "
+          "review_required, foreclosing resume, a separate controller-side gap).",
+    "E05": "harness built this session (e05_kill_injection); not executed this session.",
+    "E06": "harness built this session (e06_controller_failpoints), using the "
+          "TOD_DL_FAILPOINT gate added to Downloader.transfer(); not executed this session.",
+    "E10": "harness built this session (e10_million_row_admission_and_resources); not "
+          "executed, given the runtime cost of a million-row run.",
+    "E13": "harness built this session (e13_concurrency_timing); not executed this session.",
 }
 
 

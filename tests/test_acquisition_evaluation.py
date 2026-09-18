@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import http.client
 import json
+import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from urllib.error import HTTPError
@@ -16,9 +18,11 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from acquisition_evaluation import (DeterministicBytes, EvaluationError, Fixture,
-                                    FixtureServer, ResponseScript, ScenarioResult,
-                                    build_manifest, build_report, manifest_hash,
-                                    write_manifest)
+                                    FixtureServer, ResourceSampler, ResponseScript,
+                                    ScenarioResult, build_manifest, build_report,
+                                    generate_synthetic_queue_rows, manifest_hash,
+                                    process_rss_bytes, process_tree_pids,
+                                    wait_for_bytes_written, write_manifest)
 
 
 class DeterministicFixtureTests(unittest.TestCase):
@@ -97,6 +101,48 @@ class FixtureServerTests(unittest.TestCase):
                     self.assertEqual(len(caught.exception.partial), 9)
             event = json.loads(log.read_text(encoding="utf-8"))["events"][0]
             self.assertEqual(event["transmitted_bytes"], 9)
+
+
+class SyntheticQueueGeneratorTests(unittest.TestCase):
+    def test_rows_are_unique_and_deterministic_without_materializing_bodies(self):
+        first = generate_synthetic_queue_rows(50, body_length=8)
+        second = generate_synthetic_queue_rows(50, body_length=8)
+        self.assertEqual(len(first), 50)
+        self.assertEqual({fixture.name for fixture in first}, {fixture.name for fixture in second})
+        self.assertEqual([fixture.sha256 for fixture in first],
+                         [fixture.sha256 for fixture in second])
+        # Distinct seeds per row must not collapse to the same digest.
+        self.assertEqual(len({fixture.sha256 for fixture in first}), 50)
+
+
+class ProcessTreeTests(unittest.TestCase):
+    def test_process_tree_pids_includes_a_spawned_child(self):
+        import subprocess
+        process = subprocess.Popen(["sleep", "1"])
+        try:
+            tree = process_tree_pids(os.getpid())
+            self.assertIn(process.pid, tree)
+            self.assertGreater(process_rss_bytes(process.pid), 0)
+        finally:
+            process.kill()
+            process.wait()
+
+    def test_wait_for_bytes_written_observes_growth_and_times_out(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "growing.bin"
+            path.write_bytes(b"x" * 10)
+            self.assertTrue(wait_for_bytes_written(path, 10, timeout=1))
+            self.assertFalse(wait_for_bytes_written(path, 20, timeout=0.2))
+
+
+class ResourceSamplerTests(unittest.TestCase):
+    def test_sampler_collects_at_the_documented_interval_and_reports_the_peak(self):
+        sampler = ResourceSampler(os.getpid(), interval_seconds=0.05).start()
+        time.sleep(0.35)
+        peak = sampler.stop()
+        self.assertGreaterEqual(len(sampler.samples), 3)
+        self.assertGreater(peak, 0)
+        self.assertEqual(peak, max(sampler.samples))
 
 
 class EvaluationReportTests(unittest.TestCase):
