@@ -1,6 +1,6 @@
 # Specification: console item details
 
-Status: partially implemented, September 17, 2026. This view explains one
+Status: partially implemented, September 18, 2026. This view explains one
 selected item's identity, acquisition state, attempts, and validation results.
 
 The view supplements the [console UI](SPEC-console-ui.md) and uses the

@@ -27,6 +27,7 @@ PROTOCOL_VERSION = 1
 MAX_REQUEST_BYTES = 16 * 1024
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_REASON_BYTES = 512
+MAX_SOURCE_URL_BYTES = 1024
 MAX_PAGE_SIZE = 200
 QUEUE_SCAN_BATCH = 500
 ITEM_ID = re.compile(r"[0-9a-f]{64}\Z")
@@ -380,13 +381,21 @@ class InspectionServer:
         (url, rank, logical, stored, staging, status, attempts, byte_count, digest, error,
          retry_at, target, updated_at, inventory_size, review_code) = row
         source = _source_url(url) if reveal else None
+        source_truncated = False
+        if source is not None:
+            encoded_source = source.encode("utf-8")
+            if len(encoded_source) > MAX_SOURCE_URL_BYTES:
+                source = encoded_source[:MAX_SOURCE_URL_BYTES].decode("utf-8", "ignore")
+                source_truncated = True
         # Runtime samples are keyed by url, not item_id (see set_active in
         # download_telemetry.py); item_id is only ever derived, never stored there.
         runtime = next((dict(value) for value in self.runtime_provider()
                         if value.get("url") == url), None)
         runtime = runtime or {}
         source_label = "Source hidden"
-        if reveal and source:
+        if reveal and source_truncated:
+            source_label = "Source truncated"
+        elif reveal and source:
             source_label = "Source redacted"
         elif reveal:
             source_label = "Source unavailable"
@@ -400,8 +409,10 @@ class InspectionServer:
                 "retry_at": retry_at, "updated_at": updated_at,
                 "inventory_size": inventory_size, "review_code": review_code,
                 "source": source, "source_label": source_label,
+                "basename": Path(logical).name,
                 "identity": {"run_id": self.run_id, "item_id": item_id,
                              "logical_path": logical, "storage_path": stored,
+                             "basename": Path(logical).name,
                              "queue_rank": rank,
                              "generation": runtime.get("generation"),
                              "attempt_id": (f"{item_id}:{runtime.get('attempt_number')}"

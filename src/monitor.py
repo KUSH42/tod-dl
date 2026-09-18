@@ -601,11 +601,18 @@ def item_details_text(item: dict[str, Any], read_at: Any = None,
     validation = item.get("validation", {})
     def field(section: dict[str, Any], name: str, fallback: Any = None) -> Any:
         return section.get(name, fallback) if isinstance(section, dict) else fallback
+    basename = field(identity, 'basename', item.get('basename'))
+    item_id_value = field(identity, 'item_id', item.get('item_id'))
     lines = [
         "Item details",
+        f"{truncate_filename(basename, 40) if basename is not None else '? (' + literal_text(reason) + ')'}  "
+        f"ID {short_item_id(item_id_value) if item_id_value is not None else '? (' + literal_text(reason) + ')'}  "
+        f"State: {detail_value(field(state, 'durable_state', item.get('durable_state')), reason)}  "
+        f"Phase: {detail_value(field(state, 'phase'), reason)}  "
+        f"Freshness: {literal_text(sample_freshness)}",
         f"Read: {detail_value(read_at, 'read time unavailable')}  Revision: {detail_value(revision, 'revision unavailable')}  Freshness: {literal_text(sample_freshness)}",
         "", "Identity and paths",
-        f"Item ID: {detail_value(field(identity, 'item_id', item.get('item_id')), reason)}",
+        f"Item ID: {detail_value(item_id_value, reason)}",
         f"Run ID: {detail_value(field(identity, 'run_id'), reason)}",
         f"Original path: {detail_value(field(identity, 'logical_path', item.get('logical_path')), reason)}",
         f"Mapped storage path: {detail_value(field(identity, 'storage_path', item.get('storage_path')), reason)}",
@@ -613,12 +620,14 @@ def item_details_text(item: dict[str, Any], read_at: Any = None,
         f"Candidate path: {detail_value(item.get('candidate_path'), reason)}",
         f"Queue rank: {detail_value(field(identity, 'queue_rank', item.get('queue_rank')), reason)}",
         f"Generation: {detail_value(field(identity, 'generation'), reason)}  Attempt ID: {detail_value(field(identity, 'attempt_id'), reason)}",
+        f"Mapping reason: {detail_value(field(identity, 'mapping_reason'), reason)}  Mapping version: {detail_value(field(identity, 'mapping_version'), reason)}",
         "", "State",
         f"Durable state: {detail_value(field(state, 'durable_state', item.get('durable_state')), reason)}  Bucket: {detail_value(field(state, 'bucket', item.get('bucket')), reason)}",
         f"Phase: {detail_value(field(state, 'phase'), reason)}  Reason: {detail_value(field(state, 'phase_reason'), reason)}",
         f"Worker: {detail_value(field(state, 'worker_id'), reason)}  Last transition: {detail_value(field(state, 'last_transition_at', item.get('updated_at')), reason)}",
         f"Attempts: {detail_value(field(state, 'attempt_count', item.get('attempt_count')), reason)} / {detail_value(field(state, 'attempt_ceiling', item.get('attempt_ceiling')), reason)}",
         f"Retry deadline: {format_retry_deadline(field(state, 'retry_at', item.get('retry_at')))}",
+        f"Blocking condition: {detail_value(field(state, 'blocking_condition'), 'none reported')}",
         "", "Engine",
         f"Engine: {detail_value(field(engine, 'name'), reason)} {detail_value(field(engine, 'version'), reason)}",
         f"Instance: {detail_value(field(engine, 'instance_id'), reason)}  Job: {detail_value(field(engine, 'job_id'), reason)}  PID: {detail_value(field(engine, 'pid'), reason)}",
@@ -627,11 +636,13 @@ def item_details_text(item: dict[str, Any], read_at: Any = None,
         f"Received: {detail_bytes(field(byte_values, 'received', item.get('received_bytes')), reason)}",
         f"Resume baseline: {detail_bytes(field(byte_values, 'resume_baseline'), reason)}",
         f"Transfer total: {detail_bytes(field(byte_values, 'transfer_total'), reason)}  Source: {detail_value(field(byte_values, 'transfer_total_source'), reason)}",
+        f"Trusted expected size: {detail_bytes(field(byte_values, 'trusted_expected'), reason)}",
         f"Inventory size: {detail_value(field(byte_values, 'inventory_size', item.get('inventory_size')), reason)}",
         f"Retained item bytes: {detail_bytes(field(byte_values, 'retained_item_bytes'), reason)}",
         f"Committed item completion bytes: {detail_bytes(field(byte_values, 'committed_completion_bytes'), reason)}",
         "", "Validation",
-        f"Method: {detail_value(field(validation, 'method'), reason)}  Result: {detail_value(field(validation, 'result'), reason)}",
+        f"Method: {detail_value(field(validation, 'method'), reason)}  Processed bytes: {detail_bytes(field(validation, 'processed_bytes'), reason)}",
+        f"Result: {detail_value(field(validation, 'result'), reason)}  Recorded at: {detail_value(field(validation, 'recorded_at'), reason)}",
         f"Expected SHA-256: {detail_value(field(validation, 'expected_sha256'), reason)}",
         f"Observed SHA-256: {detail_value(field(validation, 'observed_sha256', item.get('sha256')), reason)}",
         f"Mismatch reason: {detail_value(field(validation, 'mismatch_reason'), reason)}",
@@ -854,7 +865,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
     class ItemDetails(Screen[None]):
         """Read-only view bound to one immutable run and item identity."""
         BINDINGS = [("escape", "dismiss", "Back"), ("r", "reveal_source", "Reveal source"),
-                    ("n", "next_attempts", "Next attempts"),
+                    ("n", "next_attempts", "Next attempts"), ("l", "logs", "Logs"),
                     Binding("q", "disabled_control", show=False),
                     Binding("t", "disabled_control", show=False),
                     Binding("p", "disabled_control", show=False),
@@ -873,6 +884,8 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             self.cursor: str | None = None
             self.attempts: list[dict[str, Any]] = []
             self.revealed = False
+            self.session_id: Any = None
+            self.session_reload_pending = False
 
         def compose(self) -> ComposeResult:
             with VerticalScroll(id="item-details"):
@@ -880,6 +893,21 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             yield Footer()
 
         def on_mount(self) -> None:
+            self.session_id = self.app.current.get("session_id")
+            self.set_source_binding()
+            self.load_item()
+            self.set_interval(2, self.check_session)
+
+        def check_session(self) -> None:
+            current_session_id = self.app.current.get("session_id")
+            if current_session_id == self.session_id:
+                return
+            self.session_id = current_session_id
+            self.item = None
+            self.attempts = []
+            self.cursor = None
+            self.revealed = False
+            self.session_reload_pending = True
             self.set_source_binding()
             self.load_item()
 
@@ -889,15 +917,27 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             self._bindings.key_to_bindings["r"] = [Binding("r", action, label)]
             self.refresh_bindings()
 
-        def update_details(self, error: str | None = None) -> None:
-            output = ("Details unavailable\n" + literal_text(error)
-                      if error else item_details_text(self.item or {}, self.read_at,
-                                                       self.revision,
-                                                       freshness(self.app.current)))
+        def update_details(self, error: str | None = None, retain: bool = False) -> None:
+            if error and retain and self.item:
+                output = ("Last-known values retained\n" + literal_text(error) + "\n\n"
+                          + item_details_text(self.item, self.read_at, self.revision,
+                                              freshness(self.app.current)))
+            elif error:
+                output = "Details unavailable\n" + literal_text(error)
+            else:
+                output = item_details_text(self.item or {}, self.read_at, self.revision,
+                                           freshness(self.app.current))
             if self.attempts:
                 output += "\n\nRecorded attempts\n" + "\n".join(
-                    f"#{detail_value(row.get('attempt_number'))} {detail_value(row.get('outcome'))} "
-                    f"{detail_value(row.get('attempt_id'))}" for row in self.attempts)
+                    f"#{detail_value(row.get('attempt_number'))} {detail_value(row.get('attempt_id'))} "
+                    f"Generation: {detail_value(row.get('generation'))}  "
+                    f"Started: {detail_value(row.get('started_at'))}  "
+                    f"Ended: {detail_value(row.get('ended_at'))}  "
+                    f"Outcome: {detail_value(row.get('outcome'))}  "
+                    f"Error: {detail_value(row.get('error_category'))} "
+                    f"{detail_value(row.get('error_message'))}  "
+                    f"Retry deadline: {format_retry_deadline(row.get('retry_at'))}"
+                    for row in self.attempts)
             self.query_one("#item-details-text", Static).update(detail_visual(output))
 
         def load_item(self) -> None:
@@ -908,13 +948,15 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
                 self.apply_item)
 
         def apply_item(self, response: dict[str, Any] | None, error: str | None) -> None:
+            session_reload = self.session_reload_pending
+            self.session_reload_pending = False
             if error or not response:
-                self.update_details(error or "inspection returned no record")
+                self.update_details(error or "inspection returned no record", retain=not session_reload)
                 return
             data = response.get("data", {})
             item = data.get("item") if isinstance(data, dict) else None
             if not isinstance(item, dict):
-                self.update_details("inspection returned an invalid item")
+                self.update_details("inspection returned an invalid item", retain=not session_reload)
                 return
             self.item = item
             self.read_at = response.get("read_at")
@@ -957,6 +999,9 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             self.attempts.extend(row for row in rows if isinstance(row, dict))
             self.cursor = data.get("next_cursor") if isinstance(data.get("next_cursor"), str) else None
             self.update_details()
+
+        def action_logs(self) -> None:
+            self.app.notify("Item logs are unavailable", severity="warning")
 
         def action_dismiss(self) -> None:
             self.revealed = False

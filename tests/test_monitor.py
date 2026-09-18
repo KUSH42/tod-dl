@@ -535,6 +535,46 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("0 B (0 bytes)", rendered)
         self.assertEqual(detail_bytes(None), "? (not recorded)")
 
+    def test_item_details_render_covers_header_and_all_section_fields(self):
+        item = {
+            "identity": {"basename": "report.pdf", "item_id": "b" * 64, "run_id": "run-one",
+                        "logical_path": "/root/report.pdf", "storage_path": "/store/report.pdf",
+                        "queue_rank": 5, "generation": "gen-1", "attempt_id": "b" * 64 + ":2",
+                        "mapping_reason": "sanitized", "mapping_version": "v1"},
+            "state": {"durable_state": "review_required", "bucket": "review_required",
+                     "phase": "validating", "phase_reason": "hash mismatch",
+                     "worker_id": 3, "last_transition_at": "2026-09-18T00:00:00Z",
+                     "attempt_count": 2, "attempt_ceiling": 3, "retry_at": None,
+                     "blocking_condition": "awaiting operator review"},
+            "engine": {"name": "aria2", "version": "1.36", "instance_id": "i1",
+                      "job_id": "j1", "pid": 4242, "sample_at": "2026-09-18T00:00:01Z"},
+            "bytes": {"received": None, "resume_baseline": 0, "transfer_total": 1000,
+                     "transfer_total_source": "header", "trusted_expected": 1000,
+                     "inventory_size": "1 KB", "retained_item_bytes": 0,
+                     "committed_completion_bytes": None},
+            "validation": {"method": "SHA-256", "processed_bytes": 1000, "result": "mismatch",
+                          "recorded_at": "2026-09-18T00:00:02Z", "expected_sha256": "e" * 64,
+                          "observed_sha256": "f" * 64, "mismatch_reason": "hash mismatch",
+                          "promotion_status": "blocked", "staging_cleanup_at": None},
+            "candidate_path": "/staging/candidate/report.pdf",
+        }
+        rendered = item_details_text(item, "2026-09-18T00:00:03Z", 7, "live")
+        header_line = rendered.splitlines()[1]
+        self.assertIn("report.pdf", header_line)
+        self.assertIn("State: review_required", header_line)
+        self.assertIn("Phase: validating", header_line)
+        self.assertIn("Freshness: live", header_line)
+        self.assertIn("Mapping reason: sanitized  Mapping version: v1", rendered)
+        self.assertIn("Blocking condition: awaiting operator review", rendered)
+        self.assertIn("Received: ? (not recorded)", rendered)  # unknown, not a confirmed zero
+        self.assertIn("Retained item bytes: 0 B (0 bytes)", rendered)  # confirmed zero, distinct
+        self.assertIn("Trusted expected size: 1000 B (1,000 bytes)", rendered)
+        self.assertIn("Processed bytes: 1000 B (1,000 bytes)", rendered)
+        self.assertIn("Recorded at: 2026-09-18T00:00:02Z", rendered)
+        self.assertIn("Mismatch reason: hash mismatch", rendered)
+        self.assertIn("Promotion: blocked", rendered)
+        self.assertIn("Candidate path: /staging/candidate/report.pdf", rendered)
+
     def test_worker_details_keep_assignment_identity_and_clear_idle_values(self):
         worker = {"worker_id": 2, "phase": "downloading", "last_progress_age_s": 60,
                   "received_bytes": 0, "total_bytes": None, "quality": "exact",
