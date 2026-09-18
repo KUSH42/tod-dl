@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from collections import deque
 import datetime as dt
 import hashlib
@@ -531,6 +532,18 @@ QUEUE_STATE_FILTERS = ("all", "queued", "busy", "retry", "exhausted", "complete"
                       "excluded", "unknown")
 QUEUE_NOT_ELIGIBLE_BUCKETS = {"exhausted", "review_required", "excluded"}
 COOLDOWN_STEP_S = 30
+QUEUE_EXPORT_FIELDS = ("queue_rank", "item_id", "basename", "bucket", "priority",
+                      "phase", "received_bytes", "total_bytes", "retry_at")
+
+
+def queue_export_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Return one queue row's exportable fields only.
+
+    This allowlist excludes the source URL and mapped storage path that
+    `list_queue` never returns, keeping export consistent if a caller ever
+    passes a richer row.
+    """
+    return {field: row.get(field) for field in QUEUE_EXPORT_FIELDS}
 
 
 def queue_retry_status(bucket: Any, retry_at: Any, cooldown_active: bool = False,
@@ -784,6 +797,37 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
 
         def on_button_pressed(self, event: Button.Pressed) -> None:
             self.dismiss(event.button.id == "confirm")
+
+    class ExportDestination(ModalScreen[str | None]):
+        """Prompt for a local file path; triggers no controller action."""
+        BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+
+        CSS = """
+        ExportDestination {
+            align: center middle;
+        }
+        #export-destination {
+            width: 64;
+            height: auto;
+            border: round $accent;
+            background: $surface;
+            padding: 1 2;
+        }
+        """
+
+        def compose(self) -> ComposeResult:
+            with Vertical(id="export-destination"):
+                yield Static("Export queue rows to file (Enter to confirm, Escape to cancel):")
+                yield Input(placeholder="queue-export.csv", id="export-path")
+
+        def on_mount(self) -> None:
+            self.query_one("#export-path", Input).focus()
+
+        def on_input_submitted(self, event: Input.Submitted) -> None:
+            self.dismiss(event.value.strip() or None)
+
+        def action_cancel(self) -> None:
+            self.dismiss(None)
 
     class ItemDetails(Screen[None]):
         """Read-only view bound to one immutable run and item identity."""
@@ -1068,6 +1112,7 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                    "Raise cooldown", show=True),
             Binding("left_curly_bracket", "prepare_lower_cooldown_selected",
                    "Lower cooldown", show=True),
+            Binding("e", "prepare_export", "Export queue", show=True),
             Binding("l", "logs", "Logs"),
             Binding("question_mark", "help", "Help", show=True),
         ]
@@ -1091,6 +1136,11 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             self.revision: Any = None
             self.selected_item_id: str | None = None
             self.request_active = False
+            self.export_active = False
+            self.export_path: str | None = None
+            self.export_bucket = "all"
+            self.export_query = ""
+            self.export_collected: list[dict[str, Any]] = []
             self.wide = True
 
         def compose(self) -> ComposeResult:
@@ -1315,7 +1365,8 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             self.app.notify(
                 "/ search   Enter apply   Escape cancel   PageUp/PageDown page   "
                 "Enter opens item details   R retry row   x exclude row   "
-                "] raise priority   [ lower priority   l logs   "
+                "] raise priority   [ lower priority   } raise cooldown   "
+                "{ lower cooldown   e export queue   l logs   "
                 "c clear filters   f refresh results   g first page",
                 title="Queue help")
 
@@ -1404,6 +1455,68 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
             self.app.prepare_row_scoped_cooldown(
                 self.selected_item_id, self.selected_cooldown_s() - COOLDOWN_STEP_S)
 
+        def export_eligible(self) -> bool:
+            return bool(state) and not self.export_active
+
+        def action_prepare_export(self) -> None:
+            if not self.export_eligible():
+                return
+            self.app.push_screen(ExportDestination(), self.handle_export_destination)
+
+        def handle_export_destination(self, path: str | None) -> None:
+            if not path:
+                return
+            self.export_active = True
+            self.export_path = path
+            self.export_bucket = self.bucket
+            self.export_query = self.query
+            self.export_collected: list[dict[str, Any]] = []
+            self.refresh_bindings()
+            self.export_scan(None)
+
+        def export_scan(self, cursor: str | None) -> None:
+            run_id = self.app.current["run_id"]
+            parameters: dict[str, Any] = {"bucket": self.export_bucket,
+                                          "query": self.export_query, "page_size": 200}
+            if cursor:
+                parameters["cursor"] = cursor
+            self.app.submit_inspection(
+                lambda: inspection_request(state, run_id, "list_queue", parameters),
+                self.apply_export_page)
+
+        def apply_export_page(self, response: dict[str, Any] | None, error: str | None) -> None:
+            if error or not response:
+                self.export_active = False
+                self.refresh_bindings()
+                self.app.notify("Export failed: " + literal_text(error or "request failed"),
+                                severity="error")
+                return
+            data = response.get("data", {})
+            rows = data.get("rows")
+            if not isinstance(rows, list):
+                self.export_active = False
+                self.refresh_bindings()
+                self.app.notify("Export failed: invalid response", severity="error")
+                return
+            self.export_collected.extend(queue_export_row(row) for row in rows)
+            next_cursor = data.get("next_cursor") if isinstance(data.get("next_cursor"), str) else None
+            if next_cursor:
+                self.export_scan(next_cursor)
+                return
+            self.export_active = False
+            self.refresh_bindings()
+            try:
+                with open(self.export_path, "w", newline="", encoding="utf-8") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=QUEUE_EXPORT_FIELDS)
+                    writer.writeheader()
+                    writer.writerows(self.export_collected)
+            except OSError as exc:
+                self.app.notify(f"Export failed: {exc}", severity="error")
+                return
+            self.app.notify(
+                f"Exported {len(self.export_collected)} row(s) to " + literal_text(self.export_path),
+                severity="information")
+
         def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
             if action == "next_page" and not self.next_cursor:
                 return None
@@ -1427,6 +1540,8 @@ def run_textual(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                 return None
             if (action == "prepare_lower_cooldown_selected"
                     and not self.cooldown_selected_eligible(-COOLDOWN_STEP_S)):
+                return None
+            if action == "prepare_export" and not self.export_eligible():
                 return None
             return True
 

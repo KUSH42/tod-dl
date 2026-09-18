@@ -211,8 +211,8 @@ Row-scoped retry is implemented, bound to `R` in the queue pane. Removal is
 implemented, bound to `x` in the queue pane. Reordering is implemented, bound
 to `]` (raise) and `[` (lower) in the queue pane. Queue editing is
 implemented, bound to `}` (raise) and `{` (lower) in the queue pane, in
-30-second steps within the controller-defined bounds. Export remains
-planned. All five are scoped as follows.
+30-second steps within the controller-defined bounds. Export is implemented,
+bound to `e` in the queue pane. All five are scoped as follows.
 
 Row-scoped retry sends the existing `retry_now` action with an `item_ids`
 parameter limited to the focused or multi-selected rows, instead of every

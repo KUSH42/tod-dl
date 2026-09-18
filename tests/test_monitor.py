@@ -20,7 +20,7 @@ from controller import (ControlError, ControlServer, control_request,
                         get_control_state, read_control_session)
 from inspection import (InspectionError, InspectionServer, inspection_request,
                         read_inspection_session)
-from monitor import (SnapshotError, event_item_path, event_message_style,
+from monitor import (QUEUE_EXPORT_FIELDS, SnapshotError, event_item_path, event_message_style,
                      event_timestamp, freshness, literal_text, read_snapshot,
                      marquee_filename, retry_summary, event_severity_style,
                      event_worker_label, format_countdown, freshness_style,
@@ -28,7 +28,7 @@ from monitor import (SnapshotError, event_item_path, event_message_style,
                      truncate_filename, SpeedTrend, disk_status, progress_status,
                      screen_summary, validate_snapshot, detail_bytes, item_details_text,
                      worker_details_text, format_retry_deadline, queue_retry_status,
-                     queue_row_cells, queue_header_text)
+                     queue_row_cells, queue_header_text, queue_export_row)
 
 
 def snapshot(lifecycle: str = "running") -> dict:
@@ -582,6 +582,23 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(cells[4], "+0")
         self.assertEqual(cells[5], "—")
         self.assertIn("not recorded", cells[7])
+
+    def test_queue_export_row_excludes_source_url_and_storage_path(self):
+        row = {"queue_rank": 3, "basename": "file.bin", "item_id": "a" * 64,
+              "bucket": "queued", "priority": 1, "phase": "downloading",
+              "received_bytes": 10, "total_bytes": 100, "retry_at": None,
+              "url": "https://example.invalid/secret", "storage_path": "/home/user/secret"}
+        exported = queue_export_row(row)
+        self.assertEqual(set(exported), set(QUEUE_EXPORT_FIELDS))
+        self.assertNotIn("url", exported)
+        self.assertNotIn("storage_path", exported)
+        self.assertEqual(exported["basename"], "file.bin")
+        self.assertEqual(exported["priority"], 1)
+
+    def test_queue_export_row_fills_missing_fields_with_none(self):
+        exported = queue_export_row({"item_id": "a"})
+        self.assertEqual(exported["item_id"], "a")
+        self.assertIsNone(exported["retry_at"])
 
     def test_queue_header_always_shows_matching_count_unavailable(self):
         header = queue_header_text("run-one", 5, 5, "none", "2026-09-17T00:00:00Z", 4)
