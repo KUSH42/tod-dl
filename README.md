@@ -97,7 +97,7 @@ python3 src/tod-dl.py \
 
 Use `--status` to read persisted state without starting transfers.
 
-## Monitor and renew Tor circuits
+## Monitor and control a run
 
 The monitor reads a published telemetry snapshot. It does not open the
 acquisition database or write final provenance.
@@ -107,11 +107,25 @@ python3 src/monitor.py --state /case/download-state \
     --run-id RUN_ID --control
 ```
 
-With `--control`, press `r` to make selected retryable items eligible now.
-Press `t` to request fresh Tor circuits for future streams. Both actions need
-confirmation. Tor renewal does not change active transfers or prove a new
-route. The controller records each renewal request and applies the configured
-rate limit, which defaults to 60 seconds.
+With `--control`, every action below needs confirmation before the
+controller runs it.
+
+- Press `r` to make selected retryable items eligible now.
+- Press `t` to request fresh Tor circuits for future streams. This does not
+  change active transfers or prove a new route. The controller applies the
+  configured rate limit, which defaults to 60 seconds.
+- Press `p` to pause admission. Active transfers keep running; the
+  controller admits no new transfer until you resume.
+- Press `u` to resume admission for the current run.
+- Press `d` to drain and stop the run. Admission stops now. Active
+  transfers finish to a durable state, then the run exits. You cannot undo
+  this action.
+- Press `k` to checkpoint and stop the run. The controller checkpoints and
+  terminates active transfers immediately, then the run exits. You cannot
+  undo this action.
+
+The controller records every request it accepts, with its outcome and a
+durable state revision.
 
 ## Verify provenance
 

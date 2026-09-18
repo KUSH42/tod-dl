@@ -29,7 +29,8 @@ and never overwrites a final file.
 
 `src/monitor.py` reads a published telemetry snapshot. It does not open
 the acquisition database or write evidence. `src/controller.py` provides
-the same-user control endpoint for confirmed retry and Tor renewal requests.
+the same-user control endpoint for confirmed retry, Tor renewal, pause and
+resume admission, drain-and-stop, and checkpoint-stop requests.
 
 `src/provenance.py` writes signed provenance records. `src/verify_provenance.py` reads
 and verifies those records without changing final files.
@@ -73,10 +74,14 @@ Store a suspect replacement under `download-state/redownload-candidates/`.
 Tor must provide `IsolateSOCKSAuth` on the configured SocksPort. The controller
 must verify Tor isolation before it admits a transfer.
 
-The monitor can request `retry_now` and `renew_tor_circuits` only after user
+The monitor can request `retry_now`, `renew_tor_circuits`, `pause_admission`,
+`resume_admission`, `drain_and_stop`, and `checkpoint_stop` only after user
 confirmation. A Tor renewal affects future streams. It must not change active
-transfers or claim that Tor selected a new route. Do not log or commit Tor
-control cookies, monitor capability tokens, or aria2 RPC secrets.
+transfers or claim that Tor selected a new route. `drain_and_stop` and
+`checkpoint_stop` end the run and cannot be undone; `drain_and_stop` lets
+active transfers reach a durable state first, `checkpoint_stop` terminates
+them immediately after a checkpoint. Do not log or commit Tor control
+cookies, monitor capability tokens, or aria2 RPC secrets.
 
 ## Provenance safety
 

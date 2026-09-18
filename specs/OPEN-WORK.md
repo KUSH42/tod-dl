@@ -8,9 +8,10 @@ incomplete. It does not authorize a source request or an unattended run.
 
 The controller has durable selected-run state, no-overwrite finalization,
 recovery tests, signed provenance records, telemetry snapshots, and local
-confirmed controls for retry and Tor renewal. The repository test command runs
-71 local tests. These features do not establish compliance with every
-requirement in the related specifications.
+confirmed controls for retry, Tor renewal, pause admission, resume
+admission, drain and stop, and checkpoint and stop. The repository test
+command runs 122 local tests. These features do not establish compliance
+with every requirement in the related specifications.
 
 ## Remaining work
 
@@ -31,10 +32,12 @@ required metric-quality states.
 Complete the monitor and control UI. Add the planned dashboard and review
 views. Implement [read-only inspection](SPEC-console-inspection.md). Finish
 the remaining contract and headless UI test gaps in
-[item details](SPEC-console-item-details.md) and the
-[queue view](SPEC-console-queue.md). Add pause, resume, drain, and
-checkpoint-stop controls one at a time with confirmation, audit, telemetry,
-and headless UI tests.
+[item details](SPEC-console-item-details.md), the
+[queue view](SPEC-console-queue.md), and the
+[controller command channel](SPEC-controller-control-ui.md). Every command
+in that channel, including pause, resume, drain, and checkpoint-stop, has
+its confirmation, audit, and telemetry event; none has a headless-Textual
+interaction test yet.
 
 Complete the provenance and fault-recovery acceptance suites. Compare the
 existing implementation with both specifications. Add each missing fixture
