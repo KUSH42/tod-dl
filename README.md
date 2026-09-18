@@ -134,11 +134,11 @@ confirmed before the controller applies them:
 - `resume_new_generation` applies only to a `changed_remote_representation`
   or `no_reliable_version_protection` review item. It clears the review code
   and returns the item to `queued` under a new staging generation, so the
-  next attempt starts a fresh download instead of resuming stale bytes. It
-  is controller-API-only in this release; `src/monitor.py` has no keybinding
-  for it yet. Drive it with the same confirmed request/response protocol the
-  monitor uses (`prepare_confirmation` then the action with its returned
-  `nonce`), addressed to the run's control socket.
+  next attempt starts a fresh download instead of resuming stale bytes. In
+  the monitor's Queue tab (`src/monitor.py --control`), select the item and
+  press `N`, then confirm. The key is offered only for a row in the
+  `review_required` bucket; the controller still rejects an item with any
+  other review code.
 - `retry_access_denied` applies only to an `access_denied` review item (an
   HTTP 401 or 403). It returns the item to `queued` and keeps its staged
   bytes, attempts, and staging generation. The origin pause ends when no

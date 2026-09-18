@@ -808,6 +808,11 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
                 message = (f"Retry {self.item_count} selected access-denied item(s)?\n"
                            "This returns them to queued and lifts the origin pause. "
                            "A repeated 401 or 403 pauses the origin again.")
+            elif self.action == "resume_new_generation":
+                message = (f"Restart {self.item_count} selected item(s) under a new generation?\n"
+                           "This returns them to queued and clears their review code. "
+                           "The next attempt starts a fresh download instead of "
+                           "resuming staged bytes.")
             elif self.action == "pause_admission":
                 message = ("Pause admission of new transfers?\n"
                            "Active transfers keep running; nothing new is admitted "
@@ -1213,6 +1218,8 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             Binding("R", "prepare_retry_selected", "Retry row", show=True),
             Binding("x", "prepare_exclude_selected", "Exclude row", show=True),
             Binding("A", "prepare_retry_access_denied_selected", "Retry denied row", show=True),
+            Binding("N", "prepare_resume_new_generation_selected", "New generation row",
+                    show=True),
             Binding("right_square_bracket", "prepare_raise_priority_selected",
                    "Raise priority", show=True),
             Binding("left_square_bracket", "prepare_lower_priority_selected",
@@ -1506,7 +1513,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             self.app.notify(
                 "/ search   Enter apply   Escape cancel   PageUp/PageDown page   "
                 "Enter opens item details   R retry row   x exclude row   "
-                "A retry access-denied row   "
+                "A retry access-denied row   N restart row under new generation   "
                 "] raise priority   [ lower priority   } raise cooldown   "
                 "{ lower cooldown   e export queue   l logs   "
                 "c clear filters   f refresh results   g first page",
@@ -1528,19 +1535,25 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             """
             return bool(control and state and self.selected_item_id)
 
-        def retry_access_denied_selected_eligible(self) -> bool:
-            """Return whether the focused row is offered for an access-denied retry.
+        def review_required_selected_eligible(self) -> bool:
+            """Return whether the focused row is offered for a review-item action.
 
-            Eligibility is advisory only; the controller validates the item's
-            actual `access_denied` review state at execution time.
+            Covers `retry_access_denied` and `resume_new_generation`. Eligibility
+            is advisory only; the controller validates the item's actual review
+            code at execution time.
             """
             if not (control and state and self.selected_item_id):
                 return False
             row = next((row for row in self.rows if row["item_id"] == self.selected_item_id), None)
             return bool(row and row.get("bucket") == "review_required")
 
+        def action_prepare_resume_new_generation_selected(self) -> None:
+            if not self.review_required_selected_eligible():
+                return
+            self.app.prepare_row_scoped_resume_new_generation(self.selected_item_id)
+
         def action_prepare_retry_access_denied_selected(self) -> None:
-            if not self.retry_access_denied_selected_eligible():
+            if not self.review_required_selected_eligible():
                 return
             self.app.prepare_row_scoped_retry_access_denied(self.selected_item_id)
 
@@ -1690,7 +1703,10 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             if action == "prepare_exclude_selected" and not self.exclude_selected_eligible():
                 return None
             if (action == "prepare_retry_access_denied_selected"
-                    and not self.retry_access_denied_selected_eligible()):
+                    and not self.review_required_selected_eligible()):
+                return None
+            if (action == "prepare_resume_new_generation_selected"
+                    and not self.review_required_selected_eligible()):
                 return None
             if action == "prepare_raise_priority_selected" and not self.priority_selected_eligible(1):
                 return None
@@ -2147,6 +2163,12 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
                 return
             self.pending_item_ids = [item_id]
             self.prepare_action("retry_access_denied", {"item_ids": [item_id]})
+
+        def prepare_row_scoped_resume_new_generation(self, item_id: str) -> None:
+            if not (control and state):
+                return
+            self.pending_item_ids = [item_id]
+            self.prepare_action("resume_new_generation", {"item_ids": [item_id]})
 
         def prepare_row_scoped_priority(self, item_id: str, priority: int) -> None:
             if not (control and state):

@@ -106,8 +106,8 @@ a staging-cleanup error moved a completed item to `review_required`.
 
 The `retry_access_denied` controller action returns an `access_denied` review
 item to `queued` and ends the origin pause. The monitor's Queue tab binds it to
-`A` for a `review_required` row. `resume_new_generation` still has no monitor
-keybinding.
+`A` for a `review_required` row. `resume_new_generation` is bound to `N` for a
+`review_required` row.
 
 Still open before the two specs can become `implemented`:
 

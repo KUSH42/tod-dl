@@ -216,7 +216,12 @@ bound to `e` in the queue pane. All five are scoped as follows. Retrying an
 access-denied item is implemented as a sixth row-scoped action, bound to `A` in
 the queue pane. It sends `retry_access_denied` with `item_ids` limited to the
 focused row, and the key is offered only for a `review_required` row. The
-controller alone validates the `access_denied` review code.
+controller alone validates the `access_denied` review code. Restarting a
+review item under a new staging generation is implemented as a seventh
+row-scoped action, bound to `N` in the queue pane. It sends
+`resume_new_generation` with `item_ids` limited to the focused row, and the key
+is offered only for a `review_required` row. The controller alone validates the
+review code.
 
 Row-scoped retry sends the existing `retry_now` action with an `item_ids`
 parameter limited to the focused or multi-selected rows, instead of every

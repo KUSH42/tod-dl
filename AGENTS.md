@@ -78,11 +78,10 @@ must verify Tor isolation before it admits a transfer.
 
 The monitor can request `retry_now`, `renew_tor_circuits`, `pause_admission`,
 `resume_admission`, `drain_and_stop`, `checkpoint_stop`, and the row-scoped
-`exclude_item`, `retry_access_denied` (queue key `A`), `set_item_priority`,
-and `set_retry_cooldown` only after user confirmation. The controller also
-accepts `resume_new_generation` for a `review_required` item flagged by a
-changed remote representation, but no monitor keybinding exists for it yet.
-A Tor renewal affects future streams.
+`exclude_item`, `retry_access_denied` (queue key `A`),
+`resume_new_generation` (queue key `N`), `set_item_priority`, and
+`set_retry_cooldown` only after user confirmation. A Tor renewal affects
+future streams.
 It must not change active transfers or claim that Tor selected a new route.
 `drain_and_stop` and `checkpoint_stop` end the run and cannot be undone;
 `drain_and_stop` lets active transfers reach a durable state first,
