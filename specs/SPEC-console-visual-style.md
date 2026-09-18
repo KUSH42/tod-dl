@@ -21,8 +21,10 @@ each rule instance follows.
 
 ## Label and value rules
 
-- Render a static field label dim (**Session**, **Last complete**, **ago**,
-  **free**, **reserve**, **headroom**, the status-bucket labels, and the
+- Render a static field label dim (**Session**, **Last complete**, **Last
+  payload progress**, **ago**, **free**, **reserve**, **headroom**, the
+  status-bucket labels **complete**, **busy**, **retry**, **review**, and
+  **queued**, the byte-total labels **retained** and **remaining**, and the
   queue's **Run**, **Selected**, **Loaded rows**, **Filters**, **Revision**,
   and **Read**). Render its value in the default style, including every
   duration and timestamp value.
@@ -41,6 +43,9 @@ each rule instance follows.
   ID**, **Bucket**, **Retry deadline**, **Phase**, and **Received / total**
   column headers). Apply a header's bold rule only to columns actually shown
   at the current layout width.
+- Render **Disk** in the same color as **Files** on the main screen, so the
+  two section headers read as one group. **Files** renders in the default
+  text color; **Disk**'s bold rule above still applies on top of that color.
 - Render a row-list result notice bold in the default text color when it
   must stand out without a new color (the queue's **Results changed**).
 - Render the **live** freshness label green without bold text. This is the
@@ -60,13 +65,20 @@ each rule instance follows.
 
 ## Precedence
 
-A view spec must cite the matching rule above instead of restating it. When
-no rule above covers an element the view needs to style, the view spec may
-define one directly; it must say plainly that no existing rule applies,
-matching the pattern already used in
-[SPEC-console-queue.md](SPEC-console-queue.md#visual-style). A view spec must
-not restate a covered rule with different values; a new visual need is a
-reason to extend this document, not to fork it.
+A view spec written or revised after this document exists must cite the
+matching rule above instead of restating it. When no rule above covers an
+element the view needs to style, the view spec may define one directly; it
+must say plainly that no existing rule applies, matching the pattern already
+used in [SPEC-console-queue.md](SPEC-console-queue.md#visual-style). A view
+spec must not restate a covered rule with different values; a new visual need
+is a reason to extend this document, not to fork it.
+
+[SPEC-console-queue.md](SPEC-console-queue.md#visual-style) predates this
+document and still states its own bold-header, tab-highlight, dim-label, and
+row-action rules directly rather than citing this document, as noted under
+Outcome and dependencies above. That restatement is a known exception, not a
+violation of this rule; a future edit to that section must migrate it to a
+citation instead of adding to the restatement.
 
 ## Acceptance criteria
 
