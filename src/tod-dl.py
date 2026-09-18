@@ -262,13 +262,13 @@ def relative_path(url: str) -> PurePosixPath:
     parsed = urlsplit(url)
     if parsed.username or parsed.password or parsed.query:
         raise ValueError("URL contains credentials or query parameters")
-    parts = parsed.path.lstrip("/").split("/", 2)
-    if len(parts) != 3 or parts[1] != "data" or parts[2] in {"", "ALL_FILES"}:
+    parts = parsed.path.lstrip("/").split("/", 1)
+    if len(parts) != 2 or parts[1] in {"", "ALL_FILES", "data/ALL_FILES"}:
         raise ValueError("URL is not a data-file URL")
     # Decode each URL path segment on its own, after splitting on literal "/",
     # so a percent-encoded "/" cannot be mistaken for a path separator.
-    tail = [unquote(part) for part in PurePosixPath(parts[2]).parts]
-    path = PurePosixPath(unquote(parts[0])) / "data" / PurePosixPath(*tail)
+    tail = [unquote(part) for part in PurePosixPath(parts[1]).parts]
+    path = PurePosixPath(unquote(parts[0])) / PurePosixPath(*tail)
     if any(part == ".." for part in path.parts):
         raise ValueError("unsafe URL path")
     return path
@@ -288,10 +288,10 @@ def legacy_relative_path(url: str) -> PurePosixPath | None:
         parsed = urlsplit(url)
         if parsed.username or parsed.password or parsed.query:
             return None
-        parts = parsed.path.lstrip("/").split("/", 2)
-        if len(parts) != 3 or parts[1] != "data" or parts[2] in {"", "ALL_FILES"}:
+        parts = parsed.path.lstrip("/").split("/", 1)
+        if len(parts) != 2 or parts[1] in {"", "ALL_FILES", "data/ALL_FILES"}:
             return None
-        path = PurePosixPath(parts[0]) / "data" / PurePosixPath(parts[2])
+        path = PurePosixPath(parts[0]) / PurePosixPath(parts[1])
         if any(part == ".." for part in path.parts):
             return None
         return path

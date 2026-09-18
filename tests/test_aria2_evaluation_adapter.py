@@ -23,7 +23,7 @@ class FixtureRoutingTests(unittest.TestCase):
             with fixture_server([fixture], Path(temporary) / "events.json") as server:
                 url = server.url(fixture.name)
         self.assertIn(f"/{FIXTURE_PREFIX}/{fixture.name}", url)
-        # tod-dl.py's relative_path() requires exactly <source>/data/<tail>.
+        # The fixture prefix still uses the older <source>/data/<tail> shape, which relative_path() accepts.
         source, data, name = FIXTURE_PREFIX.split("/") + [fixture.name]
         self.assertEqual(data, "data")
 

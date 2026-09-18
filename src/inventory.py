@@ -223,7 +223,10 @@ def unsafe_path_reason(path: str, name: str) -> str | None:
 
 
 def parse_base_url(base_url: str) -> tuple[str, str]:
-    """Return (normalized base URL, collection) or raise InventoryError."""
+    """Return (normalized base URL, destination prefix) or raise InventoryError.
+
+    The prefix is COLLECTION, or COLLECTION/data if the base URL ends in /data.
+    """
     try:
         parts = urlsplit(base_url)
         port_ok = parts.port is None or parts.port > 0
@@ -232,12 +235,13 @@ def parse_base_url(base_url: str) -> tuple[str, str]:
     segments = parts.path.strip("/").split("/")
     if (parts.scheme not in ("http", "https") or not parts.hostname or not port_ok
             or parts.username or parts.password or parts.query or parts.fragment
-            or len(segments) != 2 or not segments[0] or segments[1] != "data"
+            or len(segments) not in (1, 2) or not segments[0]
+            or (len(segments) == 2 and segments[1] != "data")
             or segments[0] in (".", "..") or not base_url.isascii()
             or any(ch.isspace() for ch in base_url)):
-        raise InventoryError("base URL must look like http(s)://HOST/COLLECTION/data, "
+        raise InventoryError("base URL must look like http(s)://HOST/COLLECTION or http(s)://HOST/COLLECTION/data, "
                              "without user information, query, or fragment")
-    return f"{parts.scheme}://{parts.netloc}/{segments[0]}/data", segments[0]
+    return f"{parts.scheme}://{parts.netloc}/{'/'.join(segments)}", "/".join(segments)
 
 
 # ---------------------------------------------------------------- policy
@@ -447,14 +451,14 @@ def command_manifest(args) -> int:
     snapshot_dir, output = Path(args.snapshot), Path(args.output)
     meta = load_snapshot(snapshot_dir)
     policy = load_policy(Path(args.policy))
-    base, collection = parse_base_url(args.base_url)
+    base, prefix = parse_base_url(args.base_url)
     if output.exists():
         raise InventoryError(f"output exists; not replacing it: {output}")
     if not output.parent.is_dir():
         raise InventoryError(f"output parent directory is missing: {output.parent}")
     staging = Path(tempfile.mkdtemp(prefix=".manifest-", dir=output.parent))
     try:
-        totals = _write_manifest(staging, snapshot_dir, meta, policy, base, collection)
+        totals = _write_manifest(staging, snapshot_dir, meta, policy, base, prefix)
         expected = meta["report"]["classes"]["file"]
         if totals["files"] != expected:
             raise InventoryError(f"totals do not reconcile: manifest {totals['files']} files, "
@@ -477,7 +481,7 @@ def command_manifest(args) -> int:
 
 
 def _write_manifest(staging: Path, snapshot_dir: Path, meta: dict, policy: Policy,
-                    base: str, collection: str) -> dict:
+                    base: str, prefix: str) -> dict:
     totals = {"files": 0, "priority": 0, "deferred": 0, "rejected": 0,
               "nfc_collisions": 0, "by_rule": {}}
     buckets: dict[tuple[int, int], object] = {}
@@ -503,7 +507,7 @@ def _write_manifest(staging: Path, snapshot_dir: Path, meta: dict, policy: Polic
                     rank, rule = classify(policy, path, entry.name)
                     rule_id, disposition, reason = rule.id, rule.disposition, rule.reason
                     item["source_url"] = f"{base}/" + "/".join(encode_segment(s) for s in path.split("/"))
-                    item["destination"] = f"{collection}/data/{path}"
+                    item["destination"] = f"{prefix}/{path}"
                     key = unicodedata.normalize("NFC", path)
                     if key in nfc_seen:
                         item["flags"].append(f"nfc_collision_with_line:{nfc_seen[key]}")
@@ -560,10 +564,10 @@ def verify_manifest(directory: Path) -> str:
 
 def check_queue_url(url: str) -> None:
     parts = urlsplit(url)
-    segments = parts.path.lstrip("/").split("/", 2)
+    segments = parts.path.lstrip("/").split("/", 1)
     if (parts.scheme not in ("http", "https") or not parts.hostname or parts.username or parts.password
             or parts.query or parts.fragment or not url.isascii() or any(ch.isspace() for ch in url)
-            or len(segments) != 3 or segments[1] != "data" or segments[2] in ("", "ALL_FILES")):
+            or len(segments) != 2 or segments[1] in ("", "ALL_FILES", "data/ALL_FILES")):
         raise InventoryError(f"refusing to export an unsafe queue URL: {url!r}")
 
 

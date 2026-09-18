@@ -7,8 +7,8 @@ This module never contacts an acquisition source. It shells out to the real
 reimplement transfer, resume, or finalization logic.
 
 Every URL the downloader accepts must match `relative_path()` in tod-dl.py:
-exactly `/<source>/data/<tail...>`. The fixture server's `path_prefix` is set
-to `<source>/data` so generated fixture URLs satisfy that shape.
+`/<source>/<tail...>`. The fixture server's `path_prefix` is set to
+`<source>/data`, so generated fixture URLs keep the older `/data/` shape.
 
 Tor routing note: `tod-dl.py` always wraps aria2c in `torsocks -i`. Real
 torsocks refuses, by default, to proxy connections to loopback destinations

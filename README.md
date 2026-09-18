@@ -50,6 +50,11 @@ Each queue file contains one URL per line. Blank lines, comment lines,
 duplicate URLs, unsafe paths, URLs with credentials, and URLs with query
 values are ignored or rejected.
 
+A URL has the form `https://HOST/COLLECTION/PATH`. The `/data/` segment is
+optional. The final path is `COLLECTION/PATH`, so a URL with `/data/` keeps
+`data` in the final path. A URL with only a collection, or with `ALL_FILES` as
+the file, is rejected.
+
 A line can carry optional `key=value` tokens after the URL, separated by
 whitespace, in any order:
 
@@ -251,7 +256,7 @@ existing file. Use a case directory for all paths.
 python3 src/inventory.py snapshot --input /case/ALL_FILES1 --store /case/inventory
 python3 src/inventory.py activate --store /case/inventory --snapshot <sha256-prefix>
 python3 src/inventory.py manifest --snapshot /case/inventory/snapshots/<name> \
-    --policy /case/policy.json --base-url https://HOST/COLLECTION/data \
+    --policy /case/policy.json --base-url https://HOST/COLLECTION \
     --output /case/manifests/m1
 python3 src/inventory.py queue --manifest /case/manifests/m1 --output /case/urls_1.txt
 ```

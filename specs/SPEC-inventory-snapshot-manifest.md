@@ -100,15 +100,18 @@ snapshot path; no command reads the active baseline implicitly.
 ## Identity and path mapping
 
 The base URL names the source collection. It has the form
-`http(s)://<host>/<collection>/data` with no user information, no query, and
-no fragment. The tool rejects any other base URL.
+`http(s)://<host>/<collection>` or `http(s)://<host>/<collection>/data`, with
+no user information, no query, and no fragment. The tool rejects any other
+base URL. The `/data` segment is optional. It is part of the destination only
+if the operator includes it.
 
 The source URL is `<base URL>/<encoded path>`. The encoder splits the
 relative path on `/`. For each segment, it encodes the UTF-8 bytes and keeps
 only `A-Z a-z 0-9 - . _ ~`. Every other byte becomes `%` plus two uppercase
 hex digits. A literal `%` therefore becomes `%25`, and a name that already
 contains `%20` cannot merge with a name that contains a space. The
-destination path is `<collection>/data/<path>`. It equals the value that
+destination path is `<collection>/<path>`, or `<collection>/data/<path>` if the
+base URL ends in `/data`. It equals the value that
 `relative_path()` in `src/tod-dl.py` computes for the URL. A test must check
 this agreement.
 
@@ -201,7 +204,7 @@ checksum. An equal size token does not prove equal bytes.
   add a generation token on its own, because a new value can start early
   rechecks in the downloader.
 - Before writing, the tool checks each URL: no whitespace, no user information,
-  no query, and a path that matches `<collection>/data/<path>`. It exports
+  no query, and a path that matches `<collection>/<path>`. The path can start with `data/`. It exports
   each URL once.
 - `FILE.provenance.json` records the manifest SHA-256, the queue SHA-256, the
   disposition, the item count, and the generation time.

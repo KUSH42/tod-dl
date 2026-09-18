@@ -62,10 +62,10 @@ class InventoryTestCase(unittest.TestCase):
         self.assertEqual(code, 0, out + err)
         return next((self.store / "snapshots").iterdir())
 
-    def make_manifest(self, snapshot: Path, name="m1", policy=POLICY) -> Path:
+    def make_manifest(self, snapshot: Path, name="m1", policy=POLICY, base_url=BASE_URL) -> Path:
         output = self.tmp / name
         code, out, err = self.run_cli("manifest", "--snapshot", snapshot, "--policy", policy,
-                                      "--base-url", BASE_URL, "--output", output)
+                                      "--base-url", base_url, "--output", output)
         self.assertEqual(code, 0, out + err)
         return output
 
@@ -232,6 +232,16 @@ class ManifestTests(InventoryTestCase):
         for item in mapped:
             self.assertEqual(tod_dl.relative_path(item["source_url"]), PurePosixPath(item["destination"]), item)
 
+    def test_base_url_without_data_segment_maps_to_the_downloader_path(self):
+        base = "https://source.example/case1"
+        _, items = self.items(self.make_manifest(self.import_snapshot(), base_url=base))
+        mapped = [i for i in items if i["source_url"]]
+        self.assertGreater(len(mapped), 10)
+        for item in mapped:
+            self.assertTrue(item["source_url"].startswith(f"{base}/"), item)
+            self.assertEqual(item["destination"], f"case1/{item['path']}", item)
+            self.assertEqual(tod_dl.relative_path(item["source_url"]), PurePosixPath(item["destination"]), item)
+
     def test_unsafe_duplicate_and_listing_entries_are_rejected_not_lost(self):
         data = (b".:\n\n- 0 ALL_FILES\n- 1 a\n- 2 a\n- 3 ../up\n- 4 ctl\x01.txt\n- 5 tab\tname\n\n"
                 b"Docs/../etc:\n\n- 6 evil\n\nDocs/:\n\n- 7 slash\n")
@@ -279,10 +289,14 @@ class ManifestTests(InventoryTestCase):
 
     def test_unsafe_base_urls_are_rejected(self):
         for bad in ("https://user:pw@h.example/c/data", "https://h.example/c/data?token=1",
-                    "https://h.example/c/other", "ftp://h.example/c/data", "https://h.example/data",
+                    "https://h.example/c/other", "ftp://h.example/c/data", "https://h.example/",
                     "https://h.example/c/data#frag", "https://h.example/../data", "https://h.example/c d/data"):
             with self.assertRaises(inventory.InventoryError, msg=bad):
                 inventory.parse_base_url(bad)
+
+    def test_base_url_accepts_a_collection_with_or_without_data(self):
+        self.assertEqual(inventory.parse_base_url("https://h.example/c"), ("https://h.example/c", "c"))
+        self.assertEqual(inventory.parse_base_url("https://h.example/c/data/"), ("https://h.example/c/data", "c/data"))
 
 
 class PolicyTests(InventoryTestCase):
@@ -387,7 +401,7 @@ class QueueExportTests(InventoryTestCase):
     def test_unsafe_manifest_url_is_refused_before_any_queue_exists(self):
         for bad in ("https://u:p@h.example/c/data/a", "https://h.example/c/data/a?x=1",
                     "https://h.example/c/data/a b", "https://h.example/c/data/ALL_FILES",
-                    "https://h.example/c/other/a"):
+                    "https://h.example/c/ALL_FILES", "https://h.example/c", "https://h.example/c/"):
             with self.assertRaises(inventory.InventoryError, msg=bad):
                 inventory.check_queue_url(bad)
 

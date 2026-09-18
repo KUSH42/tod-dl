@@ -226,6 +226,17 @@ class RunSelectionTests(unittest.TestCase):
         path = relative_path("https://example.invalid/R%20UN1/data/file.txt")
         self.assertEqual(path.as_posix(), "R UN1/data/file.txt")
 
+    def test_relative_path_accepts_a_url_without_a_data_segment(self):
+        path = relative_path("https://example.invalid/RUN1/a%20b/c.txt")
+        self.assertEqual(path.as_posix(), "RUN1/a b/c.txt")
+
+    def test_relative_path_rejects_a_url_with_no_file_or_a_listing_file(self):
+        for bad in ("https://example.invalid/RUN1", "https://example.invalid/RUN1/",
+                    "https://example.invalid/RUN1/ALL_FILES", "https://example.invalid/RUN1/data/ALL_FILES",
+                    "https://example.invalid/RUN1/../secret"):
+            with self.assertRaises(ValueError, msg=bad):
+                relative_path(bad)
+
     def test_relative_path_rejects_encoded_traversal(self):
         with self.assertRaises(ValueError):
             relative_path("https://example.invalid/RUN1/data/a%2F%2E%2E%2Fb")
