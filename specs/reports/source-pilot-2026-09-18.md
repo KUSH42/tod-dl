@@ -63,12 +63,9 @@ Verified SOCKS routing settings:
 - The evidence does not prove which Tor circuit carried a request. The
   specification prohibits that claim.
 
-Source Range behavior: **not observed.** All 5 transfers were fresh and full.
-Each response was HTTP 200 with no `Content-Range`. No transfer resumed, so
-no response showed HTTP 206. The provenance events record an ETag and a
-Last-Modified value for every response, so a later resume can probe the
-representation. A resume test needs a deliberate interruption. That test was
-outside this pilot's 5-URL bound.
+Source Range behavior: **not observed in the queue A run.** All 5 transfers
+were fresh and full. Each response was HTTP 200 with no `Content-Range`. The
+resume test below observed it.
 
 Provenance: `verify_provenance.py`, with the public key derived from
 `st-a2/provenance-signing-key.pem`, reported `OK: provenance record set
@@ -84,6 +81,47 @@ Byte integrity:
 - The queue carried no `sha256=` token, so no downloaded digest was compared
   with a source checksum. Only the size tokens and the HTTP length agree.
 
+## Resume test (Range behavior)
+
+A second bounded test used one URL, taken from queue C
+(a JPEG image, size token 2.7M), with
+separate state (`~/pilot/st-r`, destination `~/pilot/dl-r`, run ID
+`range-test-20260918`). It ran after the operator's explicit instruction.
+The count of source URLs stays within the 5-URL bound.
+
+1. The first run started one worker. A driver process sent SIGTERM when the
+   partial file reached 1,048,576 bytes. The controller stopped aria2 and
+   exited with 143. It kept the partial file (1,083,409 bytes) and the
+   aria2 control file. Attempt 1 has outcome `stopped`.
+2. The second run used the same run ID and the same queue. The item was in
+   `retry_wait`, so the run waited the first backoff of 60 seconds. Then it
+   started attempt 2.
+3. Attempt 2 got **HTTP 206** with `Content-Range: bytes
+   1081344-2745378/2745379` and `Content-Length: 1664035`. The ETag was
+   `"6a90132c-29e423"`. aria2 resumed at 1,081,344 bytes, the last complete
+   block below the 1,083,409-byte partial file.
+4. The item completed with 2,745,379 bytes, which equals the total in the
+   `Content-Range`. The recorded SHA-256 is
+   `7eda23da9c7574ad9741987083934ac8d419fb958f5458e8fb3fe79ac985c35a`.
+   It equals the digest of the file on disk.
+
+Both provenance record sets (the stopped run and the resumed run) pass
+`verify_provenance.py`. The SHA-256 of `~/source-listing` is unchanged.
+
+Findings and limits:
+- The source honors Range requests on this file. The result comes from one
+  file of one type (JPEG). It does not cover other files.
+- No source checksum exists, so the test does not prove that the joined bytes
+  equal a single uninterrupted download. The final size equals the total in
+  `Content-Range`. The stopped attempt recorded no ETag, so the test cannot
+  show that the representation stayed the same between the two attempts. A
+  full second download would compare the bytes.
+- A planned stop goes to `retry_wait`, and the first backoff (60 seconds)
+  delays the resume after a restart. `SPEC-reliable-acquisition.md` counts
+  an adapter-initiated stop as an ended attempt, and it does not require an
+  immediate retry. No fix was made. Recommend a review if operators find the
+  wait too long after a planned stop.
+
 ## Required checks
 
 This pass changed no code. `git diff --check` reported no whitespace error in
@@ -92,8 +130,8 @@ the edited documents.
 ## Not covered
 
 - Queues B (1M to 2M) and C (2M to 3M) did not run.
-- No resume, no Tor circuit change, and no outage occurred during the pilot.
-  The pilot does not test those paths against the source.
+- No Tor circuit change and no outage occurred in either test. These tests do
+  not exercise those paths against the source.
 - A bounded production run has not run.
 - The wrong base URL entered through a hand-made `~/base-url.txt`. The tooling
   cannot detect a base URL that is well formed but wrong. Only a source

@@ -6,8 +6,10 @@ event logs, and structured reports. E01 through E14 ran against the current
 per-URL aria2 candidate; all 14 pass and the engineering targets are met
 (`specs/reports/acquisition-tool-evaluation-2026-09-18c.md`). The separately
 scheduled source pilot ran on 2026-09-18 for one queue of 5 URLs, and all 5
-transferred (`specs/reports/source-pilot-2026-09-18.md`). The pilot did not
-observe the source Range behavior, so the specification is not complete. This specification defines how you select an existing transfer tool
+transferred (`specs/reports/source-pilot-2026-09-18.md`). A resume test on
+one file recorded HTTP 206 with a `Content-Range` header, so the source
+honors Range requests. Queues B and C and a bounded production run are open,
+so the specification is not complete. This specification defines how you select an existing transfer tool
 before expanding custom code. It does not authorize a production download.
 
 ## Outcome and scope
@@ -191,8 +193,8 @@ but is not source success.
 
 ## Next steps
 
-Record the source Range behavior with a deliberate resume test in a second
-pilot of at most five URLs. Add a long-lived RPC worker only when the
+Run pilots for queues B and C, each with at most five URLs, and then a
+bounded production run. Add a long-lived RPC worker only when the
 evaluation identifies a mandatory gap. Use the selected result to implement the acquisition specification, then
 add discovery without making crawling a prerequisite for downloading known
 URLs.

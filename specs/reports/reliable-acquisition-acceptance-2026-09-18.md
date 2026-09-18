@@ -97,5 +97,6 @@ the spec is already satisfied (or was overtaken by an earlier edit).
 - The pilot byte comparison is done. The raw inventory and snapshot hashes are
   unchanged, and the destination was new. The queue had no `sha256=` token,
   so no source checksum was compared.
-- Still open: source Range behavior, queues B and C, and a bounded production
-  run.
+- A resume test on one file got HTTP 206 with
+  `Content-Range: bytes 1081344-2745378/2745379`, and the file completed.
+- Still open: queues B and C, and a bounded production run.
