@@ -1,6 +1,6 @@
 # Specification: console keymap
 
-Status: planned, September 19, 2026. This document assigns one meaning to
+Status: implemented, September 19, 2026. This document assigns one meaning to
 each key across every console screen and defines the footer contents. It
 responds to findings H2 and M7 in
 [docs/console-ui-audit-2026-09-19.md](../docs/console-ui-audit-2026-09-19.md).

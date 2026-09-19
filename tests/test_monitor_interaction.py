@@ -24,13 +24,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 try:
     import textual  # noqa: F401
+    from textual.binding import Binding
     TEXTUAL_AVAILABLE = True
 except ImportError:
     TEXTUAL_AVAILABLE = False
 
 from controller import ControlServer
 from inspection import InspectionServer
-from monitor import build_monitor_app, short_item_id
+import monitor
+from monitor import (DISABLED_CONTROL_NOTICE, DISABLED_CONTROL_KEYS, build_monitor_app,
+                     footer_entries, footer_text, help_rows, short_item_id)
+from unittest import mock
 
 
 def snapshot() -> dict:
@@ -581,17 +585,17 @@ class ItemDetailsInteractionTests(unittest.IsolatedAsyncioTestCase):
                 screen = app.screen
                 self.assertIn("Source hidden",
                              screen.query_one("#item-details-text").content.plain)
-                await pilot.press("r")
+                await pilot.press("s")
                 await pilot.pause(0.2)
                 text = screen.query_one("#item-details-text").content.plain
                 self.assertIn("Source redacted", text)
                 self.assertNotIn("token=1", text)
-                await pilot.press("r")  # now bound to hide_source
+                await pilot.press("s")  # same key toggles it back
                 await pilot.pause(0.1)
                 self.assertIn("Source hidden",
                              screen.query_one("#item-details-text").content.plain)
                 # Reveal again, then close: reopening must show it hidden again.
-                await pilot.press("r")
+                await pilot.press("s")
                 await pilot.pause(0.2)
                 self.assertIn("Source redacted",
                              screen.query_one("#item-details-text").content.plain)
@@ -601,7 +605,7 @@ class ItemDetailsInteractionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Source hidden",
                              app.screen.query_one("#item-details-text").content.plain)
                 # Reveal, then simulate a session change: reveal must clear and reload.
-                await pilot.press("r")
+                await pilot.press("s")
                 await pilot.pause(0.2)
                 self.assertTrue(app.screen.revealed)
                 current = dict(app.current)
@@ -758,7 +762,7 @@ class ItemDetailsInteractionTests(unittest.IsolatedAsyncioTestCase):
                 await self.open_queue_row(pilot, 0)
                 binding_keys = {binding[0] if isinstance(binding, tuple) else binding.key
                                for binding in type(app.screen).BINDINGS}
-                self.assertEqual(binding_keys, {"escape", "r", "n", "l", "up", "down",
+                self.assertEqual(binding_keys, {"escape", "s", "n", "l", "up", "down", "r",
                                                 "q", "t", "p", "u", "d", "k"})
                 for key in ("q", "t", "p", "u", "d", "k"):
                     await pilot.press(key)
@@ -778,7 +782,7 @@ class ItemDetailsInteractionTests(unittest.IsolatedAsyncioTestCase):
             app = self.make_item_app(root, database)
             async with app.run_test() as pilot:
                 await self.open_queue_row(pilot, 0)
-                await pilot.press("r")
+                await pilot.press("s")
                 await pilot.pause(0.2)
                 text = app.screen.query_one("#item-details-text").content.plain
                 self.assertIn("Source truncated", text)
@@ -1195,6 +1199,337 @@ class WorkerTableMarqueeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(cells[0].endswith(f"[{short_item_id('item-1')}]"))
                 self.assertTrue(cells[1].endswith(f"[{short_item_id('item-2')}]"))
                 self.assertEqual(cells[2], "unique.bin")
+
+
+DASHBOARD_FOOTER_120 = ("↑↓ Select  Enter Details  Tab Pane  l Logs  ? Help  "
+                        "r Retry now  t Renew Tor  q Close")
+QUEUE_FOOTER_120 = ("Tab Focus  ↑↓ Select  Enter Details  / Search  l Logs  ? Help  "
+                    "R Retry row  x Exclude row")
+
+
+@unittest.skipUnless(TEXTUAL_AVAILABLE, "Textual is optional")
+class KeymapTests(unittest.IsolatedAsyncioTestCase):
+    """SPEC-console-keymap.md: one key keeps one meaning on every console screen.
+
+    An operator who learns a key on one screen must not trigger another action
+    on the next screen; a rebound key would reveal a source or send a command by mistake.
+    """
+
+    make_item_app = ItemDetailsInteractionTests.make_item_app
+    open_queue_row = ItemDetailsInteractionTests.open_queue_row
+
+    def keymap_app(self, root: Path, commands: list):
+        database = build_item_database(root)
+        insert_item(database, "http://a.onion/keymap.bin", 1, "keymap.bin", status="queued")
+        control = ControlServer(root, "run-one", "session-one",
+                                lambda: available_actions("pause_admission"),
+                                lambda request: commands.append(request) or {"outcome": "completed"})
+        control.start()
+        self.addCleanup(control.stop)
+        inspection = InspectionServer(root, "run-one", "session-one", database, 3, None)
+        inspection.start()
+        self.addCleanup(inspection.stop)
+        return build_monitor_app(snapshot_with_worker(), None, root, True, 20)()
+
+    @staticmethod
+    def screen_footer(app) -> str:
+        return app.screen.query_one("#key-footer").content.plain
+
+    @staticmethod
+    def actions_by_key(tables) -> dict:
+        found: dict = {}
+        for table in tables:
+            for binding in Binding.make_bindings(table):
+                found.setdefault(binding.key, set()).add(binding.action)
+        return found
+
+    async def open_worker(self, pilot):
+        pilot.app.open_worker_details("1")
+        await pilot.pause(0.2)
+        self.assertEqual(pilot.app.screen.__class__.__name__, "WorkerDetails")
+
+    async def open_item(self, pilot):
+        await self.open_queue_row(pilot, 0)
+        self.assertEqual(pilot.app.screen.__class__.__name__, "ItemDetails")
+
+    async def test_no_key_maps_to_two_actions_across_the_four_screens(self):
+        """A rebound key sends an operator's habit to the wrong action; fail on any rebind."""
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self.keymap_app(Path(temporary), [])
+            async with app.run_test() as pilot:
+                await pilot.pause(0.3)
+                queue_bindings = type(app.query_one("#queue-pane")).BINDINGS
+                await self.open_worker(pilot)
+                worker_bindings = type(app.screen).BINDINGS
+                await pilot.press("escape")
+                await pilot.pause(0.1)
+                await self.open_item(pilot)
+                item_bindings = type(app.screen).BINDINGS
+                tables = [type(app).BINDINGS, queue_bindings, worker_bindings, item_bindings]
+                by_key = self.actions_by_key(tables)
+                # The spec requires the detail screens to bind the control keys to a
+                # no-op so they never reach the dashboard; that action is the only allowed overlap.
+                for key, actions in by_key.items():
+                    self.assertLessEqual(len(actions - {"disabled_control"}), 1,
+                                         f"{key} maps to {actions}")
+                self.assertEqual(by_key["l"], {"logs"})
+                self.assertEqual(by_key["r"], {"prepare_retry_now", "disabled_control"})
+                self.assertEqual(by_key["R"], {"prepare_retry_selected"})
+                self.assertEqual(by_key["s"], {"toggle_source"})
+                self.assertNotIn("s", self.actions_by_key([type(app).BINDINGS, worker_bindings]))
+                for detail in (worker_bindings, item_bindings):
+                    disabled = {b.key for b in Binding.make_bindings(detail)
+                                if b.action == "disabled_control"}
+                    self.assertEqual(disabled, set(DISABLED_CONTROL_KEYS))
+
+    async def test_control_keys_on_detail_screens_only_show_the_footer_notice(self):
+        """`r` must not fall through to a run command or a get_item read on a detail screen."""
+        with tempfile.TemporaryDirectory() as temporary:
+            commands: list = []
+            app = self.keymap_app(Path(temporary), commands)
+            exits = mock.Mock()
+            app.exit = exits
+            async with app.run_test() as pilot:
+                await pilot.pause(0.3)
+                requests = mock.Mock(wraps=monitor.inspection_request)
+                for opener in (self.open_worker, self.open_item):
+                    await opener(pilot)
+                    with mock.patch.object(monitor, "inspection_request", requests):
+                        for key in DISABLED_CONTROL_KEYS:
+                            await pilot.press(key)
+                            await pilot.pause(0.05)
+                            self.assertEqual(self.screen_footer(app), DISABLED_CONTROL_NOTICE)
+                    self.assertNotIn("get_item", [call.args[2] for call in requests.call_args_list])
+                    self.assertEqual(app.screen.__class__.__name__,
+                                     "ItemDetails" if opener == self.open_item else "WorkerDetails")
+                    await pilot.press("escape")
+                    await pilot.pause(0.2)
+            self.assertEqual(commands, [])
+            exits.assert_not_called()
+
+    async def test_footer_notice_clears_after_its_timeout(self):
+        """A notice that never cleared would hide the key hints the operator needs."""
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self.keymap_app(Path(temporary), [])
+            async with app.run_test() as pilot:
+                await pilot.pause(0.3)
+                await self.open_worker(pilot)
+                with mock.patch.object(monitor, "DISABLED_CONTROL_NOTICE_S", 0.2):
+                    await pilot.press("r")
+                    await pilot.pause(0.05)
+                    self.assertEqual(self.screen_footer(app), DISABLED_CONTROL_NOTICE)
+                    await pilot.pause(0.4)
+                self.assertIn("? Help", self.screen_footer(app))
+
+    async def test_s_is_unbound_on_worker_details_and_toggles_source_on_item_details(self):
+        """Source stays in item details only, so a worker screen can never leak a source URL."""
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self.keymap_app(Path(temporary), [])
+            async with app.run_test() as pilot:
+                await pilot.pause(0.3)
+                await self.open_worker(pilot)
+                requests = mock.Mock(wraps=monitor.inspection_request)
+                with mock.patch.object(monitor, "inspection_request", requests):
+                    await pilot.press("s")
+                    await pilot.pause(0.1)
+                self.assertNotIn("get_item", [call.args[2] for call in requests.call_args_list])
+                self.assertFalse(app.screen.revealed)
+                await pilot.press("escape")
+                await pilot.pause(0.1)
+                await self.open_item(pilot)
+                await pilot.press("s")
+                await pilot.pause(0.2)
+                self.assertTrue(app.screen.revealed)
+                await pilot.press("s")
+                await pilot.pause(0.1)
+                self.assertFalse(app.screen.revealed)
+
+    async def test_help_opens_on_every_screen_and_lists_each_bound_key(self):
+        """The help modal is the only place a hidden key is documented, so it must not omit one."""
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self.keymap_app(Path(temporary), [])
+            async with app.run_test() as pilot:
+                await pilot.pause(0.3)
+
+                async def check(expected_kind_by_key: dict, name: str):
+                    await pilot.press("question_mark")
+                    await pilot.pause(0.1)
+                    self.assertEqual(app.screen.__class__.__name__, "HelpScreen", name)
+                    rows = app.screen.rows
+                    listed = {key for keys, _m, _k in rows for key in keys.split(" ")}
+                    kinds = {keys: kind for keys, _m, kind in rows}
+                    for key, kind in expected_kind_by_key.items():
+                        self.assertEqual(kinds[key], kind, f"{name}: {key}")
+                    text = app.screen.query_one("#help-rows").content
+                    self.assertIn("[read-only]", str(text))
+                    await pilot.press("escape")
+                    await pilot.pause(0.1)
+                    self.assertNotEqual(app.screen.__class__.__name__, "HelpScreen")
+                    return listed
+
+                listed = await check({"r": "confirmed", "t": "confirmed", "l": "read-only"},
+                                     "dashboard")
+                self.assertTrue({"q", "Ctrl+C", "Tab", "Enter", "?", "l", "r"} <= listed)
+                app.query_one("TabbedContent").active = "queue-tab"
+                await pilot.pause(0.3)
+                listed = await check({"R": "confirmed", "x": "confirmed", "/": "read-only",
+                                      "c": "read-only"}, "queue")
+                bound = {monitor.binding_key_label(b.key) for b in Binding.make_bindings(
+                    type(app.query_one("#queue-pane")).BINDINGS) if b.description}
+                self.assertTrue(bound <= listed, bound - listed)
+                app.query_one("TabbedContent").active = "activity-tab"
+                await self.open_worker(pilot)
+                listed = await check({"i": "read-only", "l": "read-only"}, "worker details")
+                self.assertTrue({"Esc", "?", "Ctrl+C"} <= listed)
+                await pilot.press("escape")
+                await pilot.pause(0.1)
+                await self.open_item(pilot)
+                listed = await check({"s": "read-only", "n": "read-only"}, "item details")
+                self.assertTrue({"Esc", "↑", "↓", "?", "q", "r"} <= listed)
+
+    async def test_help_modal_sends_no_request(self):
+        """Help documents keys; it must never read or change acquisition state."""
+        with tempfile.TemporaryDirectory() as temporary:
+            commands: list = []
+            app = self.keymap_app(Path(temporary), commands)
+            async with app.run_test() as pilot:
+                await pilot.pause(0.3)
+                requests = mock.Mock(wraps=monitor.inspection_request)
+                with mock.patch.object(monitor, "inspection_request", requests):
+                    await pilot.press("question_mark")
+                    await pilot.pause(0.1)
+                    await pilot.press("escape")
+                    await pilot.pause(0.1)
+            self.assertEqual(requests.call_count, 0)
+            self.assertEqual(commands, [])
+
+    def test_footer_entries_follow_the_spec_at_120_and_80_columns(self):
+        """The footer is the only key hint most operators read; its text and limits are contract."""
+        self.assertEqual(footer_text("dashboard", 120), DASHBOARD_FOOTER_120)
+        self.assertEqual(footer_text("dashboard", 80),
+                         "↑↓ Select  Enter Details  Tab Pane  l Logs  ? Help")
+        self.assertEqual(footer_text("worker", 120),
+                         "Esc Back  ↑↓ Scroll  i Item details  l Logs  ? Help")
+        self.assertEqual(footer_text("worker", 80), footer_text("worker", 120))
+        self.assertEqual(footer_text("item", 120),
+                         "Esc Back  ↑↓ Attempt  n Next attempts  l Logs  s Source  ? Help")
+        self.assertEqual(footer_text("item", 80),
+                         "Esc Back  ↑↓ Attempt  n Next attempts  l Logs  ? Help")
+        self.assertEqual(footer_text("queue", 120), QUEUE_FOOTER_120)
+        self.assertEqual(footer_text("queue", 80),
+                         "Tab Focus  ↑↓ Select  Enter Details  / Search  ? Help")
+        for screen in ("dashboard", "queue", "worker", "item"):
+            self.assertLessEqual(len(footer_entries(screen, 120)), 8)
+            self.assertLessEqual(len(footer_entries(screen, 80)), 5)
+            for width in (80, 120):
+                self.assertIn("?", [key for key, _label in footer_entries(screen, width)])
+
+    def test_footer_keys_are_bound_or_navigation(self):
+        """A footer key that nothing handles would advertise an action that does nothing."""
+        app_class = build_monitor_app(snapshot(), None, None, False, 20)
+        bound = {monitor.binding_key_label(b.key) for b in Binding.make_bindings(app_class.BINDINGS)}
+        navigation = {"↑↓", "Enter", "Tab", "Esc", "/", "R", "x", "s", "i", "n"}
+        for screen, entries in monitor.FOOTER_ENTRIES.items():
+            for key, _label in entries:
+                self.assertTrue(key in bound or key in navigation, f"{screen}: {key}")
+
+    async def test_rendered_footer_matches_the_text_at_both_widths(self):
+        """The widget, not only the helper, must show the spec text and no palette entry."""
+        with tempfile.TemporaryDirectory() as temporary:
+            (Path(temporary) / "120").mkdir()
+            (Path(temporary) / "80").mkdir()
+            for size, expected in (((120, 40), DASHBOARD_FOOTER_120),
+                                   ((80, 24), "↑↓ Select  Enter Details  Tab Pane  l Logs  ? Help")):
+                app = self.keymap_app(Path(temporary) / str(size[0]), [])
+                async with app.run_test(size=size) as pilot:
+                    await pilot.pause(0.3)
+                    self.assertEqual(self.screen_footer(app), expected)
+                    self.assertNotIn("alette", self.screen_footer(app))
+                    app.query_one("TabbedContent").active = "queue-tab"
+                    await pilot.pause(0.3)
+                    self.assertEqual(self.screen_footer(app),
+                                     QUEUE_FOOTER_120 if size[0] == 120 else
+                                     "Tab Focus  ↑↓ Select  Enter Details  / Search  ? Help")
+
+    async def test_tab_moves_focus_among_regions_and_never_switches_view(self):
+        """Tab that changed the view would strand an operator in a screen they did not choose."""
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self.keymap_app(Path(temporary), [])
+            async with app.run_test() as pilot:
+                await pilot.pause(0.3)
+                tabs = app.query_one("TabbedContent")
+                workers, activity = app.query_one("#workers"), app.query_one("#activity-pane")
+                workers.focus()
+                await pilot.press("tab")
+                self.assertIs(app.focused, activity)
+                await pilot.press("tab")
+                self.assertIs(app.focused, workers)
+                await pilot.press("shift+tab")
+                self.assertIs(app.focused, activity)
+                self.assertEqual(tabs.active, "activity-tab")
+                tabs.active = "queue-tab"
+                await pilot.pause(0.3)
+                regions = [app.query_one("#queue-bucket"), app.query_one("#queue-search"),
+                           app.query_one("#queue-table")]
+                regions[2].focus()
+                seen = []
+                for _ in range(4):
+                    await pilot.press("tab")
+                    seen.append(next(i for i, r in enumerate(regions)
+                                     if r in app.focused.ancestors_with_self))
+                self.assertEqual(seen, [0, 1, 2, 0])
+                await pilot.press("shift+tab")
+                self.assertEqual(next(i for i, r in enumerate(regions)
+                                      if r in app.focused.ancestors_with_self), 2)
+                self.assertEqual(tabs.active, "queue-tab")
+
+    async def test_q_and_ctrl_c_close_the_monitor_only_outside_text_entry(self):
+        """Typing `q` in search must not close the monitor and lose the operator's session."""
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self.keymap_app(Path(temporary), [])
+            exits = mock.Mock()
+            app.exit = exits
+            async with app.run_test() as pilot:
+                await pilot.pause(0.3)
+                await pilot.press("q")
+                self.assertEqual(exits.call_count, 1)
+                await pilot.press("ctrl+c")
+                self.assertEqual(exits.call_count, 2)
+                app.query_one("TabbedContent").active = "queue-tab"
+                await pilot.pause(0.3)
+                await pilot.press("q")
+                self.assertEqual(exits.call_count, 3)
+                search = app.query_one("#queue-search")
+                search.focus()
+                await pilot.press("q", "r", "l", "s", "question_mark")
+                self.assertEqual(search.value, "qrls?")
+                self.assertEqual(exits.call_count, 3)
+                self.assertEqual(app.screen.__class__.__name__, "Screen")
+                await pilot.press("escape")
+                app.query_one("TabbedContent").active = "activity-tab"
+                await pilot.pause(0.2)
+                for opener in (self.open_worker, self.open_item):
+                    await opener(pilot)
+                    closed_before = exits.call_count
+                    await pilot.press("ctrl+c")
+                    await pilot.pause(0.1)
+                    self.assertEqual(exits.call_count, closed_before + 1)
+                    await pilot.press("escape")
+                    await pilot.pause(0.1)
+
+    async def test_escape_on_the_dashboard_does_nothing(self):
+        """The dashboard has no prior view, so Escape must not close or change it."""
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self.keymap_app(Path(temporary), [])
+            exits = mock.Mock()
+            app.exit = exits
+            async with app.run_test() as pilot:
+                await pilot.pause(0.3)
+                depth = len(app.screen_stack)
+                await pilot.press("escape")
+                await pilot.pause(0.1)
+                self.assertEqual(len(app.screen_stack), depth)
+                exits.assert_not_called()
 
 
 if __name__ == "__main__":

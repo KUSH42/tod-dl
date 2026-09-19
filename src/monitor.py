@@ -860,6 +860,93 @@ def worker_details_text(worker: dict[str, Any], read_at: Any = None,
     return "\n".join(lines)
 
 
+# Footer entries per screen, in the order SPEC-console-keymap.md requires:
+# navigation keys, screen-local actions, then command keys with `q` last.
+FOOTER_ENTRIES: dict[str, tuple[tuple[str, str], ...]] = {
+    "dashboard": (("↑↓", "Select"), ("Enter", "Details"), ("Tab", "Pane"), ("l", "Logs"),
+                  ("?", "Help"), ("r", "Retry now"), ("t", "Renew Tor"), ("q", "Close")),
+    "queue": (("Tab", "Focus"), ("↑↓", "Select"), ("Enter", "Details"), ("/", "Search"),
+              ("l", "Logs"), ("?", "Help"), ("R", "Retry row"), ("x", "Exclude row")),
+    "worker": (("Esc", "Back"), ("↑↓", "Scroll"), ("i", "Item details"), ("l", "Logs"),
+               ("?", "Help")),
+    "item": (("Esc", "Back"), ("↑↓", "Attempt"), ("n", "Next attempts"), ("l", "Logs"),
+             ("s", "Source"), ("?", "Help")),
+}
+FOOTER_WIDE_COLUMNS = 120
+FOOTER_WIDE_LIMIT = 8
+FOOTER_NARROW_LIMIT = 5
+DISABLED_CONTROL_NOTICE = "Not available here; press Escape to return"
+DISABLED_CONTROL_NOTICE_S = 3
+# Keys that a detail screen binds to a no-op so they cannot reach the dashboard.
+DISABLED_CONTROL_KEYS = ("q", "r", "t", "p", "u", "d", "k")
+KEY_DISPLAY = {
+    "question_mark": "?", "slash": "/", "right_square_bracket": "]",
+    "left_square_bracket": "[", "right_curly_bracket": "}", "left_curly_bracket": "{",
+    "escape": "Esc", "pageup": "PageUp", "pagedown": "PageDown", "up": "↑", "down": "↓",
+    "ctrl+c": "Ctrl+C", "tab": "Tab", "shift+tab": "Shift+Tab", "enter": "Enter",
+}
+
+
+def footer_entries(screen: str, width: int) -> list[tuple[str, str]]:
+    """Return the footer entries for a screen at a terminal width.
+
+    Wide terminals (120 columns or more) show up to 8 entries and every other
+    width shows up to 5. `?` is always kept: when it falls outside the first 5
+    entries, it replaces the fifth.
+    """
+    entries = list(FOOTER_ENTRIES[screen])
+    if width >= FOOTER_WIDE_COLUMNS:
+        return entries[:FOOTER_WIDE_LIMIT]
+    shown = entries[:FOOTER_NARROW_LIMIT]
+    if not any(key == "?" for key, _label in shown):
+        shown[-1] = next(entry for entry in entries if entry[0] == "?")
+    return shown
+
+
+def footer_text(screen: str, width: int) -> str:
+    return "  ".join(f"{key} {label}" for key, label in footer_entries(screen, width))
+
+
+def binding_key_label(key: str) -> str:
+    return KEY_DISPLAY.get(key, key)
+
+
+def binding_kind(action: str) -> str:
+    """Name how the help screen classifies a bound action.
+
+    Every `prepare_*` action opens a confirmation, except the export prompt,
+    which asks for a local file path and sends no controller request.
+    """
+    if action.startswith("prepare_") and action != "prepare_export":
+        return "confirmed"
+    return "read-only"
+
+
+def help_rows(binding_tables: list[list[Any]]) -> list[tuple[str, str, str]]:
+    """Return (keys, meaning, kind) rows for bindings, keeping each key once.
+
+    `binding_tables` holds Textual BINDINGS lists. A binding without a
+    description is a hidden no-op; the disabled-control keys collapse into one row.
+    """
+    from textual.binding import Binding
+    rows: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    hidden: list[str] = []
+    for table in binding_tables:
+        for binding in Binding.make_bindings(table):
+            if binding.key in seen:
+                continue
+            seen.add(binding.key)
+            if binding.action == "disabled_control":
+                hidden.append(binding_key_label(binding.key))
+            elif binding.description:
+                rows.append((binding_key_label(binding.key), binding.description,
+                             binding_kind(binding.action)))
+    if hidden:
+        rows.append((" ".join(hidden), DISABLED_CONTROL_NOTICE, "read-only"))
+    return rows
+
+
 def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = None,
                       state: Path | None = None, control: bool = False,
                       fps: int = 30) -> type | None:
@@ -875,7 +962,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
         from textual.containers import Horizontal, Vertical, VerticalScroll
         from rich.text import Text
         from textual.screen import ModalScreen, Screen
-        from textual.widgets import (Button, DataTable, Footer, Input, Select, Static,
+        from textual.widgets import (Button, DataTable, Input, Select, Static,
                                      TabbedContent, TabPane)
     except ImportError:
         print("Textual is optional. Install requirements-monitor.txt, or use "
@@ -930,6 +1017,85 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
         visual.append(match.group(2))
         visual.append(" remaining)", style="dim")
         return visual
+
+    class KeyFooter(Static):
+        """One-line footer drawn from FOOTER_ENTRIES, with a timed notice slot."""
+        DEFAULT_CSS = "KeyFooter { dock: bottom; height: 1; background: $panel; }"
+
+        def __init__(self, screen_name: str) -> None:
+            super().__init__("", id="key-footer")
+            self.screen_name = screen_name
+            self.notice: str | None = None
+            self.notice_timer: Any = None
+
+        def on_mount(self) -> None:
+            self.render_footer()
+
+        def on_resize(self, event: Any) -> None:
+            self.render_footer()
+
+        def set_screen_name(self, screen_name: str) -> None:
+            self.screen_name = screen_name
+            self.render_footer()
+
+        def show_notice(self, message: str, seconds: float) -> None:
+            if self.notice_timer is not None:
+                self.notice_timer.stop()
+            self.notice = message
+            self.notice_timer = self.set_timer(seconds, self.clear_notice)
+            self.render_footer()
+
+        def clear_notice(self) -> None:
+            self.notice, self.notice_timer = None, None
+            self.render_footer()
+
+        def render_footer(self) -> None:
+            rendered = Text(no_wrap=True, overflow="ellipsis")
+            if self.notice:
+                rendered.append(self.notice, style="bold")
+            else:
+                for index, (key, label) in enumerate(
+                        footer_entries(self.screen_name, self.app.size.width)):
+                    if index:
+                        rendered.append("  ")
+                    rendered.append(key, style="bold")
+                    rendered.append(" " + label)
+            self.update(rendered)
+
+    class HelpScreen(ModalScreen[None]):
+        """List the bindings of the screen that opened it; sends no request."""
+        BINDINGS = [Binding("escape", "dismiss", "Close")]
+
+        DEFAULT_CSS = """
+        HelpScreen {
+            align: center middle;
+        }
+        #help-panel {
+            width: 76;
+            height: auto;
+            max-height: 90%;
+            border: round $accent;
+            background: $surface;
+            padding: 1 2;
+        }
+        """
+
+        def __init__(self, title: str, rows: list[tuple[str, str, str]]) -> None:
+            super().__init__()
+            self.title_text = title
+            self.rows = rows
+
+        def compose(self) -> ComposeResult:
+            with Vertical(id="help-panel"):
+                yield Static(self.title_text, id="help-title")
+                with VerticalScroll():
+                    yield Static("\n".join(
+                        f"{keys:<14}{meaning}  [{kind}]" for keys, meaning, kind in self.rows),
+                        id="help-rows")
+                yield Static("Escape closes this help.")
+
+        def action_dismiss(self) -> None:
+            self.dismiss(None)
 
     class ActionConfirmation(ModalScreen[bool]):
         BINDINGS = [("y", "confirm", "Yes"), ("n", "dismiss", "No"),
@@ -1047,18 +1213,14 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
 
     class ItemDetails(Screen[None]):
         """Read-only view bound to one immutable run and item identity."""
-        BINDINGS = [("escape", "dismiss", "Back"), ("r", "reveal_source", "Reveal source"),
+        BINDINGS = [("escape", "dismiss", "Back"), ("s", "toggle_source", "Reveal or hide source"),
                     ("n", "next_attempts", "Next attempts"), ("l", "logs", "Logs"),
-                    Binding("up", "select_previous_attempt", "Prev attempt", show=False,
+                    Binding("up", "select_previous_attempt", "Previous attempt", show=False,
                            priority=True),
                     Binding("down", "select_next_attempt", "Next attempt", show=False,
                            priority=True),
-                    Binding("q", "disabled_control", show=False),
-                    Binding("t", "disabled_control", show=False),
-                    Binding("p", "disabled_control", show=False),
-                    Binding("u", "disabled_control", show=False),
-                    Binding("d", "disabled_control", show=False),
-                    Binding("k", "disabled_control", show=False)]
+                    *[Binding(key, "disabled_control", show=False)
+                      for key in DISABLED_CONTROL_KEYS]]
         DEFAULT_CSS = "#item-details { height: 1fr; overflow-y: auto; }"
 
         def __init__(self, run_id: str, item_id: str) -> None:
@@ -1078,11 +1240,10 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
         def compose(self) -> ComposeResult:
             with VerticalScroll(id="item-details"):
                 yield Static("Loading item details…", id="item-details-text")
-            yield Footer()
+            yield KeyFooter("item")
 
         def on_mount(self) -> None:
             self.session_id = self.app.current.get("session_id")
-            self.set_source_binding()
             self.load_item()
             self.set_interval(2, self.check_session)
 
@@ -1097,14 +1258,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             self.cursor = None
             self.revealed = False
             self.session_reload_pending = True
-            self.set_source_binding()
             self.load_item()
-
-        def set_source_binding(self) -> None:
-            action = "hide_source" if self.revealed else "reveal_source"
-            label = "Hide source" if self.revealed else "Reveal source"
-            self._bindings.key_to_bindings["r"] = [Binding("r", action, label)]
-            self.refresh_bindings()
 
         def update_details(self, error: str | None = None, retain: bool = False) -> None:
             if error and retain and self.item:
@@ -1154,17 +1308,15 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             self.revision = response.get("state_revision")
             self.update_details()
 
-        def action_reveal_source(self) -> None:
-            self.revealed = True
-            self.set_source_binding()
-            self.load_item()
-
-        def action_hide_source(self) -> None:
+        def action_toggle_source(self) -> None:
+            if not self.revealed:
+                self.revealed = True
+                self.load_item()
+                return
             self.revealed = False
             if self.item:
                 self.item["source"] = None
                 self.item["source_label"] = "Source hidden"
-            self.set_source_binding()
             self.update_details()
 
         def action_next_attempts(self) -> None:
@@ -1214,18 +1366,15 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             self.app.pop_screen()
 
         def action_disabled_control(self) -> None:
-            return
+            self.query_one(KeyFooter).show_notice(
+                DISABLED_CONTROL_NOTICE, DISABLED_CONTROL_NOTICE_S)
 
     class WorkerDetails(Screen[None]):
         """Read-only view bound to one worker slot in one controller session."""
         BINDINGS = [("escape", "dismiss", "Back"), ("i", "item_details", "Item details"),
-                    ("l", "logs", "Logs"), ("r", "reveal_source", "Reveal source"),
-                    Binding("q", "disabled_control", show=False),
-                    Binding("t", "disabled_control", show=False),
-                    Binding("p", "disabled_control", show=False),
-                    Binding("u", "disabled_control", show=False),
-                    Binding("d", "disabled_control", show=False),
-                    Binding("k", "disabled_control", show=False)]
+                    ("l", "logs", "Logs"),
+                    *[Binding(key, "disabled_control", show=False)
+                      for key in DISABLED_CONTROL_KEYS]]
         DEFAULT_CSS = "#worker-details { height: 1fr; overflow-y: auto; }"
 
         def __init__(self, run_id: str, session_id: str, worker_id: int,
@@ -1245,18 +1394,11 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
         def compose(self) -> ComposeResult:
             with VerticalScroll(id="worker-details"):
                 yield Static("Loading worker details…", id="worker-details-text")
-            yield Footer()
+            yield KeyFooter("worker")
 
         def on_mount(self) -> None:
-            self.set_source_binding()
             self.load_worker()
             self.set_interval(2, self.refresh_worker)
-
-        def set_source_binding(self) -> None:
-            action = "hide_source" if self.revealed else "reveal_source"
-            label = "Hide source" if self.revealed else "Reveal source"
-            self._bindings.key_to_bindings["r"] = [Binding("r", action, label)]
-            self.refresh_bindings()
 
         def refresh_worker(self) -> None:
             if self.app.current.get("session_id") != self.session_id:
@@ -1292,7 +1434,6 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
                 self.revealed = False
                 self.source = None
                 self.source_label = "Source hidden"
-                self.set_source_binding()
             self.update_details()
 
         def update_details(self, error: str | None = None) -> None:
@@ -1317,7 +1458,6 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
                 self.app.notify("No item assigned", severity="warning")
                 return
             self.revealed = True
-            self.set_source_binding()
             target = self.displayed_item_id
             self.app.submit_inspection(
                 lambda: inspection_request(state, self.run_id, "get_item",
@@ -1342,7 +1482,6 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             self.revealed = False
             self.source = None
             self.source_label = "Source hidden"
-            self.set_source_binding()
             self.update_details()
 
         def action_item_details(self) -> None:
@@ -1360,7 +1499,8 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             self.app.pop_screen()
 
         def action_disabled_control(self) -> None:
-            return
+            self.query_one(KeyFooter).show_notice(
+                DISABLED_CONTROL_NOTICE, DISABLED_CONTROL_NOTICE_S)
 
     class QueueSearchInput(Input):
         """A literal-substring search box that cancels unsubmitted edits on Escape."""
@@ -1398,7 +1538,6 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
                    "Lower cooldown", show=True),
             Binding("e", "prepare_export", "Export queue", show=True),
             Binding("l", "logs", "Logs"),
-            Binding("question_mark", "help", "Help", show=True),
         ]
         DEFAULT_CSS = """
         QueuePane { height: 1fr; }
@@ -1677,16 +1816,6 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
         def action_logs(self) -> None:
             self.app.notify("Item logs are unavailable", severity="warning")
 
-        def action_help(self) -> None:
-            self.app.notify(
-                "/ search   Enter apply   Escape cancel   PageUp/PageDown page   "
-                "Enter opens item details   R retry row   x exclude row   "
-                "A retry access-denied row   N restart row under new generation   "
-                "] raise priority   [ lower priority   } raise cooldown   "
-                "{ lower cooldown   e export queue   l logs   "
-                "c clear filters   f refresh results   g first page",
-                title="Queue help")
-
         def retry_selected_eligible(self) -> bool:
             """Return whether the focused row can be offered for row-scoped retry.
 
@@ -1911,12 +2040,18 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
                 lambda: inspection_request(state, run_id, "list_queue", parameters), completed)
 
     class Monitor(App):
-        BINDINGS = [("q", "quit", "Close"), ("r", "prepare_retry_now", "Retry now"),
+        BINDINGS = [("q", "quit", "Close the monitor"),
+                    Binding("ctrl+c", "quit", "Close the monitor", show=False),
+                    ("r", "prepare_retry_now", "Retry now"),
                     ("t", "prepare_renew_tor_circuits", "Renew Tor"),
                     ("p", "prepare_pause_admission", "Pause admission"),
                     ("u", "prepare_resume_admission", "Resume admission"),
                     ("d", "prepare_drain_and_stop", "Drain and stop"),
-                    ("k", "prepare_checkpoint_stop", "Checkpoint and stop")]
+                    ("k", "prepare_checkpoint_stop", "Checkpoint and stop"),
+                    ("l", "logs", "Logs"),
+                    ("question_mark", "help", "Help"),
+                    Binding("tab", "focus_region(1)", priority=True, show=False),
+                    Binding("shift+tab", "focus_region(-1)", priority=True, show=False)]
 
         def __init__(self) -> None:
             super().__init__()
@@ -2061,7 +2196,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
                         yield Static(self.activity_text(snapshot["recent_events"]), id="activity")
                 with TabPane("Queue", id="queue-tab"):
                     yield QueuePane()
-            yield Footer()
+            yield KeyFooter("dashboard")
 
         def on_mount(self) -> None:
             table = self.query_one("#workers", DataTable)
@@ -2111,8 +2246,57 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             self.open_worker_details(event.cell_key.row_key.value)
 
         def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
-            if event.pane.id == "queue-tab":
+            queue_active = event.pane.id == "queue-tab"
+            self.query_one(KeyFooter).set_screen_name("queue" if queue_active else "dashboard")
+            if queue_active:
                 self.query_one(QueuePane).focus_default()
+
+        def focus_regions(self) -> list[Any]:
+            """Return the widgets Tab visits on the dashboard, in order."""
+            if self.query_one(TabbedContent).active == "queue-tab":
+                return [self.query_one("#queue-bucket"), self.query_one("#queue-search"),
+                        self.query_one("#queue-table")]
+            return [self.query_one("#workers"), self.query_one("#activity-pane")]
+
+        def action_focus_region(self, step: int) -> None:
+            regions = self.focus_regions()
+            focused = self.focused
+            index = next((position for position, region in enumerate(regions)
+                          if focused is not None and region in focused.ancestors_with_self), None)
+            if index is None:
+                regions[0 if step > 0 else -1].focus()
+            else:
+                regions[(index + step) % len(regions)].focus()
+
+        def action_logs(self) -> None:
+            self.notify("Item logs are unavailable", severity="warning")
+
+        def action_help(self) -> None:
+            screen = type(self.screen).__name__
+            navigation = {
+                "ItemDetails": ("Item details help", ItemDetails.BINDINGS, [
+                    ("↑ ↓", "Select an attempt, or scroll", "read-only")]),
+                "WorkerDetails": ("Worker details help", WorkerDetails.BINDINGS, [
+                    ("↑ ↓", "Scroll", "read-only")]),
+            }.get(screen)
+            if navigation:
+                title, tables, extra = navigation[0], [navigation[1], self.BINDINGS], navigation[2]
+                extra = extra + [("Tab Shift+Tab", "Move focus between sections", "read-only")]
+            elif isinstance(self.screen, ModalScreen):
+                return
+            elif self.query_one(TabbedContent).active == "queue-tab":
+                title, tables = "Queue help", [QueuePane.BINDINGS, self.BINDINGS]
+                extra = [("↑ ↓", "Move selection", "read-only"),
+                         ("Enter", "Open details for the focused row", "read-only"),
+                         ("Tab Shift+Tab", "Move focus between filters, search, and rows",
+                          "read-only")]
+            else:
+                title, tables = "Dashboard help", [self.BINDINGS]
+                extra = [("↑ ↓", "Move selection", "read-only"),
+                         ("Enter", "Open details for the focused row", "read-only"),
+                         ("Tab Shift+Tab", "Move focus between worker table and event log",
+                          "read-only")]
+            self.push_screen(HelpScreen(title, extra + help_rows(tables)))
 
         def submit_inspection(self, operation, completed) -> None:
             """Run one inspection request away from the render and input loop."""
@@ -2235,6 +2419,8 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
                         and self.control_state.get("actions", {}).get(action) == "available")
 
         def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+            if action == "focus_region" and self.screen is not self.screen_stack[0]:
+                return False
             if action == "prepare_retry_now" and not self.retry_now_eligible():
                 return None
             if action == "prepare_renew_tor_circuits" and not self.tor_renewal_eligible():
