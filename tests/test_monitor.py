@@ -33,7 +33,9 @@ from monitor import (QUEUE_EXPORT_FIELDS, SnapshotError, activity_segments, coll
                      screen_summary, validate_snapshot, detail_bytes, item_details_text,
                      worker_details_text, format_retry_deadline, queue_retry_status,
                      queue_row_cells, queue_header_text, queue_export_row,
-                     middle_truncate, short_item_id)
+                     middle_truncate, short_item_id, worker_item_cell,
+                     worker_progress_text, worker_rate_cells,
+                     MARQUEE_END_PAUSE_STEPS, MARQUEE_STEPS_PER_SECOND)
 
 
 def snapshot(lifecycle: str = "running") -> dict:
@@ -964,13 +966,73 @@ class MonitorTests(unittest.TestCase):
 
     def test_truncates_filename_without_losing_extension(self):
         name = "a-very-long-attachment-name-that-must-not-fill-the-table.pdf"
-        self.assertEqual(truncate_filename(name, 24), "a-very-long-attach...pdf")
+        self.assertEqual(truncate_filename(name, 24), "a-very-long-…e-table.pdf")
+
+    def test_sixty_character_basename_keeps_its_extension_in_a_36_column_cell(self):
+        # An operator tells files apart by both ends of the name, so the cut goes in the middle.
+        name = "quarterly-financial-statements-with-audit-notes-final-v2.pdf"
+        self.assertEqual(len(name), 60)
+        cell = truncate_filename(name, 36)
+        self.assertEqual(len(cell), 36)
+        self.assertEqual(cell.count("…"), 1)
+        self.assertTrue(cell.endswith("-final-v2.pdf"))
+        self.assertTrue(cell.startswith("quarterly-financia"))
 
     def test_marquee_rotates_long_basename_and_neutralizes_controls(self):
         name = "long-name-with-control\x1b-and-extension.pdf"
         self.assertEqual(marquee_filename(name, 0, 12), "long-name-wi")
         self.assertIn("\\x1b", marquee_filename(name, 16, 12))
         self.assertNotEqual(marquee_filename(name, 0, 12), marquee_filename(name, 1, 12))
+
+    def test_marquee_frames_hold_two_seconds_at_the_end_then_restart_without_a_separator(self):
+        # A separator glyph would read as part of the filename; the pause lets the operator read the tail.
+        name = "abcdefghijklmnopqrstuvwxyz.pdf"
+        last_start = len(name) - 12
+        frames = [marquee_filename(name, step, 12) for step in range(last_start + 20)]
+        self.assertTrue(all("·" not in frame and len(frame) == 12 for frame in frames))
+        self.assertEqual(frames[last_start], name[-12:])
+        self.assertEqual(frames[last_start:last_start + MARQUEE_END_PAUSE_STEPS],
+                         [name[-12:]] * MARQUEE_END_PAUSE_STEPS)
+        self.assertEqual(marquee_filename(name, last_start + MARQUEE_END_PAUSE_STEPS, 12), name[:12])
+        self.assertEqual(MARQUEE_END_PAUSE_STEPS / MARQUEE_STEPS_PER_SECOND, 2)
+
+    def test_stalled_row_shows_no_speed_or_eta_but_a_moving_row_keeps_them(self):
+        # A speed next to "stalled" contradicts it, and a zero speed would claim a known zero.
+        stalled = {"phase": "downloading", "last_progress_age_s": 60,
+                   "speed_bps": 161, "eta_seconds": 1135}
+        moving = dict(stalled, last_progress_age_s=2)
+        self.assertEqual(worker_phase_label(stalled, snapshot()), "stalled 1m 0s")
+        self.assertEqual(worker_rate_cells(stalled), ("—", "—"))
+        self.assertEqual(worker_rate_cells(moving), ("161 B/s", "~18m 55s"))
+        self.assertEqual(worker_phase_label(moving, snapshot()), "downloading")
+
+    def test_stale_engine_sample_shows_no_speed_or_eta(self):
+        # An old sample is not the current rate; the telemetry spec suppresses it after 5 s.
+        worker = {"phase": "downloading", "last_progress_age_s": 1,
+                  "speed_bps": 161, "eta_seconds": 1135}
+        self.assertEqual(worker_rate_cells(dict(worker, sample_age_s=5)), ("161 B/s", "~18m 55s"))
+        self.assertEqual(worker_rate_cells(dict(worker, sample_age_s=6)), ("—", "—"))
+
+    def test_unknown_total_renders_question_mark_and_only_a_known_zero_is_an_empty_file(self):
+        # The monitor cannot tell 0 from unknown after publication, so 0 must mean a confirmed empty file.
+        self.assertEqual(worker_progress_text({"received_bytes": 0, "total_bytes": None}),
+                         "0 B / ?")
+        self.assertEqual(worker_progress_text({"received_bytes": 0, "total_bytes": 0}),
+                         "0 B / 0 B (empty file)")
+        self.assertEqual(worker_progress_text({"received_bytes": 5, "total_bytes": 10}),
+                         "5 B / 10 B")
+
+    def test_duplicate_basenames_get_distinct_short_item_ids_within_the_cell_width(self):
+        # Two rows named alike are indistinguishable without the ID; the name yields the room.
+        name = "quarterly-financial-statements-with-audit-notes-final-v2.pdf"
+        first = worker_item_cell(name, "item-a", 36, True, None)
+        second = worker_item_cell(name, "item-b", 36, True, None)
+        self.assertNotEqual(first, second)
+        for cell, item in ((first, "item-a"), (second, "item-b")):
+            self.assertTrue(cell.endswith(f" [{short_item_id(item)}]"))
+            self.assertEqual(len(cell), 36)
+            self.assertIn("…", cell)
+        self.assertEqual(worker_item_cell("unique.bin", "item-a", 36, False, None), "unique.bin")
 
     def test_inspection_attempt_history_is_ordered_and_paged(self):
         with tempfile.TemporaryDirectory() as temporary:

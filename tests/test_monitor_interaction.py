@@ -30,7 +30,7 @@ except ImportError:
 
 from controller import ControlServer
 from inspection import InspectionServer
-from monitor import build_monitor_app
+from monitor import build_monitor_app, short_item_id
 
 
 def snapshot() -> dict:
@@ -1142,7 +1142,59 @@ class QueueMarqueeInteractionTests(unittest.IsolatedAsyncioTestCase):
                 reset_value = table.get_cell(first_item_id, "basename")
                 await pilot.pause(0.6)
                 self.assertEqual(table.get_cell(first_item_id, "basename"), reset_value)
-                self.assertIn("...", reset_value)
+                self.assertIn("…", reset_value)
+
+
+class WorkerTableMarqueeTests(unittest.IsolatedAsyncioTestCase):
+    """Headless coverage for the dashboard worker table's item cells."""
+
+    LONG = "quarterly-financial-statements-with-audit-notes-final-v2.pdf"
+
+    def make_app(self, root: Path, workers: list[dict], fps: int = 20):
+        value = snapshot()
+        value["workers"] = workers
+        app_class = build_monitor_app(value, None, root, True, fps)
+        self.assertIsNotNone(app_class, "Textual is installed; build_monitor_app must succeed")
+        return app_class()
+
+    def worker(self, worker_id: int, item_id: str, basename: str) -> dict:
+        return {"worker_id": worker_id, "item_id": item_id, "basename": basename,
+                "received_bytes": 0, "total_bytes": None, "speed_bps": None,
+                "eta_seconds": None, "phase": "downloading"}
+
+    async def test_only_the_focused_worker_row_scrolls_its_basename(self):
+        # A moving cell on every long row is noise; the operator reads the one under the cursor.
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self.make_app(Path(temporary), [
+                self.worker(1, "item-1", self.LONG),
+                self.worker(2, "item-2", "second-" + self.LONG)])
+            async with app.run_test() as pilot:
+                table = app.query_one("#workers")
+                await pilot.pause(0.3)
+                focused_before = table.get_cell("1", "item")
+                unfocused_before = table.get_cell("2", "item")
+                await pilot.pause(0.7)
+                self.assertNotEqual(table.get_cell("1", "item"), focused_before)
+                self.assertEqual(table.get_cell("2", "item"), unfocused_before)
+                self.assertIn("…", unfocused_before)
+                self.assertNotIn("·", str(table.get_cell("1", "item")))
+                table.move_cursor(row=1)
+                await pilot.pause(0.7)
+                self.assertIn("…", table.get_cell("1", "item"))
+                self.assertNotIn("…", table.get_cell("2", "item"))
+
+    async def test_duplicate_basenames_show_distinct_item_ids_in_the_worker_table(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self.make_app(Path(temporary), [
+                self.worker(1, "item-1", "dup.bin"), self.worker(2, "item-2", "dup.bin"),
+                self.worker(3, "item-3", "unique.bin")])
+            async with app.run_test() as pilot:
+                await pilot.pause(0.3)
+                table = app.query_one("#workers")
+                cells = [str(table.get_cell(key, "item")) for key in ("1", "2", "3")]
+                self.assertTrue(cells[0].endswith(f"[{short_item_id('item-1')}]"))
+                self.assertTrue(cells[1].endswith(f"[{short_item_id('item-2')}]"))
+                self.assertEqual(cells[2], "unique.bin")
 
 
 if __name__ == "__main__":

@@ -3201,6 +3201,17 @@ class TelemetryTests(unittest.TestCase):
             self.assertEqual(publisher.time_status_copy()[0], recorded)
 
 
+    def test_engine_total_of_zero_is_published_as_unknown_not_as_an_empty_file(self):
+        # The engine reports 0 before it finds the length; publishing 0 would show a false empty file.
+        with tempfile.TemporaryDirectory() as temporary:
+            publisher = TelemetryPublisher(Path(temporary), "test-run", 1)
+            publisher.set_active("https://fixture.test/item", 1, 1, "downloading")
+            publisher.update_sample("https://fixture.test/item", 0, 0, 0, 1)
+            self.assertIsNone(publisher.runtime_copy()[0]["total_bytes"])
+            publisher.update_sample("https://fixture.test/item", 10, 20, 1, 1)
+            self.assertEqual(publisher.runtime_copy()[0]["total_bytes"], 20)
+
+
 class ShutdownSignalTests(unittest.TestCase):
     def test_sigterm_during_run_exits_143_and_records_close_reason(self):
         url = "https://fixture.test/first/data/item.bin"

@@ -249,6 +249,8 @@ class TelemetryPublisher:
             if url not in self.active:
                 return
             sample = self.active[url]
+            # The engine reports a total of 0 before it discovers the length; that is unknown.
+            total_bytes = total_bytes or None
             previous = sample.get("received_bytes")
             if (received_bytes is not None
                     and (previous is None or received_bytes > previous)):

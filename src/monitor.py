@@ -32,6 +32,11 @@ ACTIVITY_NAME_MAX = 40
 ACTIVITY_NAME_MIN = 12
 ACTIVITY_SEVERITY_COLUMNS = 7
 CATEGORY_SLUG = re.compile(r"[a-z0-9_]+")
+MARQUEE_STEPS_PER_SECOND = 3
+MARQUEE_END_PAUSE_STEPS = 2 * MARQUEE_STEPS_PER_SECOND
+STALLED_AFTER_S = 60
+ENGINE_SAMPLE_STALE_AFTER_S = 5
+WORKER_ITEM_WIDTH = 36
 REQUIRED_COUNTS = {
     "queued", "busy", "retry", "exhausted", "complete", "existing_unverified",
     "review_required", "unavailable", "excluded", "unknown",
@@ -227,24 +232,28 @@ def short_item_id(value: Any) -> str:
 
 
 def truncate_filename(value: Any, width: int = 28) -> str:
-    """Keep a useful filename suffix without exposing its containing path."""
-    name = literal_text(value)
-    if len(name) <= width:
-        return name
-    suffix = Path(str(value)).suffix
-    tail = suffix.lstrip(".") if len(suffix) < width - 4 else ""
-    head = max(1, width - len(tail) - 3)
-    return name[:head] + "..." + tail
+    """Keep the head and the tail, with the extension, around one `…`."""
+    return middle_truncate(literal_text(value), width)
 
 
 def marquee_filename(value: Any, offset: int, width: int = 28) -> str:
-    """Return one literal-safe scrolling window over a long basename."""
+    """Return one literal-safe scrolling window over a long basename.
+
+    `offset` counts scroll steps. The window holds at the end of the name for
+    `MARQUEE_END_PAUSE_STEPS` steps, then restarts from the beginning.
+    """
     name = literal_text(value)
-    if len(name) <= width:
+    if cell_len(name) <= width:
         return name
-    loop = name + "   ·   "
-    start = offset % len(loop)
-    return (loop + loop)[start:start + width]
+    last_start = next((index for index in range(len(name)) if cell_len(name[index:]) <= width),
+                      len(name) - 1)
+    start = min(offset % (last_start + MARQUEE_END_PAUSE_STEPS), last_start)
+    window = ""
+    for character in name[start:]:
+        if cell_len(window + character) > width:
+            break
+        window += character
+    return window
 
 
 def metric_value(snapshot: dict[str, Any], name: str) -> Any:
@@ -416,13 +425,52 @@ def retry_summary(snapshot: dict[str, Any]) -> str:
     return "Retry: no pending deadline"
 
 
+def is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def worker_stalled(worker: dict[str, Any]) -> bool:
+    """Return whether this worker's own transfer has had no payload progress for 60 s."""
+    progress_age = worker.get("last_progress_age_s")
+    return (worker.get("phase") == "downloading" and is_number(progress_age)
+            and progress_age >= STALLED_AFTER_S)
+
+
+def worker_rate_cells(worker: dict[str, Any]) -> tuple[str, str]:
+    """Render the speed and ETA cells; a stalled row or a stale engine sample has neither."""
+    sample_age = worker.get("sample_age_s")
+    if worker_stalled(worker) or (is_number(sample_age)
+                                  and sample_age > ENGINE_SAMPLE_STALE_AFTER_S):
+        return "—", "—"
+    speed = worker.get("speed_bps")
+    return (f"{format_bytes(speed)}/s" if speed is not None else "—",
+            format_duration(worker.get("eta_seconds")))
+
+
+def worker_progress_text(worker: dict[str, Any]) -> str:
+    """Render received / total; `?` is an unknown total and only a known zero is an empty file."""
+    total = worker.get("total_bytes")
+    text = f"{format_bytes(worker.get('received_bytes'))} / {format_bytes(total)}"
+    return text + " (empty file)" if total == 0 else text
+
+
+def worker_item_cell(basename: Any, item_id: Any, width: int, duplicate: bool,
+                     offset: int | None) -> str:
+    """Render the item cell: a scrolled basename if `offset` is set, else a middle cut.
+
+    A duplicate basename gets its short item ID, and the name takes the width left over.
+    """
+    suffix = f" [{short_item_id(item_id)}]" if duplicate else ""
+    room = width - cell_len(suffix)
+    if offset is None:
+        return middle_truncate(literal_text(basename), room) + suffix
+    return marquee_filename(basename, offset, width=room) + suffix
+
+
 def worker_phase_label(worker: dict[str, Any], snapshot: dict[str, Any]) -> str:
     phase = literal_text(worker.get("phase", "unknown"))
-    if phase == "downloading":
-        progress_age = worker.get("last_progress_age_s")
-        if (isinstance(progress_age, (int, float)) and not isinstance(progress_age, bool)
-                and progress_age >= 60):
-            return f"stalled {format_countdown(progress_age)}"
+    if worker_stalled(worker):
+        return f"stalled {format_countdown(worker['last_progress_age_s'])}"
     if phase == "cooldown":
         remaining = snapshot["health"].get("cooldown_remaining_s")
         return f"cooldown {format_countdown(remaining)}" if remaining else "cooldown"
@@ -2020,7 +2068,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             table.add_column("#", key="worker", width=3)
             table.add_column("Item", key="item", width=40)
             table.add_column("Phase", key="phase", width=13)
-            table.add_column("Received / total", key="progress", width=21)
+            table.add_column("Received / total", key="progress", width=22)
             table.add_column("Speed", key="speed", width=11)
             table.add_column("ETA", key="eta", width=9)
             self.query_one("#activity-pane", VerticalScroll).border_title = "Event log"
@@ -2033,7 +2081,8 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             self.last_disk_signature: str | None = None
             self.last_event_signature: str | None = None
             self.rendered_rows: dict[str, tuple[str, ...]] = {}
-            self.marquee_state: dict[str, tuple[Any, float]] = {}
+            self.marquee_focus: tuple[Any, Any] | None = None
+            self.marquee_started_at = 0.0
             self.last_control_poll = 0.0
             self.control_state: dict[str, Any] | None = None
             self.control_error: str | None = None
@@ -2088,16 +2137,28 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
                 self.call_from_thread(finish)
             threading.Thread(target=worker, name="monitor-inspection", daemon=True).start()
 
-        def worker_marquee_text(self, worker_id: Any, item_id: Any, basename: Any,
-                                width: int) -> str:
-            """Scroll a worker's basename from its start, not from process uptime."""
-            row_key = str(worker_id)
-            previous_item_id, started_at = self.marquee_state.get(row_key, (None, 0.0))
-            if item_id != previous_item_id:
-                started_at = time.monotonic()
-                self.marquee_state[row_key] = (item_id, started_at)
-            offset = int((time.monotonic() - started_at) * 3)
-            return marquee_filename(basename, offset, width=width)
+        def focused_worker_offset(self, table: DataTable, workers: list[dict[str, Any]]
+                                  ) -> tuple[int | None, int | None]:
+            """Return the focused worker ID and its scroll step, restarting on a new focus.
+
+            Only the row under the table cursor scrolls. Scrolling starts from the name's
+            beginning each time the cursor or the item in that row changes.
+            """
+            if not table.row_count:
+                return None, None
+            focused = next((worker for worker in workers
+                            if str(worker.get("worker_id")) == str(
+                                table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value)),
+                           None)
+            if focused is None or not focused.get("item_id"):
+                self.marquee_focus = None
+                return None, None
+            focus = (focused["worker_id"], focused["item_id"])
+            if focus != self.marquee_focus:
+                self.marquee_focus = focus
+                self.marquee_started_at = time.monotonic()
+            offset = int((time.monotonic() - self.marquee_started_at) * MARQUEE_STEPS_PER_SECOND)
+            return focused["worker_id"], offset
 
         def populate(self, current: dict[str, Any], force: bool = False) -> None:
             if not self.query("#summary"):
@@ -2127,20 +2188,27 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             table = self.query_one("#workers", DataTable)
             if force:
                 table.clear(columns=False)
-            for worker in sorted(current["workers"],
-                                 key=lambda item: item.get("worker_id", 0)):
+            workers = sorted(current["workers"], key=lambda item: item.get("worker_id", 0))
+            focused_id, offset = self.focused_worker_offset(table, workers)
+            basename_counts: dict[str, int] = {}
+            for worker in workers:
+                if worker.get("item_id"):
+                    name = literal_text(worker.get("basename"))
+                    basename_counts[name] = basename_counts.get(name, 0) + 1
+            for worker in workers:
                 item_id = worker.get("item_id")
+                speed, eta = worker_rate_cells(worker)
                 values = (
                     str(worker.get("worker_id", "?")),
-                    self.worker_marquee_text(worker.get("worker_id"), item_id,
-                                             worker.get("basename"), width=36)
+                    worker_item_cell(
+                        worker.get("basename"), item_id, WORKER_ITEM_WIDTH,
+                        basename_counts.get(literal_text(worker.get("basename")), 0) > 1,
+                        offset if worker.get("worker_id") == focused_id else None)
                     if item_id else "idle",
                     worker_phase_label(worker, current),
-                    f"{format_bytes(worker.get('received_bytes'))} / "
-                    f"{format_bytes(worker.get('total_bytes'))}",
-                    f"{format_bytes(worker.get('speed_bps'))}/s"
-                    if worker.get("speed_bps") is not None else "—",
-                    format_duration(worker.get("eta_seconds")),
+                    worker_progress_text(worker),
+                    speed,
+                    eta,
                 )
                 row_key = str(worker.get("worker_id", "?"))
                 if force:

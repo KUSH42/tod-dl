@@ -1,6 +1,6 @@
 # Specification: console worker table
 
-Status: planned, September 19, 2026. This document defines each cell of the
+Status: implemented, September 19, 2026. This document defines each cell of the
 dashboard worker table. It responds to findings H4, M1, and M2 in
 [docs/console-ui-audit-2026-09-19.md](../docs/console-ui-audit-2026-09-19.md).
 
@@ -15,7 +15,8 @@ ETA cell must read `—`. A stall belongs to one transfer: the row is stalled
 when that worker's own transfer has had no payload progress for 60 seconds.
 Progress on another worker neither sets nor clears the stall. A speed or ETA
 next to a stall is a contradiction. The same rule applies to a row whose
-engine sample is stale.
+engine sample is stale. A sample is stale when `sample_age_s` is above 5
+seconds, as [SPEC-download-telemetry.md](SPEC-download-telemetry.md) sets.
 
 The monitor must apply this rule in the row renderer. It must not depend on
 the controller zeroing the sample, because a zero speed is a known value
