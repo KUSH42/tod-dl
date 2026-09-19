@@ -823,12 +823,40 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(event_item_path(event), "/root/Some File & Notes.pdf")
         self.assertEqual(event_item_path({"category": "retry", "item_id": event["item_id"]}), "")
 
-    def test_event_timestamp_uses_local_clock_and_rejects_invalid_values(self):
-        recorded = "2026-09-15T19:10:26+00:00"
-        expected = dt.datetime.fromisoformat(recorded).astimezone().strftime("%H:%M:%S")
-        self.assertEqual(event_timestamp({"at": recorded}), expected)
+    def pin_local_zone(self, posix_zone: str) -> None:
+        previous = os.environ.get("TZ")
+        os.environ["TZ"] = posix_zone
+        time.tzset()
+
+        def restore() -> None:
+            if previous is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = previous
+            time.tzset()
+
+        self.addCleanup(restore)
+
+    def test_event_timestamp_is_local_so_the_operator_reads_their_own_clock(self):
+        # UTC+5 differs from the input offsets, so a UTC or zoneless-copy rendering cannot pass.
+        self.pin_local_zone("TST-5")
+        self.assertEqual(event_timestamp({"at": "2026-09-19T16:31:08+02:00"}), "19:31:08")
+        self.assertEqual(event_timestamp({"at": "2026-09-15T19:10:26Z"}), "00:10:26")
         self.assertEqual(event_timestamp({"at": "not-a-time"}), "--:--:--")
         self.assertEqual(event_timestamp({}), "--:--:--")
+
+    def test_unknown_event_time_keeps_the_column_width_of_a_known_time(self):
+        # The placeholder must not shift the severity column in the activity log.
+        self.assertEqual(len(event_timestamp({})),
+                         len(event_timestamp({"at": "2026-09-15T19:10:26Z"})))
+
+    def test_retry_deadline_uses_local_time_like_event_times(self):
+        # One absolute-time form keeps the queue and the activity log comparable.
+        self.pin_local_zone("TST-5")
+        self.assertEqual(queue_retry_status("retry", 1000.0, reference_time=0.0),
+                         f"1970-01-01 05:16:40 ({format_countdown(1000.0)} remaining)")
+        self.assertRegex(format_retry_deadline(time.time() + 3600),
+                         r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \(.+ remaining\)$")
 
     def test_truncates_filename_without_losing_extension(self):
         name = "a-very-long-attachment-name-that-must-not-fill-the-table.pdf"

@@ -449,7 +449,7 @@ def event_item_path(event: dict[str, Any]) -> str:
 
 
 def event_timestamp(event: dict[str, Any]) -> str:
-    """Render an event's recorded instant as a local, compact clock time."""
+    """Render an event's recorded instant as a local clock time without a zone."""
     value = event.get("at")
     if not isinstance(value, str):
         return "--:--:--"
@@ -520,6 +520,12 @@ def detail_rate(value: Any, reason: str = "not recorded") -> str:
     return detail_value(None, reason)
 
 
+def local_deadline(epoch: float, remaining: float) -> str:
+    """Format a retry deadline in the operator's local time, with its countdown."""
+    deadline = dt.datetime.fromtimestamp(epoch)
+    return f"{deadline:%Y-%m-%d %H:%M:%S} ({format_countdown(remaining)} remaining)"
+
+
 def format_retry_deadline(value: Any) -> str:
     """Format a durable retry deadline without exposing its epoch value."""
     if not isinstance(value, (int, float)) or isinstance(value, bool):
@@ -527,8 +533,7 @@ def format_retry_deadline(value: Any) -> str:
     remaining = value - time.time()
     if remaining <= 0:
         return "Eligible; awaiting controller"
-    deadline = dt.datetime.fromtimestamp(value, dt.timezone.utc)
-    return f"{deadline:%Y-%m-%d %H:%M:%S UTC} ({format_countdown(remaining)} remaining)"
+    return local_deadline(value, remaining)
 
 
 QUEUE_STATE_FILTERS = ("all", "queued", "busy", "retry", "exhausted", "complete",
@@ -561,8 +566,7 @@ def queue_retry_status(bucket: Any, retry_at: Any, cooldown_active: bool = False
     remaining = retry_at - now
     if remaining <= 0:
         return "Eligible; cooldown active" if cooldown_active else "Eligible; awaiting controller"
-    deadline = dt.datetime.fromtimestamp(retry_at, dt.timezone.utc)
-    return f"{deadline:%Y-%m-%d %H:%M:%S UTC} ({format_countdown(remaining)} remaining)"
+    return local_deadline(retry_at, remaining)
 
 
 def queue_row_cells(row: dict[str, Any], cooldown_active: bool = False,
@@ -745,7 +749,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
 
         for line_number, line in enumerate(output.splitlines()):
             if line in section_labels:
-                visual.append(line, style="bold white")
+                visual.append(line, style="bold")
             elif line.startswith("→ "):
                 visual.append(line, style="reverse")
             else:
@@ -760,8 +764,15 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
         return visual
 
     def retry_status_visual(text: str) -> Text:
-        """Dim a retry status message; a retry countdown value stays default style."""
-        return Text(text, style="dim" if "remaining)" not in text else None)
+        """Dim retry status text; the deadline and countdown values stay default style."""
+        match = re.fullmatch(r"(.+) \((.+) remaining\)", text)
+        if not match:
+            return Text(text, style="dim")
+        visual = Text(match.group(1))
+        visual.append(" (", style="dim")
+        visual.append(match.group(2))
+        visual.append(" remaining)", style="dim")
+        return visual
 
     class ActionConfirmation(ModalScreen[bool]):
         BINDINGS = [("y", "confirm", "Yes"), ("n", "dismiss", "No"),
@@ -1871,7 +1882,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
         def activity_text(events: list[dict[str, Any]]) -> Text:
             rendered = Text()
             for index, event in enumerate(events):
-                rendered.append(f"{event_timestamp(event)} ", style="bold dim")
+                rendered.append(f"{event_timestamp(event)} ", style="dim")
                 severity = literal_text(event.get("severity", "?")).upper()
                 rendered.append(f"{severity:7}", style=event_severity_style(severity))
                 worker = event_worker_label(event)

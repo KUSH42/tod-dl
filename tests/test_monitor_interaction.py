@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import os
 import sqlite3
 import tempfile
 import threading
@@ -364,6 +365,40 @@ class MonitorInteractionTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause(0.1)
                 self.assertEqual(pane.scroll_y, scrolled_y)
 
+    async def test_activity_time_is_local_and_dim_never_bold_dim(self):
+        # Terminals render bold plus dim inconsistently, and the operator reads
+        # event times against their own clock.
+        previous = os.environ.get("TZ")
+        os.environ["TZ"] = "TST-5"
+        time.tzset()
+
+        def restore() -> None:
+            if previous is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = previous
+            time.tzset()
+
+        self.addCleanup(restore)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            app, _server = self.make_app(
+                root, lambda: available_actions(), lambda request: {}, fps=20)
+            async with app.run_test() as pilot:
+                await pilot.pause(0.2)
+                current = dict(app.current)
+                current["recent_events"] = [
+                    {"at": "2026-09-19T16:31:08+02:00", "severity": "info",
+                     "message": "resumed"}]
+                app.current = current
+                app.populate(current, force=True)
+                await pilot.pause(0.1)
+                content = app.query_one("#activity").content
+                self.assertTrue(content.plain.startswith("19:31:08 "))
+                styles = [str(span.style) for span in content.spans]
+                self.assertEqual(styles[0], "dim")
+                self.assertNotIn("bold dim", styles)
+
     async def test_resize_keeps_app_responsive(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -468,6 +503,21 @@ class ItemDetailsInteractionTests(unittest.IsolatedAsyncioTestCase):
                 text_two = app.screen.query_one("#item-details-text").content.plain
                 self.assertIn("dup.bin", text_two)
                 self.assertNotEqual(text_one.splitlines()[1], text_two.splitlines()[1])
+
+    async def test_section_headers_are_bold_without_a_fixed_foreground_color(self):
+        # A fixed white foreground is invisible on a light terminal theme; the
+        # visual-style spec allows bold or dim only for structural text.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = build_item_database(root)
+            insert_item(database, "http://a.onion/x/head.bin", 1, "x/head.bin")
+            app = self.make_item_app(root, database)
+            async with app.run_test() as pilot:
+                await self.open_queue_row(pilot, 0)
+                content = app.screen.query_one("#item-details-text").content
+                styles = [str(span.style) for span in content.spans
+                          if content.plain[span.start:span.end] == "State"]
+                self.assertEqual(styles, ["bold"])
 
     async def test_entry_from_worker_details_and_return_navigation(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -949,6 +999,24 @@ class QueueRowScopedActionInteractionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(commands), 1)
             self.assertEqual(commands[0]["action"], "set_retry_cooldown")
             self.assertEqual(commands[0]["parameters"]["item_ids"], [item_id_for(second)])
+
+    async def test_retry_countdown_row_dims_its_labels_and_keeps_the_values_default(self):
+        # The queue spec dims retry status text but keeps the deadline and the
+        # countdown value default style; a fully default line hid the labels.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = build_item_database(root)
+            insert_item(database, "http://a.onion/wait.bin", 1, "wait.bin",
+                        status="retry_wait", next_retry_at=time.time() + 3600)
+            app = self.make_queue_app(root, database, lambda request: {"outcome": "completed"})
+            async with app.run_test() as pilot:
+                await self.open_queue_tab(pilot, 0)
+                cell = app.query_one("#queue-table").get_row_at(0)[-1]
+                self.assertRegex(cell.plain,
+                                 r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \(.+ remaining\)$")
+                dim = "".join(cell.plain[span.start:span.end]
+                              for span in cell.spans if str(span.style) == "dim")
+                self.assertEqual(dim, " ( remaining)")
 
     async def test_row_scoped_action_ignores_filtered_out_rows(self):
         # A bucket filter must not let the row-scoped action reach beyond the
