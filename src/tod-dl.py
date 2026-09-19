@@ -11,6 +11,7 @@ import fcntl
 import hashlib
 import http.client
 import json
+import math
 import os
 import re
 import shutil
@@ -2292,6 +2293,22 @@ class Downloader:
                   flush=True)
             time.sleep(min(remaining, 1))
 
+    def admission_conditions(self) -> dict[str, str] | None:
+        """Report what holds an admitted slot in its cooldown phase.
+
+        Only the global cooldown and the start stagger exist in this
+        controller. Return None when neither holds the slot.
+        """
+        waits = {"Global cooldown": self.cooldown_until - time.time(),
+                 "Stagger": self.next_worker_start - time.monotonic()}
+        conditions = {name: f"{math.ceil(remaining)}s remaining"
+                      for name, remaining in waits.items() if remaining > 0}
+        if not conditions:
+            return None
+        conditions["Next eligible start"] = (
+            f"in {math.ceil(max(waits.values()))}s")
+        return conditions
+
     def wait_for_start_slot(self) -> None:
         """Stagger process starts without reducing the number of active workers."""
         with self.start_lock:
@@ -3020,6 +3037,7 @@ class Downloader:
             self.deadline = (time.monotonic() + self.args.time_limit
                              if self.args.time_limit else None)
             self.telemetry = TelemetryPublisher(self.state, self.run_id, self.args.workers)
+            self.telemetry.admission_provider = self.admission_conditions
             self.telemetry.start(
                 lambda lifecycle, reason, active, validation, events: self.telemetry_snapshot(
                     lifecycle, reason, active, validation, events)

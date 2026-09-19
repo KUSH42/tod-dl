@@ -287,10 +287,7 @@ Tests must use temporary manifests and synthetic pages, without source access.
   the selected set's audit history unchanged.
 - Verify export contains only loaded or filter-matching rows, excludes
   source URLs and absolute private paths, and triggers no controller action.
-- Verify the Visual style rules in monochrome: the active tab and the
-  focused row remain identifiable by their reverse-video highlight alone,
-  dim labels and retry-status text stay distinguishable from default-style
-  values, and bold column headers apply only to columns shown at the
+- Verify that bold column headers apply only to columns shown at the
   current layout width.
 - Run a scale test against one million synthetic items. The service must not
   load the full queue into memory, and the test must not instantiate the

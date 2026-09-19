@@ -34,7 +34,8 @@ The read time renders in local time with no zone marker, as
 phase and freshness as text labels, and the
 read metadata right-aligned and dim. When the detail revision differs from
 the dashboard revision, add a second line **Dashboard revision 10344;
-details differ**. Do not repeat the worker number, phase, or basename in a
+details differ**. Both views compare against the dashboard revision that the
+screen held when the operator opened it. Do not repeat the worker number, phase, or basename in a
 body section.
 
 ## Two-column field grid
@@ -79,7 +80,12 @@ must never append a unit or suffix to `?`. `Last payload progress`
 must render `12s ago` for a value and `? (not in sample)` for none, never
 `? ago`. The **Admission** section must render one row per condition the
 controller reports; when it reports none, render one row **Next eligible
-start** with `? (controller did not report)`.
+start** with `? (controller did not report)`. The controller reports
+`admission` as a map of condition name to display text, one entry per active
+condition, for a slot in its cooldown phase only. The controller reports
+**Global cooldown**, **Stagger**, and **Next eligible start** (the longest
+remaining wait). It has no state for worker cooldown, origin cooldown,
+storage stop, or validation backpressure, so it does not report them.
 
 ## Value formats
 

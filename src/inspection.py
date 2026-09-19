@@ -41,7 +41,8 @@ STALE_SAMPLE_AGE_S = 5
 WORKER_SAMPLE_FIELDS = ("generation", "attempt_id", "attempt_number", "engine_instance_id",
                         "engine_job_id", "pid", "phase", "reason", "phase_elapsed_s",
                         "attempt_elapsed_s", "received_bytes", "total_bytes", "total_source",
-                        "resume_baseline_bytes", "sample_sequence", "sample_age_s")
+                        "resume_baseline_bytes", "sample_sequence", "sample_age_s",
+                        "last_transition_at")
 # Worker fields that have no meaning outside the downloading phase.
 WORKER_DOWNLOAD_FIELDS = ("last_progress_age_s", "speed_bps", "smoothed_speed_bps",
                           "eta_seconds", "connections")
@@ -580,6 +581,12 @@ class InspectionServer:
         row = self._item_row(db, item_id) if item_id else None
         basename = Path(row[2]).name if row else None
         samples = worker.pop("progress_samples", [])
+        # The last transition of a slot is the start of its current phase.
+        phase_age = worker.get("phase_age_s")
+        worker["last_transition_at"] = (
+            (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=phase_age))
+            .isoformat(timespec="seconds")
+            if isinstance(phase_age, (int, float)) and not isinstance(phase_age, bool) else None)
         now = time.monotonic()
         fresh_samples = [(at, value) for at, value in samples
                          if isinstance(at, (int, float)) and isinstance(value, int)
@@ -619,6 +626,7 @@ class InspectionServer:
                             "unavailable_reason": reasons,
                             "phase": worker.get("phase"), "reason": worker.get("reason"),
                             "phase_elapsed_s": worker.get("phase_age_s"),
+                            "last_transition_at": worker.get("last_transition_at"),
                             "attempt_elapsed_s": (max(0.0, now - worker["attempt_started"])
                                                   if isinstance(worker.get("attempt_started"), (int, float)) else None),
                             "last_progress_age_s": worker.get("last_progress_age_s"),

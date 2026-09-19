@@ -85,6 +85,8 @@ be an RFC 3339 UTC timestamp. `state_revision` must be a nonnegative integer.
 
 `state_revision` must identify the committed durable read. Runtime fields
 must carry their own `sample_sequence`, `sample_age_s`, and quality.
+The controller measures `sample_age_s` at each snapshot or inspection read as
+the time since the last engine sample, so it grows while the engine is silent.
 The service must join runtime data only when item, generation, and attempt
 identities match. Missing identity must produce unavailable runtime fields.
 The UI must label a detail revision that differs from the dashboard revision.

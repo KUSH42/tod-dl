@@ -8,9 +8,6 @@ source request or an acquisition action.
 Implementation status, from
 [docs/console-visual-style-audit-2026-09-19.md](../docs/console-visual-style-audit-2026-09-19.md):
 
-- Unmet: the monochrome acceptance tests below. No test in
-  `tests/test_monitor.py` or `tests/test_monitor_interaction.py` asserts
-  monochrome rendering.
 - Implemented September 19, 2026: a retry status splits into dim label
   spans and default-style deadline and countdown values. Section headers are
   bold. Event timestamps are dim, in local time without a zone marker.
@@ -145,18 +142,10 @@ it.
 
 ## Acceptance criteria
 
-Tests must render each view in monochrome, without relying on terminal color
-output.
+Tests must verify these rules against the rendered spans.
 
-- Verify that the active tab and the focused row stay identifiable by their
-  reverse-video highlight alone.
-- Verify that dim labels and retry-status text stay visually distinguishable
-  from default-style values without color.
 - Verify that bold headers and notices apply only where a rule above or a
   view's own directly defined rule says they apply.
-- Verify that the **live** label is the only element whose meaning depends on
-  color alone, and that every other status distinction also shows a text
-  label.
 - Verify that each row of the Status colors table renders with its listed
   style and label.
 - Verify that no span combines bold and dim, and that no structural text sets

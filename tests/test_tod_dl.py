@@ -1436,6 +1436,19 @@ class AcquisitionFaultRecoveryTests(unittest.TestCase):
         downloader.scope_run(db)
         return downloader, db
 
+    def test_admission_conditions_name_only_the_waits_that_hold_a_slot(self):
+        # An operator reads these rows to learn why a slot has not started; a false row misleads.
+        with tempfile.TemporaryDirectory() as temporary:
+            downloader, db, _ = self.make_controller(Path(temporary))
+            db.close()
+            self.assertIsNone(downloader.admission_conditions())
+            downloader.cooldown_until = time.time() + 30
+            downloader.next_worker_start = time.monotonic() + 2
+            conditions = downloader.admission_conditions()
+            self.assertIn(conditions["Global cooldown"], {"30s remaining", "29s remaining"})
+            self.assertEqual(conditions["Stagger"], "2s remaining")
+            self.assertIn(conditions["Next eligible start"], {"in 30s", "in 29s"})
+
     def test_access_denied_item_pauses_only_its_own_origin_until_it_is_retried(self):
         denied = "https://denied.test/first/data/a.bin"
         same_origin = "https://denied.test/first/data/b.bin"
@@ -3210,6 +3223,33 @@ class TelemetryTests(unittest.TestCase):
             self.assertIsNone(publisher.runtime_copy()[0]["total_bytes"])
             publisher.update_sample("https://fixture.test/item", 10, 20, 1, 1)
             self.assertEqual(publisher.runtime_copy()[0]["total_bytes"], 20)
+
+    def test_sample_age_grows_after_the_last_engine_sample(self):
+        # A frozen age of 0 would hide a silent engine; the monitor's stale rules need a real age.
+        url = "https://fixture.test/item"
+        with tempfile.TemporaryDirectory() as temporary:
+            publisher = TelemetryPublisher(Path(temporary), "test-run", 1)
+            publisher.set_active(url, 1, 1, "downloading")
+            self.assertIsNone(publisher.runtime_copy()[0]["sample_age_s"])
+            publisher.update_sample(url, 10, 20, 1, 1)
+            self.assertLess(publisher.runtime_copy()[0]["sample_age_s"], 1)
+            with publisher._lock:
+                publisher.active[url]["sample_monotonic"] -= 6
+            self.assertGreaterEqual(publisher.runtime_copy()[0]["sample_age_s"], 6)
+            self.assertGreaterEqual(publisher._copy_runtime()[2][0]["sample_age_s"], 6)
+            self.assertNotIn("sample_monotonic", publisher.runtime_copy()[0])
+
+    def test_cooldown_phase_worker_reports_admission_conditions_from_the_provider(self):
+        # The worker view must show only what the controller reports; other phases report none.
+        url = "https://fixture.test/item"
+        with tempfile.TemporaryDirectory() as temporary:
+            publisher = TelemetryPublisher(Path(temporary), "test-run", 1)
+            publisher.admission_provider = lambda: {"Stagger": "2s remaining"}
+            publisher.set_active(url, 1, 1, "cooldown")
+            self.assertEqual(publisher.runtime_copy()[0]["admission"],
+                             {"Stagger": "2s remaining"})
+            publisher.update_phase(url, "downloading")
+            self.assertNotIn("admission", publisher.runtime_copy()[0])
 
 
 class ShutdownSignalTests(unittest.TestCase):

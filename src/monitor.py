@@ -806,6 +806,12 @@ def detail_reason(reasons: Any, key: str) -> str:
     return reason if reason in UNAVAILABLE_REASONS else "controller did not report"
 
 
+def detail_clock(value: Any, reason: str) -> str:
+    """Show an instant as a local clock time, or an unknown value with its reason."""
+    text = event_timestamp({"at": value})
+    return detail_value(None if text == "--:--:--" else text, reason)
+
+
 def decoded_basename(value: Any) -> str:
     """Percent-decode a basename, then neutralize terminal controls in the result."""
     return literal_text(unquote(str(value)))
@@ -956,6 +962,8 @@ def worker_details_model(worker: dict[str, Any], read_at: Any = None, revision: 
         DetailField("Reason", value(worker, "reason")),
         DetailField("Phase elapsed", detail_elapsed(worker.get("phase_elapsed_s"),
                                                     why("phase_elapsed_s"))),
+        DetailField("Last transition", detail_clock(worker.get("last_transition_at"),
+                                                    why("last_transition_at"))),
         DetailField("Attempt elapsed", detail_elapsed(worker.get("attempt_elapsed_s"),
                                                       why("attempt_elapsed_s"))),
         DetailField("Last payload progress", progress_age),
@@ -1013,7 +1021,8 @@ def detail_age(value: Any, reason: str) -> str:
 
 
 def item_details_model(item: dict[str, Any], read_at: Any = None, revision: Any = None,
-                       sample_freshness: str = "?", banner: tuple[str, ...] = ()) -> list[Any]:
+                       sample_freshness: str = "?", banner: tuple[str, ...] = (),
+                       dashboard_revision: Any = None) -> list[Any]:
     """Build the item details model from one item record."""
     reasons = item.get("unavailable_reason")
     sections = {name: item.get(name, {}) for name in
@@ -1038,6 +1047,9 @@ def item_details_model(item: dict[str, Any], read_at: Any = None, revision: Any 
               + [detail_value(bucket, detail_reason(reasons, "state.bucket")),
                  detail_value(phase, detail_reason(reasons, "state.phase"))]),
         literal_text(sample_freshness), read_at, revision)]
+    if dashboard_revision is not None and revision != dashboard_revision:
+        model.append(DetailNote(f"Dashboard revision {literal_text(dashboard_revision)}; "
+                                "details differ"))
     model.extend(DetailNote(literal_text(line)) for line in banner)
     reason_of = lambda key: detail_reason(reasons, key)
     retry_at = field(state, "retry_at", item.get("retry_at"))
@@ -1503,10 +1515,11 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
                       for key in DISABLED_CONTROL_KEYS]]
         DEFAULT_CSS = "#item-details { height: 1fr; overflow-y: auto; }"
 
-        def __init__(self, run_id: str, item_id: str) -> None:
+        def __init__(self, run_id: str, item_id: str, dashboard_revision: Any = None) -> None:
             super().__init__()
             self.run_id = run_id
             self.item_id = item_id
+            self.dashboard_revision = dashboard_revision
             self.item: dict[str, Any] | None = None
             self.read_at: Any = None
             self.revision: Any = None
@@ -1557,7 +1570,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             else:
                 banner = ("Last-known values retained", error) if error else ()
                 model = item_details_model(self.item or {}, self.read_at, self.revision,
-                                           freshness_label, banner)
+                                           freshness_label, banner, self.dashboard_revision)
             if self.attempts:
                 marker = "→"
                 model.append(DetailSection("Recorded attempts"))
@@ -1750,7 +1763,8 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             if not self.displayed_item_id:
                 self.app.notify("No item assigned", severity="warning")
                 return
-            self.app.push_screen(ItemDetails(self.run_id, self.displayed_item_id))
+            self.app.push_screen(ItemDetails(self.run_id, self.displayed_item_id,
+                                             self.dashboard_revision))
 
         def action_logs(self) -> None:
             self.app.notify("No item logs" if not self.displayed_item_id else "Item logs are unavailable", severity="warning")
@@ -2004,7 +2018,8 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             item_id = event.row_key.value
             if any(row["item_id"] == item_id for row in self.rows):
                 self.selected_item_id = item_id
-                self.app.push_screen(ItemDetails(self.app.current["run_id"], item_id))
+                self.app.push_screen(ItemDetails(self.app.current["run_id"], item_id,
+                                                 self.app.current.get("state_revision")))
 
         def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
             event.stop()

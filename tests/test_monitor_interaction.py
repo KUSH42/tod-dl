@@ -156,6 +156,15 @@ def insert_attempts(database: Path, url: str, rows: list[dict]) -> None:
 
 
 @unittest.skipUnless(TEXTUAL_AVAILABLE, "Textual is optional")
+async def wait_until(pilot, condition, description: str, timeout: float = 3.0) -> None:
+    """Poll until the condition holds; a fixed pause races the app under load."""
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() > deadline:
+            raise AssertionError(f"timed out after {timeout}s waiting for {description}")
+        await pilot.pause(0.02)
+
+
 class MonitorInteractionTests(unittest.IsolatedAsyncioTestCase):
     def make_app(self, root: Path, state_provider, executor, fps: int = 20,
                  snapshot_value: dict | None = None):
@@ -414,10 +423,10 @@ class MonitorInteractionTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.resize_terminal(120, 40)
                 await pilot.pause(0.2)
                 await pilot.press("p")
-                await pilot.pause(0.2)
-                self.assertEqual(app.screen.__class__.__name__, "ActionConfirmation")
+                await wait_until(pilot, lambda: app.screen.__class__.__name__ == "ActionConfirmation",
+                                 "the confirmation screen")
                 await pilot.press("y")
-                await pilot.pause(0.2)
+                await wait_until(pilot, lambda: len(commands) == 1, "the confirmed command")
             self.assertEqual(len(commands), 1)
 
     async def test_reconnect_after_controller_restart_recovers_control_state(self):
@@ -946,10 +955,10 @@ class QueueRowScopedActionInteractionTests(unittest.IsolatedAsyncioTestCase):
                 pane = await self.open_queue_tab(pilot, 1)
                 self.assertEqual(pane.selected_item_id, item_id_for(second))
                 await pilot.press("N")
-                await pilot.pause(0.2)
-                self.assertEqual(app.screen.__class__.__name__, "ActionConfirmation")
+                await wait_until(pilot, lambda: app.screen.__class__.__name__ == "ActionConfirmation",
+                                 "the confirmation screen")
                 await pilot.press("y")
-                await pilot.pause(0.2)
+                await wait_until(pilot, lambda: len(commands) == 1, "the confirmed command")
             self.assertEqual(len(commands), 1)
             self.assertEqual(commands[0]["action"], "resume_new_generation")
             self.assertEqual(commands[0]["parameters"]["item_ids"], [item_id_for(second)])
@@ -1295,12 +1304,12 @@ class KeymapTests(unittest.IsolatedAsyncioTestCase):
             async with app.run_test() as pilot:
                 await pilot.pause(0.3)
                 await self.open_worker(pilot)
-                with mock.patch.object(monitor, "DISABLED_CONTROL_NOTICE_S", 0.2):
+                with mock.patch.object(monitor, "DISABLED_CONTROL_NOTICE_S", 1.0):
                     await pilot.press("r")
-                    await pilot.pause(0.05)
-                    self.assertEqual(self.screen_footer(app), DISABLED_CONTROL_NOTICE)
-                    await pilot.pause(0.4)
-                self.assertIn("? Help", self.screen_footer(app))
+                    await wait_until(pilot, lambda: self.screen_footer(app) == DISABLED_CONTROL_NOTICE,
+                                     "the notice to appear")
+                    await wait_until(pilot, lambda: "? Help" in self.screen_footer(app),
+                                     "the notice to clear after its timeout")
 
     async def test_s_is_unbound_on_worker_details_and_toggles_source_on_item_details(self):
         """Source stays in item details only, so a worker screen can never leak a source URL."""

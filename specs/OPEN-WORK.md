@@ -10,7 +10,7 @@ The controller has durable selected-run state, no-overwrite finalization,
 recovery tests, signed provenance records, telemetry snapshots, and local
 confirmed controls for retry, Tor renewal, pause admission, resume
 admission, drain and stop, and checkpoint and stop. The repository test
-suite runs 384 local tests. These features do not establish compliance
+suite runs 389 local tests. These features do not establish compliance
 with every requirement in the related specifications.
 
 A process-ownership review closed five gaps in this session and the four
@@ -181,8 +181,9 @@ Still open in inventory discovery:
 - Nobody has reviewed `SPEC-inventory-snapshot-manifest.md` in a fresh
   spec-review pass. It has only the author's checks and its tests.
 - The test `test_row_scoped_resume_new_generation_sends_only_the_focused_review_item`
-  failed once in one full run and passed alone and in the other runs. The
-  cause is not found. It is probably a timing flake in the headless UI test.
+  failed once in one full run earlier. Its fixed pauses now wait on a polling
+  helper (`wait_until`); the run of 15 repeats passed. The cause of the
+  earlier failure was never confirmed.
 
 Add on-demand target-directory rescan after inventory discovery. It
 reconciles files already in the target directory against the inventory
@@ -205,15 +206,13 @@ The current specification status is grouped below.
 
 - Implemented: `SPEC-tor-circuit-recovery.md`, worker details, item
   details, `SPEC-inventory-snapshot-manifest.md`,
-  `SPEC-console-activity-log.md`, `SPEC-console-worker-table.md`, and
-  `SPEC-console-keymap.md`.
+  `SPEC-console-activity-log.md`, `SPEC-console-worker-table.md`,
+  `SPEC-console-keymap.md`, and `SPEC-console-detail-layout.md`.
 - Partially implemented: acquisition tool evaluation, acquisition fault
   recovery, provenance, console UI, controller controls, download telemetry,
   reliable acquisition, queue view, console visual style, console
   inspection, and inventory discovery.
 - Planned: target-directory rescan. Its input manifest now exists.
-- Planned: the remaining console fix spec from the 2026-09-19 UI audit:
-  `SPEC-console-detail-layout.md`.
 
 ## Next steps
 

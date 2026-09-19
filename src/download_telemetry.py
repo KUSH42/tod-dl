@@ -15,6 +15,7 @@ import threading
 import time
 import uuid
 from collections import deque
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -176,6 +177,8 @@ class TelemetryPublisher:
         self.last_payload_progress_at: str | None = None
         self.completed_at: str | None = None
         self.stopped_at: str | None = None
+        # Called under the lock, so it must not call back into the publisher.
+        self.admission_provider: Callable[[], dict[str, str] | None] | None = None
         self._lock = threading.Lock()
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -261,6 +264,7 @@ class TelemetryPublisher:
                            "total_source": "aria2_rpc", "sample_age_s": 0,
                            "sample_sequence": (sample.get("sample_sequence") or 0) + 1})
             observed = time.monotonic()
+            sample["sample_monotonic"] = observed
             history = sample.setdefault("progress_samples", [])
             history.append((observed, received_bytes))
             sample["progress_samples"] = [value for value in history
@@ -286,7 +290,24 @@ class TelemetryPublisher:
     def runtime_copy(self) -> list[dict[str, Any]]:
         """Return a bounded controller-owned copy for local inspection only."""
         with self._lock:
-            return [dict(value) for value in self.active.values()]
+            return self._aged_active_copy()
+
+    def _aged_active_copy(self) -> list[dict[str, Any]]:
+        """Copy active samples with sample_age_s measured at copy time.
+
+        The caller must hold the lock. A sample never updated keeps a null age.
+        """
+        now = time.monotonic()
+        rows = []
+        for value in self.active.values():
+            row = dict(value)
+            sampled = row.pop("sample_monotonic", None)
+            if sampled is not None:
+                row["sample_age_s"] = max(0.0, now - sampled)
+            if self.admission_provider is not None and row.get("phase") == "cooldown":
+                row["admission"] = self.admission_provider()
+            rows.append(row)
+        return rows
 
     def time_status_copy(self) -> tuple[str | None, str | None, str | None]:
         """Return observed payload and final lifecycle times for one snapshot."""
@@ -300,7 +321,7 @@ class TelemetryPublisher:
 
     def _copy_runtime(self) -> tuple[str, str | None, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
         with self._lock:
-            return (self.lifecycle, self.reason, [dict(x) for x in self.active.values()],
+            return (self.lifecycle, self.reason, self._aged_active_copy(),
                     [dict(x) for x in self.validation.values()], list(self.events))
 
     def _loop(self) -> None:

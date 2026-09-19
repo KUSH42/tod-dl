@@ -126,7 +126,7 @@ class MonitorTests(unittest.TestCase):
                                            "attempt_id": source + ":1", "attempt_number": 1,
                                            "received_bytes": 0, "total_bytes": 10,
                                            "sample_age_s": 0, "sample_sequence": 3,
-                                           "progress_samples": []}])
+                                           "phase_age_s": 60, "progress_samples": []}])
             server.start()
             try:
                 descriptor = read_inspection_session(root, "run-one")
@@ -152,6 +152,10 @@ class MonitorTests(unittest.TestCase):
                 self.assertEqual(worker["assignment"]["basename"], "file.txt")
                 self.assertEqual(worker["received_bytes"], 0)
                 self.assertEqual(worker["quality"], "exact")
+                # The phase started 60 s ago, so the last transition is that instant.
+                transition = dt.datetime.fromisoformat(worker["last_transition_at"])
+                age = (dt.datetime.now(dt.timezone.utc) - transition).total_seconds()
+                self.assertTrue(59 <= age <= 62, age)
                 self.assertNotIn(source, worker["assignment"]["attempt_id"])
                 with self.assertRaisesRegex(InspectionError, "not found"):
                     inspection_request(root, "run-one", "get_item",
@@ -1142,6 +1146,28 @@ class MonitorTests(unittest.TestCase):
         lines = worker_details_text({"worker_id": 1, "assignment": None}, "read", 10350,
                                     10344, "live").splitlines()
         self.assertEqual(lines[1], "Dashboard revision 10344; details differ")
+
+    def test_item_header_adds_a_line_when_the_dashboard_revision_differs(self):
+        """An item read newer than the dashboard must say so, as the worker view does."""
+        item = {"identity": {"item_id": "a" * 64, "basename": "f.bin"}}
+        differs = render_detail(item_details_model(item, "read", 10350, "live",
+                                                   dashboard_revision=10344), 100).plain
+        self.assertIn("Dashboard revision 10344; details differ", differs)
+        same = render_detail(item_details_model(item, "read", 10350, "live",
+                                                dashboard_revision=10350), 100).plain
+        self.assertNotIn("Dashboard revision", same)
+
+    def test_worker_last_transition_renders_in_local_time_or_states_why_it_is_unknown(self):
+        """Operators read the transition on their own clock; an unknown one needs its reason."""
+        self.pin_local_zone("UTC-2")
+        base = {"worker_id": 1, "phase": "downloading", "assignment": {"item_id": "i"}}
+        known = {row.label: row.value for row in worker_details_model(
+            {**base, "last_transition_at": "2026-09-19T12:21:12+00:00"})
+            if isinstance(row, DetailField)}
+        self.assertEqual(known["Last transition"], "14:21:12")
+        unknown = {row.label: row.value for row in worker_details_model(base)
+                   if isinstance(row, DetailField)}
+        self.assertEqual(unknown["Last transition"], "? (controller did not report)")
 
     def test_every_grid_row_holds_one_label_cell_and_one_value_cell(self):
         """A value such as `connect failed: timeout` must not split into two fields."""

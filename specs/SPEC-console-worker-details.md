@@ -40,7 +40,10 @@ values must remain unavailable instead of becoming zero.
   generation, attempt ID and number, engine instance and job identity, and
   PID if known. Source URLs and private paths must remain in item details.
 - **Activity:** phase, phase reason, phase elapsed time, attempt elapsed time,
-  last payload-progress age, sample age, and last transition time.
+  last payload-progress age, sample age, and last transition time. The
+  service reports the last transition time as the start of the current phase
+  (`last_transition_at`, an RFC 3339 UTC timestamp); the view renders it in
+  local time.
 - **Transfer:** received and total bytes, total source, resume baseline,
   current speed, smoothed speed, ETA, and connection count when available.
   The controller must calculate smoothed speed from positive received-byte
@@ -49,7 +52,9 @@ values must remain unavailable instead of becoming zero.
   During warmup, show **Estimating**. The view must label ETA as approximate.
 - **Admission:** next eligible start time and separate reasons for stagger,
   worker cooldown, origin cooldown, global cooldown, storage stop, or
-  validation backpressure. Show only controller-reported conditions.
+  validation backpressure. Show only controller-reported conditions. The
+  [detail layout](SPEC-console-detail-layout.md) states which conditions the
+  controller reports today.
 - **Validation:** method and progress when the slot owns validation. If
   validation leaves the slot, retain access through the item's details and
   the dashboard validation rows.
