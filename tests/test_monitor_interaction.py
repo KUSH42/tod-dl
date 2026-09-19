@@ -399,6 +399,33 @@ class MonitorInteractionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(styles[0], "dim")
                 self.assertNotIn("bold dim", styles)
 
+    async def test_activity_events_stay_one_line_each_at_80_columns(self):
+        # A wrapped event would hide its severity and item ID and break the scan-by-eye log.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            app, _server = self.make_app(
+                root, lambda: available_actions(), lambda request: {}, fps=20)
+            async with app.run_test(size=(80, 24)) as pilot:
+                await pilot.pause(0.2)
+                current = dict(app.current)
+                current["recent_events"] = [
+                    {"at": "2026-09-19T16:31:08Z", "severity": "warning", "worker_id": 3,
+                     "category": "retry", "message": "connect failed " + "z" * 200,
+                     "item_id": f"http://h.onion/dir/{'n' * 80}-{index}.pdf"}
+                    for index in range(4)]
+                app.current = current
+                app.populate(current, force=True)
+                await pilot.pause(0.2)
+                activity = app.query_one("#activity")
+                lines = activity.content.plain.split("\n")
+                self.assertEqual(len(lines), 4)
+                self.assertEqual(activity.size.height, 4)
+                for line in lines:
+                    self.assertLessEqual(len(line), app.activity_width())
+                    self.assertIn("WARNING", line)
+                    self.assertIn("W3", line)
+                    self.assertRegex(line, r"\[[0-9a-f]{10}\]$")
+
     async def test_resize_keeps_app_responsive(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

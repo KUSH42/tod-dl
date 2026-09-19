@@ -18,12 +18,20 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
+from rich.cells import cell_len
+
 from controller import (COOLDOWN_OVERRIDE_MAX_S, COOLDOWN_OVERRIDE_MIN_S, ControlError,
                         PRIORITY_MAX, PRIORITY_MIN, control_request, get_control_state)
 from inspection import InspectionError, inspection_request
 
 
 FINAL_LIFECYCLES = {"finished", "stopped"}
+ACTIVITY_MESSAGE_MAX = 120
+ACTIVITY_MESSAGE_MIN = 20
+ACTIVITY_NAME_MAX = 40
+ACTIVITY_NAME_MIN = 12
+ACTIVITY_SEVERITY_COLUMNS = 7
+CATEGORY_SLUG = re.compile(r"[a-z0-9_]+")
 REQUIRED_COUNTS = {
     "queued", "busy", "retry", "exhausted", "complete", "existing_unverified",
     "review_required", "unavailable", "excluded", "unknown",
@@ -433,19 +441,120 @@ def event_worker_label(event: dict[str, Any]) -> str:
 
 
 def event_message_style(event: dict[str, Any]) -> str:
-    """Color a successful completed transfer without recoloring its level."""
-    return "green" if event.get("category") == "complete" else ""
+    """Dim an event message, except a completed transfer, which stays green."""
+    return "green" if event.get("category") == "complete" else "dim"
 
 
-def event_item_path(event: dict[str, Any]) -> str:
-    """Return a literal-safe decoded path for transfer lifecycle events only."""
-    if event.get("category") not in {"attempt", "complete"}:
-        return ""
+def truncate_end(value: str, width: int) -> str:
+    """Cut a string to at most `width` display columns, marking the cut with `…`."""
+    if cell_len(value) <= width:
+        return value
+    kept = ""
+    for character in value:
+        if cell_len(kept + character) > width - 1:
+            break
+        kept += character
+    return kept + "…" if width >= 1 else ""
+
+
+def middle_truncate(value: str, width: int) -> str:
+    """Cut a string to `width` display columns around one `…`, keeping head and tail."""
+    if cell_len(value) <= width:
+        return value
+    tail_width = (width - 1) // 2
+    head_width = width - 1 - tail_width
+    head = ""
+    for character in value:
+        if cell_len(head + character) > head_width:
+            break
+        head += character
+    tail = ""
+    for character in reversed(value):
+        if cell_len(character + tail) > tail_width:
+            break
+        tail = character + tail
+    return head + "…" + tail
+
+
+def event_basename(event: dict[str, Any]) -> str:
+    """Return the literal-safe decoded basename of an item-bound event, never a directory."""
     item_id = event.get("item_id")
     if not isinstance(item_id, str):
         return ""
-    path = urlsplit(item_id).path
-    return literal_text(unquote(path)) if path else ""
+    return literal_text(unquote(urlsplit(item_id).path.rsplit("/", 1)[-1]))
+
+
+def event_short_id(event: dict[str, Any]) -> str:
+    item_id = event.get("item_id")
+    return f"[{short_item_id(item_id)}]" if isinstance(item_id, str) and item_id else ""
+
+
+def event_message(event: dict[str, Any]) -> str:
+    """Return one literal line with paths masked, from the controller category if it has one.
+
+    A category that is a machine slug such as `attempt` names a kind of event, not a
+    phrase for the operator, so the message is the fallback for it.
+    """
+    category = event.get("category")
+    if isinstance(category, str) and category and not CATEGORY_SLUG.fullmatch(category):
+        text = category
+    else:
+        text = str(event.get("message", ""))
+    tokens = ["[path]" if "/" in token or "\\" in token else token for token in text.split()]
+    return truncate_end(literal_text(" ".join(tokens)), ACTIVITY_MESSAGE_MAX)
+
+
+def collapse_repeated_events(events: list[dict[str, Any]]) -> list[tuple[dict[str, Any], int]]:
+    """Merge consecutive events that read the same, keeping the latest one and a count."""
+    collapsed: list[tuple[dict[str, Any], int, tuple[Any, ...]]] = []
+    for event in events:
+        key = (str(event.get("severity")), event.get("worker_id"), event.get("item_id"),
+               event_message(event))
+        if collapsed and collapsed[-1][2] == key:
+            collapsed[-1] = (event, collapsed[-1][1] + 1, key)
+        else:
+            collapsed.append((event, 1, key))
+    return [(event, count) for event, count, _key in collapsed]
+
+
+def activity_segments(event: dict[str, Any], count: int = 1,
+                      width: int | None = None) -> list[tuple[str, str]]:
+    """Lay out one event as (text, style) pieces that fit `width` display columns."""
+    severity = literal_text(event.get("severity", "?")).upper()
+    worker = event_worker_label(event)
+    short_id = event_short_id(event)
+    name = middle_truncate(event_basename(event), ACTIVITY_NAME_MAX)
+    base = event_message(event)
+    suffix = f" ×{count}" if count > 1 else ""
+    padded_severity = severity + " " * max(0, ACTIVITY_SEVERITY_COLUMNS - cell_len(severity))
+    fixed = 8 + 2 + cell_len(padded_severity) + (2 + len(worker) if worker else 0)
+    fixed += 2 + cell_len(short_id) if short_id else 0
+
+    def room(shown_name: str) -> int:
+        return (width - fixed - 2 - (2 + cell_len(shown_name) if shown_name else 0)
+                if width is not None else ACTIVITY_MESSAGE_MAX)
+
+    if width is not None and name:
+        wanted = min(cell_len(base + suffix), ACTIVITY_MESSAGE_MIN)
+        if room(name) < wanted:
+            shorter = max(ACTIVITY_NAME_MIN, cell_len(name) - (wanted - room(name)))
+            if shorter < cell_len(name):
+                name = middle_truncate(name, shorter)
+            if room(name) < wanted:
+                name = ""
+    limit = min(max(room(name), 1), ACTIVITY_MESSAGE_MAX)
+    message = (base + suffix if cell_len(base + suffix) <= limit
+               else truncate_end(base, limit - cell_len(suffix)) + suffix)
+    segments = [(event_timestamp(event), "dim"), ("  ", ""),
+                (padded_severity, event_severity_style(severity))]
+    if worker:
+        segments += [("  ", ""), (worker, "bold")]
+    segments += [("  ", ""), (message, event_message_style(event))]
+    if name:
+        segments += [("  ", ""), (name, "")]
+    if short_id:
+        segments += [("  ", ""), (short_id, "white")]
+    return segments
 
 
 def event_timestamp(event: dict[str, Any]) -> str:
@@ -1879,23 +1988,20 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             return rendered
 
         @staticmethod
-        def activity_text(events: list[dict[str, Any]]) -> Text:
+        def activity_text(events: list[dict[str, Any]], width: int | None = None) -> Text:
             rendered = Text()
-            for index, event in enumerate(events):
-                rendered.append(f"{event_timestamp(event)} ", style="dim")
-                severity = literal_text(event.get("severity", "?")).upper()
-                rendered.append(f"{severity:7}", style=event_severity_style(severity))
-                worker = event_worker_label(event)
-                if worker:
-                    rendered.append(f" {worker}", style="bold")
-                rendered.append(f" {literal_text(event.get('message', ''))}",
-                                style=event_message_style(event))
-                item_path = event_item_path(event)
-                if item_path:
-                    rendered.append(f"\n  {item_path}", style="dim")
-                if index < len(events) - 1:
+            collapsed = collapse_repeated_events(events)
+            for index, (event, count) in enumerate(collapsed):
+                for text, style in activity_segments(event, count, width):
+                    rendered.append(text, style=style)
+                if index < len(collapsed) - 1:
                     rendered.append("\n")
             return rendered
+
+        def activity_width(self) -> int | None:
+            """Return the columns the activity log can fill, or None before layout."""
+            width = self.query_one("#activity-pane", VerticalScroll).scrollable_content_region.width
+            return width or None
 
         def compose(self) -> ComposeResult:
             with TabbedContent(initial="activity-tab"):
@@ -2009,11 +2115,12 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
                 self.last_disk_signature = disk
             activity_pane = self.query_one("#activity-pane", VerticalScroll)
             follow_events = activity_pane.scroll_y >= activity_pane.max_scroll_y
-            event_signature = json.dumps(current["recent_events"], sort_keys=True,
-                                         separators=(",", ":"))
+            activity_width = self.activity_width()
+            event_signature = json.dumps([activity_width, current["recent_events"]],
+                                         sort_keys=True, separators=(",", ":"))
             if force or event_signature != self.last_event_signature:
                 self.query_one("#activity", Static).update(
-                    self.activity_text(current["recent_events"]))
+                    self.activity_text(current["recent_events"], activity_width))
                 self.last_event_signature = event_signature
                 if follow_events:
                     activity_pane.scroll_end(animate=False)

@@ -23,7 +23,8 @@ from controller import (ControlError, ControlServer, control_request,
                         get_control_state, read_control_session)
 from inspection import (InspectionError, InspectionServer, inspection_request,
                         read_inspection_session)
-from monitor import (QUEUE_EXPORT_FIELDS, SnapshotError, event_item_path, event_message_style,
+from monitor import (QUEUE_EXPORT_FIELDS, SnapshotError, activity_segments, collapse_repeated_events,
+                     event_message_style,
                      event_timestamp, freshness, literal_text, read_snapshot,
                      marquee_filename, retry_summary, event_severity_style,
                      event_worker_label, format_countdown, freshness_style,
@@ -31,7 +32,8 @@ from monitor import (QUEUE_EXPORT_FIELDS, SnapshotError, event_item_path, event_
                      truncate_filename, SpeedTrend, disk_status, progress_status,
                      screen_summary, validate_snapshot, detail_bytes, item_details_text,
                      worker_details_text, format_retry_deadline, queue_retry_status,
-                     queue_row_cells, queue_header_text, queue_export_row)
+                     queue_row_cells, queue_header_text, queue_export_row,
+                     middle_truncate, short_item_id)
 
 
 def snapshot(lifecycle: str = "running") -> dict:
@@ -815,13 +817,115 @@ class MonitorTests(unittest.TestCase):
 
     def test_completion_event_message_is_green(self):
         self.assertEqual(event_message_style({"category": "complete"}), "green")
-        self.assertEqual(event_message_style({"category": "retry"}), "")
+        self.assertEqual(event_message_style({"category": "retry"}), "dim")
 
-    def test_transfer_events_show_only_the_decoded_item_path(self):
-        event = {"category": "complete",
-                 "item_id": "http://example.onion/root/Some%20File%20%26%20Notes.pdf"}
-        self.assertEqual(event_item_path(event), "/root/Some File & Notes.pdf")
-        self.assertEqual(event_item_path({"category": "retry", "item_id": event["item_id"]}), "")
+    def activity_line(self, event, count=1, width=None):
+        return "".join(text for text, _style in activity_segments(event, count, width))
+
+    def test_activity_line_hides_directories_so_a_personal_name_never_reaches_the_default_screen(self):
+        event = {"at": "2026-09-19T16:31:08+02:00", "severity": "info", "category": "attempt",
+                 "message": "transfer admitted", "worker_id": 4,
+                 "item_id": "http://example.onion/home/alice/Documents/report%202019.msg"}
+        line = self.activity_line(event)
+        self.assertNotIn("alice", line)
+        self.assertNotIn("Documents", line)
+        self.assertNotIn("example.onion", line)
+        self.assertIn("W4  transfer admitted  report 2019.msg  [", line)
+
+    def test_activity_line_orders_time_severity_worker_message_name_id(self):
+        self.pin_local_zone("TST-5")
+        event = {"at": "2026-09-19T16:31:08+02:00", "severity": "info", "worker_id": 4,
+                 "message": "transfer admitted", "category": "attempt",
+                 "item_id": "http://h.onion/a/b.msg"}
+        short_id = f"[{short_item_id(event['item_id'])}]"
+        self.assertEqual(self.activity_line(event),
+                         f"19:31:08  INFO     W4  transfer admitted  b.msg  {short_id}")
+        styles = dict(activity_segments(event))
+        self.assertEqual(styles["19:31:08"], "dim")
+        self.assertEqual(styles["W4"], "bold")
+        self.assertEqual(styles["transfer admitted"], "dim")
+        self.assertEqual(styles[short_id], "white")
+        done = dict(activity_segments({**event, "category": "complete"}))
+        self.assertEqual(done["transfer admitted"], "green")
+
+    def test_multi_line_engine_message_renders_on_one_literal_line_cut_at_120_columns(self):
+        # Raw engine output must never add lines or control codes to the log.
+        event = {"severity": "error", "message": "first\nsecond\x1b[31m " + "x" * 200}
+        line = self.activity_line(event)
+        self.assertNotIn("\n", line)
+        self.assertNotIn("\x1b", line.replace("\\x1b", ""))
+        message = line.split("  ", 2)[2].strip()
+        self.assertEqual(len(message), 120)
+        self.assertTrue(message.endswith("…"))
+        self.assertTrue(message.startswith("first second\\x1b[31m x"))
+
+    def test_fallback_message_masks_every_path_token_so_home_directories_do_not_leak(self):
+        event = {"severity": "error", "message": "open /home/alice/report.bin failed"}
+        self.assertIn("open [path] failed", self.activity_line(event))
+        event["message"] = "cannot write C:\\Users\\alice\\a.bin now"
+        self.assertIn("cannot write [path] now", self.activity_line(event))
+
+    def test_controller_category_phrase_replaces_the_engine_text_but_a_slug_does_not(self):
+        event = {"severity": "warning", "category": "connect failed: timeout",
+                 "message": "raw engine dump /var/x"}
+        self.assertIn("connect failed: timeout", self.activity_line(event))
+        self.assertNotIn("engine dump", self.activity_line(event))
+        slug = {"severity": "info", "category": "attempt", "message": "transfer admitted"}
+        self.assertIn("transfer admitted", self.activity_line(slug))
+
+    def test_activity_line_fits_80_columns_and_keeps_time_severity_worker_and_id(self):
+        event = {"at": "2026-09-19T16:31:08+02:00", "severity": "warning", "worker_id": 12,
+                 "message": "m" * 300, "item_id": "http://h.onion/" + "n" * 90 + ".pdf"}
+        short_id = f"[{short_item_id(event['item_id'])}]"
+        for width in (60, 80, 120):
+            line = self.activity_line(event, width=width)
+            self.assertLessEqual(len(line), width, line)
+            self.assertIn("WARNING", line)
+            self.assertIn("W12", line)
+            self.assertTrue(line.endswith(short_id), line)
+            self.assertRegex(line, r"^\d\d:\d\d:\d\d  ")
+
+    def test_activity_line_shortens_the_name_before_the_message_and_then_omits_it(self):
+        # Message keeps 20 columns first; the name gives way to no less than 12; then it is dropped.
+        event = {"severity": "info", "message": "m" * 100,
+                 "item_id": "http://h.onion/" + "n" * 60 + ".pdf"}
+        fixed = 8 + 2 + 7 + 2 + 12
+        wide = self.activity_line(event, width=fixed + 2 + 20 + 2 + 30)
+        self.assertIn("…", wide.split("  ")[-2])
+        self.assertGreaterEqual(len(wide.split("  ")[-2]), 12)
+        narrow = self.activity_line(event, width=fixed + 2 + 20 + 2 + 5)
+        self.assertNotIn(".pdf", narrow)
+        self.assertLessEqual(len(narrow), fixed + 2 + 20 + 2 + 5)
+
+    def test_events_on_same_basename_show_distinct_short_ids_so_the_operator_can_tell_them_apart(self):
+        first = {"severity": "info", "message": "x", "item_id": "http://h.onion/a/same.bin"}
+        second = {"severity": "info", "message": "x", "item_id": "http://h.onion/b/same.bin"}
+        self.assertNotEqual(self.activity_line(first)[-12:], self.activity_line(second)[-12:])
+
+    def test_markup_and_escapes_in_message_name_and_worker_render_literally(self):
+        event = {"severity": "info", "message": "[bold]hi[red]", "worker_id": 2,
+                 "item_id": "http://h.onion/%1b%5Bred%5D.bin"}
+        line = self.activity_line(event)
+        self.assertIn("[bold]hi[red]", line)
+        self.assertIn("\\x1b[red].bin", line)
+        self.assertNotIn("\x1b", line)
+
+    def test_repeated_events_collapse_to_the_latest_with_a_count(self):
+        # A retry countdown repeats each second; the log must not fill with copies.
+        events = [{"at": f"2026-09-19T10:00:0{n}Z", "severity": "info", "message": "waiting"}
+                  for n in range(3)]
+        events.append({"at": "2026-09-19T10:00:09Z", "severity": "info", "message": "other"})
+        collapsed = collapse_repeated_events(events)
+        self.assertEqual([count for _event, count in collapsed], [3, 1])
+        self.assertEqual(collapsed[0][0]["at"], "2026-09-19T10:00:02Z")
+        self.assertIn("waiting ×3", self.activity_line(*collapsed[0]))
+
+    def test_middle_truncate_keeps_head_and_tail_and_never_splits_a_wide_character(self):
+        self.assertEqual(middle_truncate("abcdefghij", 6), "abc…ij")
+        self.assertEqual(middle_truncate("short", 10), "short")
+        cut = middle_truncate("日本語日本語日本語", 8)
+        self.assertLessEqual(sum(2 for _ in cut.replace("…", "")) + 1, 8)
+        self.assertIn("…", cut)
 
     def pin_local_zone(self, posix_zone: str) -> None:
         previous = os.environ.get("TZ")

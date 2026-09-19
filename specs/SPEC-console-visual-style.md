@@ -14,6 +14,7 @@ Implementation status, from
 - Implemented September 19, 2026: a retry status splits into dim label
   spans and default-style deadline and countdown values. Section headers are
   bold. Event timestamps are dim, in local time without a zone marker.
+  Event messages are dim, and event short item IDs are white.
 - Not yet in code: the styles for the storage-risk error, the storage-stop
   condition, and the modal and footer rules below.
 
@@ -97,7 +98,9 @@ this table; they are bold only.
 | Severity INFO | `cyan` | `INFO` |
 | Severity WARNING | `bold yellow` | `WARNING` |
 | Severity ERROR | `bold red` | `ERROR` |
+| Event message | `dim` | the message text |
 | Event message **complete** | `green` | the word **complete** |
+| Event short item ID | `white` | the bracketed ID, for example `[a3f9c21d0e]` |
 | **Disk status unavailable** | `dim` | the label itself |
 | Storage-risk error (negative headroom) | `bold red` | `storage risk` |
 | Storage-stop condition (zero headroom) | `bold yellow` | `storage stop` |

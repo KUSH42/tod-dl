@@ -1,6 +1,6 @@
 # Specification: console activity log
 
-Status: planned, September 19, 2026. This document defines what one activity
+Status: implemented, September 19, 2026. This document defines what one activity
 event shows on the dashboard. It responds to findings H1, L5, and L6 in
 [docs/console-ui-audit-2026-09-19.md](../docs/console-ui-audit-2026-09-19.md).
 
@@ -19,8 +19,11 @@ HH:MM:SS  LEVEL  W4  transfer admitted  report-2019-a11.msg  [a3f9c21d0e]
 Fields, in order: local time without a zone marker; severity padded to 7
 columns; worker label when present; concise message; basename, middle
 truncated to 40 columns; short item ID in brackets when the event is bound
-to an item. Render the time and short ID dim, the worker label bold, and the
-severity with the existing severity style.
+to an item. Render the time and the message dim, the worker label bold, the
+short ID white, and the severity with the existing severity style. A
+completed transfer renders its message green, as
+[SPEC-console-visual-style.md](SPEC-console-visual-style.md) requires. The
+basename keeps the default style.
 
 The default screen must not show the logical path, the mapped storage path,
 the source URL, or any directory component of an item. Remove the second
@@ -72,3 +75,5 @@ with a `×N` suffix.
   events with the same basename show distinct IDs.
 - Verify Rich markup and terminal escapes in message, basename, and worker
   label render literally.
+- Verify the time and message render dim, the worker label bold, the short ID
+  white, and a completed transfer's message green.
