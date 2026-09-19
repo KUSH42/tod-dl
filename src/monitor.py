@@ -879,6 +879,8 @@ DISABLED_CONTROL_NOTICE = "Not available here; press Escape to return"
 DISABLED_CONTROL_NOTICE_S = 3
 # Keys that a detail screen binds to a no-op so they cannot reach the dashboard.
 DISABLED_CONTROL_KEYS = ("q", "r", "t", "p", "u", "d", "k")
+# Footer command keys whose action `check_action` can disable; the footer dims them.
+FOOTER_GATED_KEYS = ("r", "t", "R", "x")
 KEY_DISPLAY = {
     "question_mark": "?", "slash": "/", "right_square_bracket": "]",
     "left_square_bracket": "[", "right_curly_bracket": "}", "left_curly_bracket": "{",
@@ -1029,10 +1031,18 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             self.notice_timer: Any = None
 
         def on_mount(self) -> None:
+            self.screen.bindings_updated_signal.subscribe(self, lambda _screen: self.render_footer())
             self.render_footer()
 
         def on_resize(self, event: Any) -> None:
             self.render_footer()
+
+        def entry_available(self, key: str) -> bool:
+            """Report whether a command key can act now, using the same gate as the bindings."""
+            if key not in FOOTER_GATED_KEYS:
+                return True
+            active = self.screen.active_bindings.get(key)
+            return bool(active and active.enabled)
 
         def set_screen_name(self, screen_name: str) -> None:
             self.screen_name = screen_name
@@ -1058,8 +1068,11 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
                         footer_entries(self.screen_name, self.app.size.width)):
                     if index:
                         rendered.append("  ")
-                    rendered.append(key, style="bold")
-                    rendered.append(" " + label)
+                    if self.entry_available(key):
+                        rendered.append(key, style="bold")
+                        rendered.append(" " + label)
+                    else:
+                        rendered.append(f"{key} {label}", style="dim")
             self.update(rendered)
 
     class HelpScreen(ModalScreen[None]):
@@ -1536,7 +1549,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
                    "Raise cooldown", show=True),
             Binding("left_curly_bracket", "prepare_lower_cooldown_selected",
                    "Lower cooldown", show=True),
-            Binding("e", "prepare_export", "Export queue", show=True),
+            Binding("e", "prepare_export", "Export queue to a local file", show=True),
             Binding("l", "logs", "Logs"),
         ]
         DEFAULT_CSS = """
@@ -2060,6 +2073,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             # fires after children mount.
             self.current = snapshot
             self.inspection_request_active = False
+            self.control_state: dict[str, Any] | None = None
 
         DEFAULT_CSS = """
         #activity-pane {
@@ -2219,7 +2233,6 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             self.marquee_focus: tuple[Any, Any] | None = None
             self.marquee_started_at = 0.0
             self.last_control_poll = 0.0
-            self.control_state: dict[str, Any] | None = None
             self.control_error: str | None = None
             self.action_confirmation: dict[str, Any] | None = None
             self.pending_item_ids: list[str] | None = None
@@ -2479,8 +2492,11 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
 
         def apply_control_state(self, result, error) -> None:
             self.control_request_active = False
+            previous = self.control_state
             self.control_state = result if isinstance(result, dict) else None
             self.control_error = error
+            if self.control_state != previous:
+                self.refresh_bindings()
 
         def action_prepare_retry_now(self) -> None:
             if not self.retry_now_eligible():

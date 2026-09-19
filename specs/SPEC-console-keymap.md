@@ -29,12 +29,19 @@ may leave a key unbound; it must not rebind the key to a different action.
 | `n` | Next attempts | item details |
 | `?` | Context help for the current screen | all |
 | `s` | Reveal or hide source (toggle) | item details only |
-| `r` | Retry now (confirmed, run-scoped) | dashboard |
+| `r` | Retry now (confirmed, run-scoped) | dashboard, queue |
 | `R` | Retry now (confirmed, row-scoped) | queue |
 | `t` | Renew Tor circuits (confirmed) | dashboard |
 | `p`, `u`, `d`, `k` | Pause, resume, drain, checkpoint stop (confirmed) | dashboard |
 | `x`, `]`, `[`, `}`, `{`, `e`, `A`, `N` | Existing queue row controls, unchanged | queue |
 | `c`, `f`, `g`, `PageUp`, `PageDown` | Clear filters, refresh results, first page, previous page, next page (read-only) | queue |
+
+`r` keeps its run-scoped meaning on the queue view, as
+[SPEC-console-queue.md](SPEC-console-queue.md) requires. It never applies to
+the visible rows only. `R` is the row-scoped key.
+
+A read-only key sends no controller command and changes no queue. `e` is
+read-only in this sense. It writes only the local file that the operator names.
 
 The confirmation modal binds `y` and `n` to answer the prompt. It is not a
 screen for this table.
@@ -52,8 +59,12 @@ switch to another view.
 | View | Focus regions |
 | --- | --- |
 | Dashboard | Worker table, activity log |
-| Queue | Filters, search field, rows, page actions |
+| Queue | Filters, search field, rows |
 | Worker details, item details | Sections and actions |
+
+The page actions (`c`, `f`, `g`, `PageUp`, `PageDown`) are keys. They have no
+widget and are not a focus region. The queue pane binds them. In the search
+field, `c`, `f`, and `g` enter text.
 
 This rule replaces the `Tab` reading in
 [SPEC-console-ui.md](SPEC-console-ui.md) that named pane navigation for every
@@ -74,10 +85,16 @@ The footer must show, in this order: navigation keys, then screen-local
 actions, then command keys. `Esc`, `↑↓`, `Enter`, `Tab`, and `/` are
 navigation keys. `l`, `i`, `n`, `s`, and `?` are screen-local actions. `r`,
 `R`, `t`, `x`, and `q` are command keys, and `q` comes last. Show at most 8
-entries at 120 columns and at most 5 at 80 columns; `?` must always be one of them. At 80 columns, keep the
-first 5 entries of the 120-column footer. If `?` is not among them, replace
+entries at 120 columns or more and at most 5 at every narrower width. `?` must
+always be one of them. At a narrower width, keep the first 5 entries of the
+120-column footer. If `?` is not among them, replace
 the fifth entry with `?`. The palette entry that Textual adds by default must
 be hidden.
+
+The entry text is fixed per screen. A command entry (`r`, `t`, `R`, `x`) whose
+action cannot run now renders dim, with no bold, and keeps its text. The
+footer uses the same availability rule as the binding, so it never shows a
+live command that the key would refuse.
 
 Dashboard footer at 120 columns:
 
@@ -119,13 +136,19 @@ name confirmed command keys as **confirmed** and read-only keys as
 
 - Verify with a headless test that no key maps to two different action
   names across the dashboard, queue, worker details, and item details
-  binding tables. The test must fail if a future screen rebinds a key.
+  binding tables. The detail screens bind `q`, `r`, `t`, `p`, `u`, `d`, and
+  `k` to the shared no-op action `disabled_control`. The test allows that
+  action as the only overlap. The test must fail if a future screen rebinds a
+  key.
 - Verify `r` on worker details and item details does nothing except show
   the footer notice, and submits no command and no `get_item` request.
 - Verify `s` toggles source on item details only and is unbound on worker
   details.
 - Verify `?` opens help on every screen and the help lists each bound key.
+  Verify the help names `e` as read-only and says it writes a local file.
 - Verify the footer shows `?` at 80 and 120 columns.
+- Verify a command entry renders dim, with its text unchanged, when its
+  action is unavailable, and renders normally when the action is available.
 - Verify each footer above matches its 120-column and 80-column text and
   never exceeds 8 and 5 entries.
 - Verify `Tab` moves focus only among the regions in the focus-region table

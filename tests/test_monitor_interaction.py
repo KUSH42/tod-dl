@@ -1218,11 +1218,11 @@ class KeymapTests(unittest.IsolatedAsyncioTestCase):
     make_item_app = ItemDetailsInteractionTests.make_item_app
     open_queue_row = ItemDetailsInteractionTests.open_queue_row
 
-    def keymap_app(self, root: Path, commands: list):
+    def keymap_app(self, root: Path, commands: list, actions: tuple = ("pause_admission",)):
         database = build_item_database(root)
         insert_item(database, "http://a.onion/keymap.bin", 1, "keymap.bin", status="queued")
         control = ControlServer(root, "run-one", "session-one",
-                                lambda: available_actions("pause_admission"),
+                                lambda: available_actions(*actions),
                                 lambda request: commands.append(request) or {"outcome": "completed"})
         control.start()
         self.addCleanup(control.stop)
@@ -1234,6 +1234,15 @@ class KeymapTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def screen_footer(app) -> str:
         return app.screen.query_one("#key-footer").content.plain
+
+    @staticmethod
+    def footer_entry_dim(app, entry: str) -> bool:
+        """Return whether every character of one footer entry carries the dim style."""
+        content = app.screen.query_one("#key-footer").content
+        start = content.plain.index(entry)
+        styles = [{str(span.style) for span in content.spans if span.start <= at < span.end}
+                  for at in range(start, start + len(entry))]
+        return all(style == {"dim"} for style in styles)
 
     @staticmethod
     def actions_by_key(tables) -> dict:
@@ -1450,6 +1459,53 @@ class KeymapTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(self.screen_footer(app),
                                      QUEUE_FOOTER_120 if size[0] == 120 else
                                      "Tab Focus  ↑↓ Select  Enter Details  / Search  ? Help")
+
+    async def test_footer_dims_a_command_that_cannot_act_and_keeps_the_text(self):
+        """The footer text is fixed, so dim is the only cue that a listed command is unavailable."""
+        with tempfile.TemporaryDirectory() as temporary:
+            (Path(temporary) / "tor").mkdir()
+            (Path(temporary) / "none").mkdir()
+            for name, actions, tor_dim in (("none", ("pause_admission",), True),
+                                           ("tor", ("renew_tor_circuits",), False)):
+                app = self.keymap_app(Path(temporary) / name, [], actions)
+                async with app.run_test(size=(120, 40)) as pilot:
+                    await pilot.pause(0.5)
+                    self.assertEqual(self.screen_footer(app), DASHBOARD_FOOTER_120)
+                    self.assertTrue(self.footer_entry_dim(app, "r Retry now"), name)
+                    self.assertEqual(self.footer_entry_dim(app, "t Renew Tor"), tor_dim, name)
+                    self.assertFalse(self.footer_entry_dim(app, "? Help"), name)
+                    self.assertFalse(self.footer_entry_dim(app, "q Close"), name)
+
+    async def test_footer_dims_a_queue_command_when_no_row_is_selected(self):
+        """The queue footer must follow the pane's own gate, or R would look live with no row."""
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self.keymap_app(Path(temporary), [])
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.pause(0.3)
+                app.query_one("TabbedContent").active = "queue-tab"
+                await pilot.pause(0.5)
+                self.assertEqual(self.screen_footer(app), QUEUE_FOOTER_120)
+                self.assertFalse(self.footer_entry_dim(app, "R Retry row"))
+                self.assertFalse(self.footer_entry_dim(app, "x Exclude row"))
+                app.query_one("#queue-pane").selected_item_id = None
+                app.refresh_bindings()
+                await pilot.pause(0.2)
+                self.assertTrue(self.footer_entry_dim(app, "R Retry row"))
+                self.assertTrue(self.footer_entry_dim(app, "x Exclude row"))
+                self.assertFalse(self.footer_entry_dim(app, "? Help"))
+
+    async def test_help_names_export_as_a_local_file_write(self):
+        """Export is read-only for the controller but writes a file, so help must say so."""
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self.keymap_app(Path(temporary), [])
+            async with app.run_test() as pilot:
+                await pilot.pause(0.3)
+                app.query_one("TabbedContent").active = "queue-tab"
+                await pilot.pause(0.3)
+                await pilot.press("question_mark")
+                await pilot.pause(0.1)
+                rows = {keys: (meaning, kind) for keys, meaning, kind in app.screen.rows}
+                self.assertEqual(rows["e"], ("Export queue to a local file", "read-only"))
 
     async def test_tab_moves_focus_among_regions_and_never_switches_view(self):
         """Tab that changed the view would strand an operator in a screen they did not choose."""

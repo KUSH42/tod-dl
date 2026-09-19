@@ -186,7 +186,9 @@ visible in monochrome.
 
 ## Interaction and retry information
 
-**Tab** and **Shift+Tab** must move between filters, rows, and page actions.
+**Tab** and **Shift+Tab** must move between the filters, the search field, and
+the rows. The page actions are keys and are not a focus region, as
+[SPEC-console-keymap.md](SPEC-console-keymap.md) states.
 Arrow keys must select rows. **Enter** on a row must open
 [item details](SPEC-console-item-details.md). **Escape** from details must
 restore the queue's filter, page, selection, and scroll position.
