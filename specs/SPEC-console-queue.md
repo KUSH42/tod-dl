@@ -194,7 +194,7 @@ restore the queue's filter, page, selection, and scroll position.
 **?** must show context-specific help. Outside text entry, **q** and
 **Ctrl+C** must close only the monitor.
 
-Retry rows must show the recorded UTC deadline and a local countdown when
+Retry rows must show the deadline in local time and a countdown when
 freshness permits, applying the console's five-second stale and 15-second
 disconnected rules. At zero, show **Eligible; awaiting controller**.
 Freeze countdowns when stale. The `retry_access_denied` and

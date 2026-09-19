@@ -120,7 +120,7 @@ The default screen prioritizes the selected run. All numbers in this wireframe
 are synthetic; the layout illustrates a wide terminal.
 
 ```text
-TOR-DL  RUN_ID  RUNNING  Session 02:14:38  Last payload progress 1s ago
+TOD-DL  RUN_ID  RUNNING  Session 02:14:38  Last payload progress 1s ago
 Files  126/500 complete | 4 busy | 8 retry | 2 review | 360 queued
 Data   18.4/~72.0 GiB retained | ~53.6 GiB remaining
 Speed  700 KiB/s | 5m average 740 KiB/s | Rising ▁▂▅▆▄▃▅▇▅▃
@@ -133,7 +133,7 @@ ETA    —  2 items require review
 4  document.pdf    Connecting     18s elapsed      —           —
 
 Disk  84.2 GiB free | 10 GiB reserve | 74.2 GiB headroom
-Tor preflight passed at 12:16 UTC | Last complete 42s ago
+Tor preflight passed at 12:16:04Z | Last complete 42s ago
 
 [Activity] [Queue] [Errors / review]
 14:31:08Z  INFO     W2  Resumed an existing partial
@@ -262,7 +262,7 @@ Inspection service failure must leave the dashboard available.
 | Worker details | Current item, attempt elapsed time, last progress age, current and smoothed speed, connection count if available, phase reason, and next eligible start. |
 | Queue | Paginated selected items in manifest order; filter by state and search by literal path or item ID; display remaining work and retry deadlines. |
 | Errors / review | Categorized error, last occurrence, attempt history, retry eligibility, validation failure, unavailable item, and candidate location. |
-| Activity | UTC event time, severity, worker, short item ID, and concise message on one line; deduplicate repeated countdown messages. [SPEC-console-activity-log.md](SPEC-console-activity-log.md) defines the line. |
+| Activity | Local event time, severity, worker, short item ID, and concise message on one line; deduplicate repeated countdown messages. [SPEC-console-activity-log.md](SPEC-console-activity-log.md) defines the line. |
 | Run details | Input hashes, selection settings, engine version and evaluation status, run outcome, stop reason, and selected versus overall acquisition totals. |
 
 Bind `Tab` to focus movement between the regions of the current view (see

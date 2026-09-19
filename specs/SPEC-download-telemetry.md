@@ -249,7 +249,9 @@ when representation invalidation changes retained progress discontinuously.
 
 Calculate transfer ETA as remaining transfer bytes divided by the relevant
 positive smoothed rate. Round to two significant units and label it approximate.
-Estimated finish time is publication time plus ETA and must identify UTC.
+Estimated finish time is publication time plus ETA. The published value is
+UTC; the console shows it in local time, as
+[SPEC-console-visual-style.md](SPEC-console-visual-style.md) defines.
 This is a throughput projection, not a promise or a scheduling simulation.
 
 Suppress full-run ETA when any unresolved size is unknown, metrics are stale,

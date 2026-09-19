@@ -13,10 +13,10 @@ request or an acquisition action.
 Each event must render as one line of the form:
 
 ```text
-HH:MM:SSZ  LEVEL  W4  transfer admitted  report-2019-a11.msg  [a3f9c21d0e]
+HH:MM:SS  LEVEL  W4  transfer admitted  report-2019-a11.msg  [a3f9c21d0e]
 ```
 
-Fields, in order: UTC time with a literal `Z` suffix; severity padded to 7
+Fields, in order: local time without a zone marker; severity padded to 7
 columns; worker label when present; concise message; basename, middle
 truncated to 40 columns; short item ID in brackets when the event is bound
 to an item. Render the time and short ID dim, the worker label bold, and the
@@ -60,7 +60,8 @@ with a `×N` suffix.
 
 - Verify with a synthetic event that contains a path with a personal name
   that no path component appears in the rendered activity text.
-- Verify the time carries the `Z` suffix and matches the event's UTC value.
+- Verify the time renders in the operator's local zone with no zone marker
+  and matches the event's recorded instant.
 - Verify a raw multi-line engine message renders as one line, literal,
   truncated to 120 columns.
 - Verify a fallback message `open /home/alice/report.bin failed` renders

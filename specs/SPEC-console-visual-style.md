@@ -11,9 +11,9 @@ Implementation status, from
 - Unmet: the monochrome acceptance tests below. No test in
   `tests/test_monitor.py` or `tests/test_monitor_interaction.py` asserts
   monochrome rendering.
-- Code deviations: a retry status with a countdown renders in the default
-  style, not dim. Section headers use `bold white`, not bold. Event
-  timestamps use `bold dim`.
+- Implemented September 19, 2026: a retry status splits into dim label
+  spans and default-style deadline and countdown values. Section headers are
+  bold. Event timestamps are dim, in local time without a zone marker.
 - Not yet in code: the styles for the storage-risk error, the storage-stop
   condition, and the modal and footer rules below.
 
@@ -45,6 +45,14 @@ each rule instance follows.
   string dim.
 - Render a field's label and value as separate text spans. A view must not
   infer the label from the value string.
+- Render every absolute time that the console formats in the operator's
+  local time, with no zone marker: `HH:MM:SS` for a time of day, and
+  `YYYY-MM-DD HH:MM:SS` where the date matters, such as a retry deadline.
+  Add a zone marker only when a reader could take the time for another zone.
+  Use UTC with a `Z` suffix for a time that actors in different time zones
+  share, such as an export or a provenance record. A recorded RFC 3339 value
+  that the console shows verbatim keeps its own `Z` or offset. Format local
+  times in one place, so the activity log and the queue stay comparable.
 - Render an unknown value `?` and its reason dim, so a missing value recedes
   and a present value stands out.
 - Render every retry status message dim (for example **Eligible; awaiting
@@ -152,3 +160,6 @@ output.
   a fixed foreground color.
 - Verify that a label and its value render as separate spans, and that an
   unknown value and its reason render dim.
+- Verify that every absolute time the console formats renders in local time
+  with no zone marker, and that an unknown event time renders `--:--:--`,
+  the same width as `HH:MM:SS`.
