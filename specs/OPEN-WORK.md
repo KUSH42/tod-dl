@@ -210,6 +210,9 @@ The current specification status is grouped below.
   reliable acquisition, queue view, console visual style, console
   inspection, and inventory discovery.
 - Planned: target-directory rescan. Its input manifest now exists.
+- Planned: the four console fix specs from the 2026-09-19 UI audit:
+  `SPEC-console-keymap.md`, `SPEC-console-activity-log.md`,
+  `SPEC-console-worker-table.md`, and `SPEC-console-detail-layout.md`.
 
 ## Next steps
 

@@ -28,7 +28,9 @@ Item details:
 photo 3.PNG  [f53957ba3f]  retry  downloading  live       Read 17:21:12Z  Rev 10350
 ```
 
-Render the subject bold, the phase and freshness as text labels, and the
+In the item header, `retry` is the item's display bucket, as defined in
+[SPEC-console-queue.md](SPEC-console-queue.md). Render the subject bold, the
+phase and freshness as text labels, and the
 read metadata right-aligned and dim. When the detail revision differs from
 the dashboard revision, add a second line **Dashboard revision 10344;
 details differ**. Do not repeat the worker number, phase, or basename in a
@@ -44,7 +46,9 @@ each; no other blank lines appear in the body. A conditional line such as
 condition is false.
 
 At 80 columns, the label column shrinks to 18 and values wrap. Below 80
-columns, the grid stacks label above value.
+columns, the grid stacks label above value. A label longer than its column
+must wrap inside the label column at a word boundary. It must not be
+truncated. **Last payload progress** (21 characters) wraps at 80 columns.
 
 Worker details section order: Assignment, Activity, Transfer, Admission,
 Validation. Worker details must have no **Source** section and no reveal
@@ -53,7 +57,9 @@ action; source stays in item details.
 ## Unknown values
 
 An unavailable value must render `?` followed by one reason from this fixed
-set, chosen by the service, not by the view:
+set. The console service that builds the `get_worker` and `get_item`
+responses must choose the reason and return it as `unavailable_reason` beside
+the unavailable field. The view must not choose or infer a reason:
 
 | Reason | Meaning |
 | --- | --- |
@@ -63,7 +69,9 @@ set, chosen by the service, not by the view:
 | `controller did not report` | the controller supports the field but sent nothing |
 | `unsupported by engine` | the engine cannot report this field |
 
-A view must never append a unit or suffix to `?`. `Last payload progress`
+The `?` and its reason render dim, as
+[SPEC-console-visual-style.md](SPEC-console-visual-style.md) requires. A view
+must never append a unit or suffix to `?`. `Last payload progress`
 must render `12s ago` for a value and `? (not in sample)` for none, never
 `? ago`. The **Admission** section must render one row per condition the
 controller reports; when it reports none, render one row **Next eligible
@@ -83,7 +91,10 @@ start** with `? (controller did not report)`.
 
 `Sample sequence`, `Sample age`, and `Quality` belong to a **Telemetry
 sample** subsection at the end of Transfer, rendered dim in full. They are
-diagnostic, not operational.
+diagnostic, not operational. This placement overrides the Activity placement
+of sample age in [SPEC-console-worker-details.md](SPEC-console-worker-details.md).
+The field stays required there. Item details has no Transfer section, so it
+renders the same subsection at the end of its **Bytes** section.
 
 ## Acceptance criteria
 
@@ -91,12 +102,17 @@ Headless tests with synthetic records:
 
 - Verify the header line of each view contains subject, phase, freshness,
   read time, and revision, in that order.
-- Verify no body line contains two `: ` label separators.
+- Verify each grid row of the render model holds exactly one label cell and
+  one value cell. Do not count `: ` in the rendered text, because a value
+  such as `connect failed: timeout` contains it.
+- Verify a 21-character label wraps at 80 columns and loses no character.
 - Verify no empty line appears except before a section header.
 - Verify each unknown value renders `?` plus one reason from the table, and
   that `? ago` never appears.
 - Verify `eta_seconds = 1144.03` renders `~19m 4s`.
-- Verify worker details has no **Source** line and no `s` or `r` binding.
+- Verify worker details has no **Source** line and no `s` binding. Verify
+  `r` there is bound only to the no-op notice in
+  [SPEC-console-keymap.md](SPEC-console-keymap.md).
 - Verify a percent-encoded basename renders decoded in the header and
   encoded only in Identity and paths.
 - Verify the 80-column and stacked layouts keep every value reachable by

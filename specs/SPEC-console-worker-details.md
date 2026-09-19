@@ -8,6 +8,12 @@ The view supplements the [console UI](SPEC-console-ui.md) and uses the
 labels, values, headers, and highlights under
 [SPEC-console-visual-style.md](SPEC-console-visual-style.md).
 
+Planned changes to key bindings and field layout are in
+[SPEC-console-keymap.md](SPEC-console-keymap.md) and
+[SPEC-console-detail-layout.md](SPEC-console-detail-layout.md). Once
+implemented, they override the placement of sample age below, and each
+unavailable field carries an `unavailable_reason`.
+
 ## Entry and slot identity
 
 **Enter** on a dashboard worker row must open worker details, including for

@@ -24,8 +24,17 @@ severity with the existing severity style.
 
 The default screen must not show the logical path, the mapped storage path,
 the source URL, or any directory component of an item. Remove the second
-line that `activity_text()` currently appends under each event. The full
-path remains available through **Enter** on the item and in item details.
+line that `activity_text()` currently appends under each event. This
+document adds no link from an event to an item, because activity events take
+no row focus. The full path remains in item details.
+
+The line must fit the pane width and must not wrap. Fit it in this order:
+
+1. Never truncate the time, severity, worker label, or short item ID.
+2. Truncate the message from its end with `…`, to at most 120 columns.
+3. If the message would fall below 20 columns, shorten the basename by
+   middle truncation to no less than 12 columns.
+4. If the line is still too wide, omit the basename.
 
 ## Concise messages
 
@@ -37,11 +46,15 @@ logs. The controller-side mapping is owned by
 [SPEC-download-telemetry.md](SPEC-download-telemetry.md); this document
 requires only that the monitor render `event.category` when present and
 fall back to a literal, single-line, 120-column-truncated `event.message`
-when it is not.
+when it is not. Before truncation, the monitor must replace every
+whitespace-separated token of the fallback message that contains `/` or `\`
+with `[path]`. The controller's event sanitization in
+[SPEC-download-telemetry.md](SPEC-download-telemetry.md) owns removal of
+personal names outside paths.
 
-Deduplicate repeated countdown messages as
-[SPEC-console-ui.md](SPEC-console-ui.md) already requires: show the latest
-occurrence with a `×N` suffix.
+[SPEC-console-ui.md](SPEC-console-ui.md) requires deduplication of repeated
+countdown messages. This document adds the form: show the latest occurrence
+with a `×N` suffix.
 
 ## Acceptance criteria
 
@@ -50,6 +63,11 @@ occurrence with a `×N` suffix.
 - Verify the time carries the `Z` suffix and matches the event's UTC value.
 - Verify a raw multi-line engine message renders as one line, literal,
   truncated to 120 columns.
-- Verify a duplicate basename shows its short item ID.
+- Verify a fallback message `open /home/alice/report.bin failed` renders
+  `open [path] failed`.
+- Verify at 80 columns the line stays on one line, and the time, severity,
+  worker label, and short item ID stay intact.
+- Verify every event bound to an item shows its short item ID, and that two
+  events with the same basename show distinct IDs.
 - Verify Rich markup and terminal escapes in message, basename, and worker
   label render literally.

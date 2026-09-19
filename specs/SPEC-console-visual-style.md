@@ -1,9 +1,21 @@
 # Specification: console visual style
 
-Status: partially implemented, September 18, 2026. This document collects the label, value,
+Status: partially implemented, September 19, 2026. This document collects the label, value,
 emphasis, and highlight rules for the acquisition console's Textual UI into
 one shared reference. It defines display rules only. It does not authorize a
 source request or an acquisition action.
+
+Implementation status, from
+[docs/console-visual-style-audit-2026-09-19.md](../docs/console-visual-style-audit-2026-09-19.md):
+
+- Unmet: the monochrome acceptance tests below. No test in
+  `tests/test_monitor.py` or `tests/test_monitor_interaction.py` asserts
+  monochrome rendering.
+- Code deviations: a retry status with a countdown renders in the default
+  style, not dim. Section headers use `bold white`, not bold. Event
+  timestamps use `bold dim`.
+- Not yet in code: the styles for the storage-risk error, the storage-stop
+  condition, and the modal and footer rules below.
 
 ## Outcome and dependencies
 
@@ -31,6 +43,10 @@ each rule instance follows.
 - When a field has one fixed string with no separate label/value split (for
   example the queue's **Matching count unavailable**), render the whole
   string dim.
+- Render a field's label and value as separate text spans. A view must not
+  infer the label from the value string.
+- Render an unknown value `?` and its reason dim, so a missing value recedes
+  and a present value stands out.
 - Render every retry status message dim (for example **Eligible; awaiting
   controller**, **Eligible; cooldown active**). A retry countdown value
   itself stays default style; freezing it while stale changes its updates,
@@ -43,15 +59,46 @@ each rule instance follows.
   ID**, **Bucket**, **Retry deadline**, **Phase**, and **Received / total**
   column headers). Apply a header's bold rule only to columns actually shown
   at the current layout width.
+- Do not set a fixed foreground color for structural text; use bold or dim
+  only. Do not combine bold and dim on one span.
 - Render **Disk** in the same color as **Files** on the main screen, so the
   two section headers read as one group. **Files** renders in the default
   text color; **Disk**'s bold rule above still applies on top of that color.
 - Render a row-list result notice bold in the default text color when it
   must stand out without a new color (the queue's **Results changed**).
 - Render the **live** freshness label green without bold text. This is the
-  console's only defined use of a color to carry meaning by itself; every
-  other status distinction must pair a color with a text label, so it stays
-  legible in monochrome.
+  console's only color that carries meaning by itself. Every other color in
+  the Status colors section pairs with a text label, so it stays legible in
+  monochrome.
+
+## Status colors
+
+Each row pairs a color with a required text label. Section headers are not in
+this table; they are bold only.
+
+| Element | Style | Required text label |
+| --- | --- | --- |
+| `TOD-DL` title | `bold cyan` | the title text |
+| Run ID | `bold white` | the run ID text |
+| Lifecycle RUNNING, FINISHED | `bold green` | the lifecycle word |
+| Lifecycle STOPPED | `bold yellow` | the lifecycle word |
+| Lifecycle unknown | `bold red` | the lifecycle word |
+| Freshness stale | `yellow` | **Telemetry stale** |
+| Freshness disconnected | `red` | **Disconnected** |
+| Freshness recorded | `dim` | the recorded time |
+| Severity INFO | `cyan` | `INFO` |
+| Severity WARNING | `bold yellow` | `WARNING` |
+| Severity ERROR | `bold red` | `ERROR` |
+| Event message **complete** | `green` | the word **complete** |
+| **Disk status unavailable** | `dim` | the label itself |
+| Storage-risk error (negative headroom) | `bold red` | `storage risk` |
+| Storage-stop condition (zero headroom) | `bold yellow` | `storage stop` |
+
+## Footer and modal text
+
+Footer and modal text follow the label and value rules above. A confirmed
+command key label renders bold. A read-only key label renders in the default
+style.
 
 ## Highlight and focus rules
 
@@ -80,6 +127,11 @@ Outcome and dependencies above. That restatement is a known exception, not a
 violation of this rule; a future edit to that section must migrate it to a
 citation instead of adding to the restatement.
 
+[SPEC-console-ui.md](SPEC-console-ui.md) is a second known exception. It
+restates the dim-label, **live**, **Disk**, and retry-status rules in its
+header section and predates this document. Apply the same migration rule to
+it.
+
 ## Acceptance criteria
 
 Tests must render each view in monochrome, without relying on terminal color
@@ -94,3 +146,9 @@ output.
 - Verify that the **live** label is the only element whose meaning depends on
   color alone, and that every other status distinction also shows a text
   label.
+- Verify that each row of the Status colors table renders with its listed
+  style and label.
+- Verify that no span combines bold and dim, and that no structural text sets
+  a fixed foreground color.
+- Verify that a label and its value render as separate spans, and that an
+  unknown value and its reason render dim.

@@ -9,6 +9,11 @@ It defines display requirements only. It does not define an acquisition or
 evidence action. It must render labels, values, headers, and highlights under
 [SPEC-console-visual-style.md](SPEC-console-visual-style.md).
 
+Planned changes to key bindings and field layout are in
+[SPEC-console-keymap.md](SPEC-console-keymap.md) and
+[SPEC-console-detail-layout.md](SPEC-console-detail-layout.md). Once
+implemented, each unavailable field carries an `unavailable_reason`.
+
 ## Entry and identity
 
 **Enter** on a queue or review row must open item details. The worker detail

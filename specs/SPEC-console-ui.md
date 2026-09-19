@@ -136,9 +136,9 @@ Disk  84.2 GiB free | 10 GiB reserve | 74.2 GiB headroom
 Tor preflight passed at 12:16 UTC | Last complete 42s ago
 
 [Activity] [Queue] [Errors / review]
-14:31:08 UTC  Worker 2 resumed an existing partial
-14:30:52 UTC  Worker 3 started SHA-256 calculation
-14:30:26 UTC  Timeout; retry in 120s
+14:31:08Z  INFO     W2  Resumed an existing partial
+14:30:52Z  INFO     W3  Started SHA-256 calculation
+14:30:26Z  WARNING      Timeout; retry in 120s
 
 ↑↓ Select  Enter Details  / Search  l Logs  ? Help  q Close monitor
 ```
@@ -178,8 +178,9 @@ Render the **complete**, **busy**, **retry**, **review**, **queued**,
 For a finished or stopped run, show the required final time instead of progress
 or completion age. An active download worker has phase `downloading`. When one
 or more download workers are active, show **Last complete** followed by its
-age. If every active download worker has no payload progress for 60 seconds,
-mark every affected worker as stalled. If no download worker is active and
+age. Mark an active download worker as stalled when its own transfer has no
+payload progress for 60 seconds. Progress on another worker does not clear
+the mark. If no download worker is active and
 payload progress exists, show **Last payload progress** followed by its age.
 If a global or worker cooldown is active, or every worker row shows `? / ?`,
 show **Last payload progress** when it is recorded. If no payload progress is
@@ -261,10 +262,12 @@ Inspection service failure must leave the dashboard available.
 | Worker details | Current item, attempt elapsed time, last progress age, current and smoothed speed, connection count if available, phase reason, and next eligible start. |
 | Queue | Paginated selected items in manifest order; filter by state and search by literal path or item ID; display remaining work and retry deadlines. |
 | Errors / review | Categorized error, last occurrence, attempt history, retry eligibility, validation failure, unavailable item, and candidate location. |
-| Activity | UTC event time, severity, short item ID or worker, and concise message; deduplicate repeated countdown messages. |
+| Activity | UTC event time, severity, worker, short item ID, and concise message on one line; deduplicate repeated countdown messages. [SPEC-console-activity-log.md](SPEC-console-activity-log.md) defines the line. |
 | Run details | Input hashes, selection settings, engine version and evaluation status, run outcome, stop reason, and selected versus overall acquisition totals. |
 
-Bind `Tab` to pane navigation, arrows to selection, `Enter` to details, `/` to
+Bind `Tab` to focus movement between the regions of the current view (see
+[SPEC-console-keymap.md](SPEC-console-keymap.md)), arrows to selection,
+`Enter` to details, `/` to
 search, `Escape` to dismiss, `l` to selected-item logs, `?` to help, and `q` to
 close the monitor. `Ctrl+C` also closes only the monitor. Search and sorting
 change the view, never the acquisition order. Follow live logs until you

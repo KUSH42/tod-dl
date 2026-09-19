@@ -127,7 +127,9 @@ monitor owns its bounded display history and direction label.
 Worker transfer counters include `received_bytes`, `total_bytes`,
 `total_source`, `resume_baseline_bytes`, `speed_bps`, `last_progress_age_s`,
 and `sample_sequence`. Inventory token, estimate, and engine total remain
-separate fields when both exist. Use stable item IDs; never key UI state only
+separate fields when both exist. `total_bytes` is `null` until the engine or
+inventory reports a length. It is never `0` for an unknown length; `0` means
+a confirmed zero-length item. Use stable item IDs; never key UI state only
 by basename, URL abbreviation, or PID.
 
 Keep queue rows and complete attempt history out of the snapshot. The planned
