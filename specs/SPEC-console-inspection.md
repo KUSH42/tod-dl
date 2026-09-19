@@ -95,6 +95,13 @@ Records must use canonical `item_id`, `worker_id`, `generation`, and
 An item key is `(run_id, item_id)`. A worker key is
 `(run_id, session_id, worker_id)`. Names and PIDs must not serve as keys.
 Unknown values must be `null`, with an unavailable reason where needed.
+`get_worker` and `get_item` must return `unavailable_reason`, a map from each
+unavailable field to one reason from
+[SPEC-console-detail-layout.md](SPEC-console-detail-layout.md#unknown-values).
+A `get_item` key is `section.field`, for example `engine.pid`; `staging_path`
+and `candidate_path` are top-level keys. A `get_worker` key is the field name.
+When the sample age exceeds five seconds, `get_worker` must return live speed,
+smoothed speed, and ETA as `null` with the reason `sample stale`.
 Sizes, rates, timestamps, and quality must use telemetry units and rules.
 Published identifiers must be opaque values. They must not embed a source URL,
 private path, engine job value, or PID. The controller must convert a legacy

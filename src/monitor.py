@@ -15,10 +15,11 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import unquote, urlsplit
 
 from rich.cells import cell_len
+from rich.text import Text
 
 from controller import (COOLDOWN_OVERRIDE_MAX_S, COOLDOWN_OVERRIDE_MIN_S, ControlError,
                         PRIORITY_MAX, PRIORITY_MIN, control_request, get_control_state)
@@ -754,110 +755,376 @@ def queue_header_text(run_id: Any, selected_count: Any, loaded_count: int,
             f"Revision: {detail_value(revision, 'revision unavailable')}")
 
 
-def item_details_text(item: dict[str, Any], read_at: Any = None,
-                      revision: Any = None, sample_freshness: str = "?") -> str:
-    """Build a literal-safe, scrollable item-details display from one record."""
-    unavailable = item.get("unavailable", {})
-    reason = unavailable.get("reason", "not recorded") if isinstance(unavailable, dict) else "not recorded"
-    identity = item.get("identity", {})
-    state = item.get("state", {})
-    engine = item.get("engine", {})
-    byte_values = item.get("bytes", {})
-    validation = item.get("validation", {})
-    def field(section: dict[str, Any], name: str, fallback: Any = None) -> Any:
-        return section.get(name, fallback) if isinstance(section, dict) else fallback
-    basename = field(identity, 'basename', item.get('basename'))
-    item_id_value = field(identity, 'item_id', item.get('item_id'))
-    lines = [
-        "Item details",
-        f"{truncate_filename(basename, 40) if basename is not None else '? (' + literal_text(reason) + ')'}  "
-        f"ID {short_item_id(item_id_value) if item_id_value is not None else '? (' + literal_text(reason) + ')'}  "
-        f"State: {detail_value(field(state, 'durable_state', item.get('durable_state')), reason)}  "
-        f"Phase: {detail_value(field(state, 'phase'), reason)}  "
-        f"Freshness: {literal_text(sample_freshness)}",
-        f"Read: {detail_value(read_at, 'read time unavailable')}  Revision: {detail_value(revision, 'revision unavailable')}  Freshness: {literal_text(sample_freshness)}",
-        "", "Identity and paths",
-        f"Item ID: {detail_value(item_id_value, reason)}",
-        f"Run ID: {detail_value(field(identity, 'run_id'), reason)}",
-        f"Original path: {detail_value(field(identity, 'logical_path', item.get('logical_path')), reason)}",
-        f"Mapped storage path: {detail_value(field(identity, 'storage_path', item.get('storage_path')), reason)}",
-        f"Staging path: {detail_value(item.get('staging_path'), reason)}",
-        f"Candidate path: {detail_value(item.get('candidate_path'), reason)}",
-        f"Queue rank: {detail_value(field(identity, 'queue_rank', item.get('queue_rank')), reason)}",
-        f"Generation: {detail_value(field(identity, 'generation'), reason)}  Attempt ID: {detail_value(field(identity, 'attempt_id'), reason)}",
-        f"Mapping reason: {detail_value(field(identity, 'mapping_reason'), reason)}  Mapping version: {detail_value(field(identity, 'mapping_version'), reason)}",
-        "", "State",
-        f"Durable state: {detail_value(field(state, 'durable_state', item.get('durable_state')), reason)}  Bucket: {detail_value(field(state, 'bucket', item.get('bucket')), reason)}",
-        f"Phase: {detail_value(field(state, 'phase'), reason)}  Reason: {detail_value(field(state, 'phase_reason'), reason)}",
-        f"Worker: {detail_value(field(state, 'worker_id'), reason)}  Last transition: {detail_value(field(state, 'last_transition_at', item.get('updated_at')), reason)}",
-        f"Attempts: {detail_value(field(state, 'attempt_count', item.get('attempt_count')), reason)} / {detail_value(field(state, 'attempt_ceiling', item.get('attempt_ceiling')), reason)}",
-        f"Retry deadline: {format_retry_deadline(field(state, 'retry_at', item.get('retry_at')))}",
-        f"Blocking condition: {detail_value(field(state, 'blocking_condition'), 'none reported')}",
-        "", "Engine",
-        f"Engine: {detail_value(field(engine, 'name'), reason)} {detail_value(field(engine, 'version'), reason)}",
-        f"Instance: {detail_value(field(engine, 'instance_id'), reason)}  Job: {detail_value(field(engine, 'job_id'), reason)}  PID: {detail_value(field(engine, 'pid'), reason)}",
-        f"Runtime sample: {detail_value(field(engine, 'sample_at'), reason)}",
-        "", "Bytes",
-        f"Received: {detail_bytes(field(byte_values, 'received', item.get('received_bytes')), reason)}",
-        f"Resume baseline: {detail_bytes(field(byte_values, 'resume_baseline'), reason)}",
-        f"Transfer total: {detail_bytes(field(byte_values, 'transfer_total'), reason)}  Source: {detail_value(field(byte_values, 'transfer_total_source'), reason)}",
-        f"Trusted expected size: {detail_bytes(field(byte_values, 'trusted_expected'), reason)}",
-        f"Inventory size: {detail_value(field(byte_values, 'inventory_size', item.get('inventory_size')), reason)}",
-        f"Retained item bytes: {detail_bytes(field(byte_values, 'retained_item_bytes'), reason)}",
-        f"Committed item completion bytes: {detail_bytes(field(byte_values, 'committed_completion_bytes'), reason)}",
-        "", "Validation",
-        f"Method: {detail_value(field(validation, 'method'), reason)}  Processed bytes: {detail_bytes(field(validation, 'processed_bytes'), reason)}",
-        f"Result: {detail_value(field(validation, 'result'), reason)}  Recorded at: {detail_value(field(validation, 'recorded_at'), reason)}",
-        f"Expected SHA-256: {detail_value(field(validation, 'expected_sha256'), reason)}",
-        f"Observed SHA-256: {detail_value(field(validation, 'observed_sha256', item.get('sha256')), reason)}",
-        f"Mismatch reason: {detail_value(field(validation, 'mismatch_reason'), reason)}",
-        f"Promotion: {detail_value(field(validation, 'promotion_status'), reason)}  Staging cleanup: {detail_value(field(validation, 'staging_cleanup_at'), reason)}",
-        "", "Source",
-        f"{literal_text(item.get('source_label', 'Source hidden'))}: {detail_value(item.get('source'), 'hidden until you select Reveal source')}",
-        "", "Attempts and errors", "Select Next attempts to load another recorded page.",
-    ]
-    return "\n".join(lines)
+# Detail views build a render model first, then render it at a width. A model is
+# a list of DetailHeader, DetailSection, DetailField, and DetailNote rows.
+UNAVAILABLE_REASONS = ("not in sample", "sample stale", "not applicable",
+                       "controller did not report", "unsupported by engine")
+DETAIL_LABEL_WIDE = 24
+DETAIL_LABEL_NARROW = 18
+DETAIL_NARROW_COLUMNS = 80
+DETAIL_GAP = 2
+DETAIL_STACK_INDENT = 2
+DETAIL_MIN_VALUE_WIDTH = 10
+NO_PROGRESS_SECONDS = 60
+DETAIL_GUTTER = 2  # scrollbar columns, taken from the wrap width but not the layout tier
+DETAIL_DEFAULT_WIDTH = 100
 
 
-def worker_details_text(worker: dict[str, Any], read_at: Any = None,
-                        revision: Any = None, dashboard_revision: Any = None,
-                        sample_freshness: str = "?", source_label: str = "Source hidden",
-                        source: Any = None) -> str:
-    """Build a literal-safe worker details display from one slot record."""
+class DetailHeader(NamedTuple):
+    """The first line: subject and status words on the left, read metadata on the right."""
+    subject: str
+    status: tuple[str, ...]
+    freshness: str
+    read_at: Any
+    revision: Any
+
+
+class DetailSection(NamedTuple):
+    title: str
+    dim: bool = False
+
+
+class DetailField(NamedTuple):
+    """One grid row: one label cell and one value cell."""
+    label: str
+    value: str
+    dim: bool = False
+
+
+class DetailNote(NamedTuple):
+    text: str
+    style: str | None = None
+
+
+def detail_reason(reasons: Any, key: str) -> str:
+    """Return the service's reason for an unavailable field.
+
+    The view does not choose a reason. When the service sent none, or one
+    outside the fixed set, the controller did not report it.
+    """
+    reason = reasons.get(key) if isinstance(reasons, dict) else None
+    return reason if reason in UNAVAILABLE_REASONS else "controller did not report"
+
+
+def decoded_basename(value: Any) -> str:
+    """Percent-decode a basename, then neutralize terminal controls in the result."""
+    return literal_text(unquote(str(value)))
+
+
+def detail_header_line(header: DetailHeader, width: int) -> list[list[tuple[str, str | None]]]:
+    """Lay out the header as parts per line, right-aligning the read metadata when it fits."""
+    left: list[tuple[str, str | None]] = [(header.subject, "bold")]
+    for word in header.status:
+        left.append(("  " + word, "dim" if word.startswith("?") else None))
+    left.append(("  " + header.freshness, freshness_style(header.freshness)))
+    read = (f"Read {event_timestamp({'at': header.read_at})}  "
+            f"Rev {'?' if header.revision is None else literal_text(header.revision)}")
+    used = sum(cell_len(part) for part, _style in left)
+    padding = width - DETAIL_GUTTER - used - cell_len(read)
+    if padding >= DETAIL_GAP:
+        return [left + [(" " * padding, None), (read, "dim")]]
+    return [left, [(read, "dim")]]
+
+
+def detail_grid_lines(row: DetailField, width: int) -> list[list[tuple[str, str | None]]]:
+    """Wrap one field into label and value cells, or stack them below 80 columns."""
+    dim_value = row.dim or row.value.startswith("?")
+    label_style = "dim"
+    value_style = "dim" if dim_value else None
+    usable = width - DETAIL_GUTTER
+    if width < DETAIL_NARROW_COLUMNS:
+        label_width = max(usable, DETAIL_MIN_VALUE_WIDTH)
+        value_width = max(usable - DETAIL_STACK_INDENT, DETAIL_MIN_VALUE_WIDTH)
+        lines: list[list[tuple[str, str | None]]] = [
+            [(part, label_style)] for part in wrap_cells(row.label, label_width)]
+        indent = " " * DETAIL_STACK_INDENT
+        lines.extend([(indent, None), (part, value_style)]
+                     for part in wrap_cells(row.value, value_width))
+        return lines
+    column = DETAIL_LABEL_NARROW if width <= DETAIL_NARROW_COLUMNS else DETAIL_LABEL_WIDE
+    labels = wrap_cells(row.label, column - DETAIL_GAP)
+    values = wrap_cells(row.value, max(usable - column, DETAIL_MIN_VALUE_WIDTH))
+    lines = []
+    for index in range(max(len(labels), len(values))):
+        label = labels[index] if index < len(labels) else ""
+        value = values[index] if index < len(values) else ""
+        pad = " " * (column - cell_len(label))
+        lines.append([(label + pad, label_style), (value, value_style)])
+    return lines
+
+
+def wrap_cells(value: str, width: int) -> list[str]:
+    """Wrap text to display columns at spaces, and split a word only when it cannot fit."""
+    lines: list[str] = []
+    current = ""
+    for word in value.split(" "):
+        while cell_len(word) > width:
+            room = width - (cell_len(current) + 1 if current else 0)
+            if room <= 0:
+                lines.append(current)
+                current, room = "", width
+            head = ""
+            for character in word:
+                if cell_len(head + character) > room:
+                    break
+                head += character
+            lines.append((current + " " + head) if current else head)
+            current, word = "", word[len(head):]
+        if not current:
+            current = word
+        elif cell_len(current) + 1 + cell_len(word) <= width:
+            current += " " + word
+        else:
+            lines.append(current)
+            current = word
+    lines.append(current)
+    return lines
+
+
+def render_detail(model: list[Any], width: int) -> Text:
+    """Render a detail model at a width, with one blank line before each section."""
+    lines: list[list[tuple[str, str | None]]] = []
+    for row in model:
+        if isinstance(row, DetailHeader):
+            lines.extend(detail_header_line(row, width))
+        elif isinstance(row, DetailSection):
+            if lines:
+                lines.append([])
+            lines.append([(row.title, "dim" if row.dim else "bold")])
+        elif isinstance(row, DetailField):
+            lines.extend(detail_grid_lines(row, width))
+        else:
+            lines.append([(row.text, row.style)])
+    visual = Text()
+    for index, line in enumerate(lines):
+        for part, style in line:
+            visual.append(part, style=style)
+        if index < len(lines) - 1:
+            visual.append("\n")
+    return visual
+
+
+def detail_no_progress(worker: dict[str, Any]) -> bool:
+    age = worker.get("last_progress_age_s")
+    return (worker.get("phase") == "downloading" and isinstance(age, (int, float))
+            and not isinstance(age, bool) and age >= NO_PROGRESS_SECONDS)
+
+
+def worker_details_model(worker: dict[str, Any], read_at: Any = None, revision: Any = None,
+                         dashboard_revision: Any = None, sample_freshness: str = "?",
+                         banner: tuple[str, ...] = ()) -> list[Any]:
+    """Build the worker details model from one slot record."""
+    reasons = worker.get("unavailable_reason")
+    def why(key: str) -> str:
+        return detail_reason(reasons, key)
     assignment = worker.get("assignment") if isinstance(worker.get("assignment"), dict) else None
-    reason = "not recorded"
-    lines = ["Worker details",
-             f"Read: {detail_value(read_at, 'read time unavailable')}  Revision: {detail_value(revision, 'revision unavailable')}  Freshness: {literal_text(sample_freshness)}"]
+    phase = worker.get("phase")
+    model: list[Any] = [DetailHeader(
+        f"Worker {detail_value(worker.get('worker_id'), why('worker_id'))}",
+        (detail_value(phase, why("phase")),), literal_text(sample_freshness),
+        read_at, revision)]
     if dashboard_revision is not None and revision != dashboard_revision:
-        lines.append(f"Dashboard revision: {detail_value(dashboard_revision)} (details differ)")
-    lines.extend(["", "Assignment"])
+        model.append(DetailNote(f"Dashboard revision {literal_text(dashboard_revision)}; "
+                                "details differ"))
+    model.extend(DetailNote(literal_text(line)) for line in banner)
+    model.append(DetailSection("Assignment"))
     if not assignment or not assignment.get("item_id"):
-        lines.extend(["No item assigned", f"Reason: {detail_value(worker.get('reason'), 'Reason unavailable')}"])
-        return "\n".join(lines)
-    lines.extend([
-        f"Run: {detail_value(assignment.get('run_id'), reason)}  Session: {detail_value(assignment.get('session_id'), reason)}  Worker: {detail_value(assignment.get('worker_id'), reason)}",
-        f"Item ID: {detail_value(assignment.get('item_id'), reason)}  Basename: {detail_value(assignment.get('basename'), reason)}",
-        f"Generation: {detail_value(assignment.get('generation'), reason)}  Attempt: {detail_value(assignment.get('attempt_number'), reason)}",
-        f"Engine instance: {detail_value(assignment.get('engine_instance_id'), reason)}  Job: {detail_value(assignment.get('engine_job_id'), reason)}  PID: {detail_value(assignment.get('pid'), reason)}",
-        "", "Activity",
-        f"Phase: {detail_value(worker.get('phase'), reason)}  Reason: {detail_value(worker.get('reason'), reason)}",
-        f"Phase elapsed: {format_elapsed_duration(worker.get('phase_elapsed_s'))}  Attempt elapsed: {format_elapsed_duration(worker.get('attempt_elapsed_s'))}",
-        f"Last payload progress: {format_countdown(worker.get('last_progress_age_s')) if worker.get('last_progress_age_s') is not None else '?'} ago",
-        "No progress for 60s" if worker.get('phase') == 'downloading' and isinstance(worker.get('last_progress_age_s'), (int, float)) and worker['last_progress_age_s'] >= 60 else "",
-        "", "Transfer",
-        f"Received: {detail_bytes(worker.get('received_bytes'), reason)}  Total: {detail_bytes(worker.get('total_bytes'), reason)} ({detail_value(worker.get('total_source'), reason)})",
-        f"Resume baseline: {detail_bytes(worker.get('resume_baseline_bytes'), reason)}",
-        f"Speed: {detail_rate(worker.get('speed_bps'), reason)}  Smoothed: {detail_rate(worker.get('smoothed_speed_bps'), reason)}",
-        f"ETA (approximate): {detail_value(format_countdown(worker.get('eta_seconds')) if isinstance(worker.get('eta_seconds'), (int, float)) and not isinstance(worker.get('eta_seconds'), bool) else None, 'Estimating' if worker.get('estimator') == 'Estimating' else reason)}  Connections: {detail_value(worker.get('connections'), reason)}",
-        f"Sample sequence: {detail_value(worker.get('sample_sequence'), reason)}  Sample age: {detail_value(worker.get('sample_age_s'), reason)}  Quality: {detail_value(worker.get('quality'), reason)}",
-        "", "Admission",
-        f"Controller conditions: {detail_value(worker.get('admission'), 'not reported')}",
-        "", "Validation",
-        f"Validation: {detail_value(worker.get('validation'), 'not owned by this slot')}",
-        "", "Source",
-        f"{literal_text(source_label)}: {detail_value(source, 'hidden until you select Reveal source')}",
+        model.extend([DetailNote("No item assigned"),
+                      DetailField("Reason", literal_text(worker.get("reason")
+                                                         or "Reason unavailable"))])
+        return model
+    def value(source: dict[str, Any], key: str) -> str:
+        return detail_value(source.get(key), why(key))
+    def size(key: str) -> str:
+        return detail_bytes(worker.get(key), why(key))
+    basename = assignment.get("basename")
+    progress_age = detail_age(worker.get("last_progress_age_s"), why("last_progress_age_s"))
+    if not progress_age.startswith("?"):
+        progress_age += " ago"
+    model.extend([
+        DetailField("Run", value(assignment, "run_id")),
+        DetailField("Session", value(assignment, "session_id")),
+        DetailField("Item ID", value(assignment, "item_id")),
+        DetailField("Basename", decoded_basename(basename) if basename is not None
+                    else detail_value(None, why("basename"))),
+        DetailField("Generation", value(assignment, "generation")),
+        DetailField("Attempt", value(assignment, "attempt_number")),
+        DetailField("Engine instance", value(assignment, "engine_instance_id")),
+        DetailField("Engine job", value(assignment, "engine_job_id")),
+        DetailField("PID", value(assignment, "pid")),
+        DetailSection("Activity"),
+        DetailField("Reason", value(worker, "reason")),
+        DetailField("Phase elapsed", detail_elapsed(worker.get("phase_elapsed_s"),
+                                                    why("phase_elapsed_s"))),
+        DetailField("Attempt elapsed", detail_elapsed(worker.get("attempt_elapsed_s"),
+                                                      why("attempt_elapsed_s"))),
+        DetailField("Last payload progress", progress_age),
     ])
-    return "\n".join(lines)
+    if detail_no_progress(worker):
+        model.append(DetailNote(f"No progress for {NO_PROGRESS_SECONDS}s"))
+    eta = worker.get("eta_seconds")
+    eta_reason = ("Estimating" if worker.get("estimator") == "Estimating"
+                  and why("eta_seconds") != "sample stale" else why("eta_seconds"))
+    model.extend([
+        DetailSection("Transfer"),
+        DetailField("Received", size("received_bytes")),
+        DetailField("Total", size("total_bytes")),
+        DetailField("Total source", value(worker, "total_source")),
+        DetailField("Resume baseline", size("resume_baseline_bytes")),
+        DetailField("Speed", detail_rate(worker.get("speed_bps"), why("speed_bps"))),
+        DetailField("Smoothed speed", detail_rate(worker.get("smoothed_speed_bps"),
+                                                  why("smoothed_speed_bps"))),
+        DetailField("ETA (approximate)",
+                    detail_value(format_duration(eta) if isinstance(eta, (int, float))
+                                 and not isinstance(eta, bool) else None, eta_reason)),
+        DetailField("Connections", value(worker, "connections")),
+        DetailSection("Telemetry sample", dim=True),
+        DetailField("Sample sequence", value(worker, "sample_sequence"), dim=True),
+        DetailField("Sample age", detail_age(worker.get("sample_age_s"), why("sample_age_s")),
+                    dim=True),
+        DetailField("Quality", value(worker, "quality"), dim=True),
+        DetailSection("Admission"),
+    ])
+    conditions = worker.get("admission")
+    if isinstance(conditions, dict) and conditions:
+        model.extend(DetailField(literal_text(name), literal_text(state))
+                     for name, state in conditions.items())
+    elif conditions:
+        model.append(DetailField("Controller conditions", literal_text(conditions)))
+    else:
+        model.append(DetailField("Next eligible start", detail_value(None, why("admission"))))
+    model.extend([DetailSection("Validation"),
+                  DetailField("Validation", value(worker, "validation"))])
+    return model
+
+
+def detail_elapsed(value: Any, reason: str) -> str:
+    """Show an elapsed time with units, or an unknown value with its reason."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+        return format_elapsed_duration(value)
+    return detail_value(None, reason)
+
+
+def detail_age(value: Any, reason: str) -> str:
+    """Show an age with a unit, or an unknown value with its reason."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+        return format_countdown(value)
+    return detail_value(None, reason)
+
+
+def item_details_model(item: dict[str, Any], read_at: Any = None, revision: Any = None,
+                       sample_freshness: str = "?", banner: tuple[str, ...] = ()) -> list[Any]:
+    """Build the item details model from one item record."""
+    reasons = item.get("unavailable_reason")
+    sections = {name: item.get(name, {}) for name in
+                ("identity", "state", "engine", "bytes", "validation")}
+    identity, state = sections["identity"], sections["state"]
+    def field(section: Any, name: str, fallback: Any = None) -> Any:
+        return section.get(name, fallback) if isinstance(section, dict) else fallback
+    def shown(section: str, key: str, fallback: Any = None) -> str:
+        return detail_value(field(sections[section], key, fallback),
+                            detail_reason(reasons, f"{section}.{key}"))
+    def sized(section: str, key: str, fallback: Any = None) -> str:
+        return detail_bytes(field(sections[section], key, fallback),
+                            detail_reason(reasons, f"{section}.{key}"))
+    basename = field(identity, "basename", item.get("basename"))
+    item_id = field(identity, "item_id", item.get("item_id"))
+    bucket = field(state, "bucket", item.get("bucket"))
+    phase = field(state, "phase")
+    unknown_basename = detail_value(None, detail_reason(reasons, "identity.basename"))
+    model: list[Any] = [DetailHeader(
+        truncate_filename(unquote(str(basename)), 40) if basename is not None else unknown_basename,
+        tuple(([f"[{short_item_id(item_id)}]"] if item_id is not None else [])
+              + [detail_value(bucket, detail_reason(reasons, "state.bucket")),
+                 detail_value(phase, detail_reason(reasons, "state.phase"))]),
+        literal_text(sample_freshness), read_at, revision)]
+    model.extend(DetailNote(literal_text(line)) for line in banner)
+    reason_of = lambda key: detail_reason(reasons, key)
+    retry_at = field(state, "retry_at", item.get("retry_at"))
+    model.extend([
+        DetailSection("Identity and paths"),
+        DetailField("Item ID", shown("identity", "item_id", item.get("item_id"))),
+        DetailField("Run ID", shown("identity", "run_id")),
+        DetailField("Original path", shown("identity", "logical_path", item.get("logical_path"))),
+        DetailField("Mapped storage path", shown("identity", "storage_path", item.get("storage_path"))),
+        DetailField("Staging path", detail_value(item.get("staging_path"), reason_of("staging_path"))),
+        DetailField("Candidate path", detail_value(item.get("candidate_path"), reason_of("candidate_path"))),
+        DetailField("Queue rank", shown("identity", "queue_rank", item.get("queue_rank"))),
+        DetailField("Generation", shown("identity", "generation")),
+        DetailField("Attempt ID", shown("identity", "attempt_id")),
+        DetailField("Mapping reason", shown("identity", "mapping_reason")),
+        DetailField("Mapping version", shown("identity", "mapping_version")),
+        DetailSection("State"),
+        DetailField("Durable state", shown("state", "durable_state", item.get("durable_state"))),
+        DetailField("Bucket", shown("state", "bucket", item.get("bucket"))),
+        DetailField("Reason", shown("state", "phase_reason")),
+        DetailField("Worker", shown("state", "worker_id")),
+        DetailField("Last transition", shown("state", "last_transition_at", item.get("updated_at"))),
+        DetailField("Attempts", f"{shown("state", 'attempt_count', item.get('attempt_count'))} / "
+                                f"{shown("state", 'attempt_ceiling', item.get('attempt_ceiling'))}"),
+        DetailField("Retry deadline", format_retry_deadline(retry_at)
+                    if retry_at is not None else detail_value(None, reason_of("state.retry_at"))),
+        DetailField("Blocking condition", shown("state", "blocking_condition")),
+        DetailSection("Engine"),
+        DetailField("Engine", f"{shown("engine", 'name')} {shown("engine", 'version')}"),
+        DetailField("Instance", shown("engine", "instance_id")),
+        DetailField("Job", shown("engine", "job_id")),
+        DetailField("PID", shown("engine", "pid")),
+        DetailField("Runtime sample", shown("engine", "sample_at")),
+        DetailSection("Bytes"),
+        DetailField("Received", sized("bytes", "received", item.get("received_bytes"))),
+        DetailField("Resume baseline", sized("bytes", "resume_baseline")),
+        DetailField("Transfer total", sized("bytes", "transfer_total")),
+        DetailField("Total source", shown("bytes", "transfer_total_source")),
+        DetailField("Trusted expected size", sized("bytes", "trusted_expected")),
+        DetailField("Inventory size", shown("bytes", "inventory_size", item.get("inventory_size"))),
+        DetailField("Retained item bytes", sized("bytes", "retained_item_bytes")),
+        DetailField("Committed item completion bytes", sized("bytes", "committed_completion_bytes")),
+        DetailSection("Telemetry sample", dim=True),
+        DetailField("Sample sequence", shown("engine", "sample_sequence"), dim=True),
+        DetailField("Sample age", detail_age(field(sections["engine"], "sample_age_s"),
+                                             reason_of("engine.sample_age_s")), dim=True),
+        DetailField("Quality", shown("engine", "quality"), dim=True),
+        DetailSection("Validation"),
+        DetailField("Method", shown("validation", "method")),
+        DetailField("Processed bytes", sized("validation", "processed_bytes")),
+        DetailField("Result", shown("validation", "result")),
+        DetailField("Recorded at", shown("validation", "recorded_at")),
+        DetailField("Expected SHA-256", shown("validation", "expected_sha256")),
+        DetailField("Observed SHA-256", shown("validation", "observed_sha256", item.get("sha256"))),
+        DetailField("Mismatch reason", shown("validation", "mismatch_reason")),
+        DetailField("Promotion", shown("validation", "promotion_status")),
+        DetailField("Staging cleanup", shown("validation", "staging_cleanup_at")),
+        DetailSection("Source"),
+        DetailField("Source", item_source_value(item)),
+        DetailSection("Attempts and errors"),
+        DetailNote("Select Next attempts to load another recorded page."),
+    ])
+    return model
+
+
+def item_source_value(item: dict[str, Any]) -> str:
+    """Show the source only after an explicit reveal, with its redaction label."""
+    label = literal_text(item.get("source_label", "Source hidden"))
+    if item.get("source") is not None:
+        return f"{label}: {literal_text(item['source'])}"
+    return f"{label}; press s to reveal" if label == "Source hidden" else label
+
+
+def worker_details_text(worker: dict[str, Any], read_at: Any = None, revision: Any = None,
+                        dashboard_revision: Any = None, sample_freshness: str = "?",
+                        width: int = DETAIL_DEFAULT_WIDTH) -> str:
+    """Render worker details as plain text, for tests and text export."""
+    return render_detail(worker_details_model(worker, read_at, revision, dashboard_revision,
+                                              sample_freshness), width).plain
+
+
+def item_details_text(item: dict[str, Any], read_at: Any = None, revision: Any = None,
+                      sample_freshness: str = "?",
+                      width: int = DETAIL_DEFAULT_WIDTH) -> str:
+    """Render item details as plain text, for tests and text export."""
+    return render_detail(item_details_model(item, read_at, revision, sample_freshness),
+                         width).plain
 
 
 # Footer entries per screen, in the order SPEC-console-keymap.md requires:
@@ -1249,6 +1516,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             self.revealed = False
             self.session_id: Any = None
             self.session_reload_pending = False
+            self.last_update: tuple[str | None, bool] = (None, False)
 
         def compose(self) -> ComposeResult:
             with VerticalScroll(id="item-details"):
@@ -1273,20 +1541,28 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             self.session_reload_pending = True
             self.load_item()
 
+        def detail_width(self) -> int:
+            """Return the terminal columns the layout tier and wrapping use."""
+            return self.size.width or DETAIL_DEFAULT_WIDTH
+
+        def on_resize(self, event: Any) -> None:
+            self.update_details(*self.last_update)
+
         def update_details(self, error: str | None = None, retain: bool = False) -> None:
-            if error and retain and self.item:
-                output = ("Last-known values retained\n" + literal_text(error) + "\n\n"
-                          + item_details_text(self.item, self.read_at, self.revision,
-                                              freshness(self.app.current)))
-            elif error:
-                output = "Details unavailable\n" + literal_text(error)
+            self.last_update = (error, retain)
+            freshness_label = freshness(self.app.current)
+            if error and not (retain and self.item):
+                model: list[Any] = [DetailNote("Details unavailable", "bold"),
+                                    DetailNote(literal_text(error))]
             else:
-                output = item_details_text(self.item or {}, self.read_at, self.revision,
-                                           freshness(self.app.current))
+                banner = ("Last-known values retained", error) if error else ()
+                model = item_details_model(self.item or {}, self.read_at, self.revision,
+                                           freshness_label, banner)
             if self.attempts:
-                selection_marker = "→"
-                output += "\n\nRecorded attempts\n" + "\n".join(
-                    f"{selection_marker if index == self.selected_attempt_index else ' '} "
+                marker = "→"
+                model.append(DetailSection("Recorded attempts"))
+                model.extend(DetailNote(
+                    f"{marker if index == self.selected_attempt_index else ' '} "
                     f"#{detail_value(row.get('attempt_number'))} {detail_value(row.get('attempt_id'))} "
                     f"Generation: {detail_value(row.get('generation'))}  "
                     f"Started: {detail_value(row.get('started_at'))}  "
@@ -1294,9 +1570,11 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
                     f"Outcome: {detail_value(row.get('outcome'))}  "
                     f"Error: {detail_value(row.get('error_category'))} "
                     f"{detail_value(row.get('error_message'))}  "
-                    f"Retry deadline: {format_retry_deadline(row.get('retry_at'))}"
+                    f"Retry deadline: {format_retry_deadline(row.get('retry_at'))}",
+                    "reverse" if index == self.selected_attempt_index else None)
                     for index, row in enumerate(self.attempts))
-            self.query_one("#item-details-text", Static).update(detail_visual(output))
+            self.query_one("#item-details-text", Static).update(
+                render_detail(model, self.detail_width()))
 
         def load_item(self) -> None:
             self.app.submit_inspection(
@@ -1400,9 +1678,7 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             self.revision: Any = None
             self.displayed_item_id: str | None = None
             self.session_ended = False
-            self.revealed = False
-            self.source: Any = None
-            self.source_label = "Source hidden"
+            self.last_update: str | None = None
 
         def compose(self) -> ComposeResult:
             with VerticalScroll(id="worker-details"):
@@ -1442,60 +1718,33 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             assignment = worker.get("assignment")
             item_id = (assignment.get("item_id") if isinstance(assignment, dict)
                        and isinstance(assignment.get("item_id"), str) else None)
-            if item_id != self.displayed_item_id:
-                self.displayed_item_id = item_id
-                self.revealed = False
-                self.source = None
-                self.source_label = "Source hidden"
+            self.displayed_item_id = item_id
             self.update_details()
+
+        def detail_width(self) -> int:
+            """Return the terminal columns the layout tier and wrapping use."""
+            return self.size.width or DETAIL_DEFAULT_WIDTH
+
+        def on_resize(self, event: Any) -> None:
+            self.update_details(self.last_update)
 
         def update_details(self, error: str | None = None) -> None:
+            self.last_update = error
             if self.session_ended:
-                output = "Worker details\nSession ended\nReturn to the current dashboard."
-            elif error:
-                output = "Worker details\nLast-known values retained\n" + literal_text(error)
-                if self.worker:
-                    output += "\n\n" + worker_details_text(
-                        self.worker, self.read_at, self.revision,
-                        self.dashboard_revision, freshness(self.app.current),
-                        self.source_label, self.source)
+                model: list[Any] = [DetailNote("Worker details", "bold"),
+                                    DetailNote("Session ended"),
+                                    DetailNote("Return to the current dashboard.")]
             else:
-                output = worker_details_text(
-                    self.worker or {"worker_id": self.worker_id}, self.read_at,
-                    self.revision, self.dashboard_revision, freshness(self.app.current),
-                    self.source_label, self.source)
-            self.query_one("#worker-details-text", Static).update(detail_visual(output))
-
-        def action_reveal_source(self) -> None:
-            if not self.displayed_item_id:
-                self.app.notify("No item assigned", severity="warning")
-                return
-            self.revealed = True
-            target = self.displayed_item_id
-            self.app.submit_inspection(
-                lambda: inspection_request(state, self.run_id, "get_item",
-                                            {"item_id": target, "reveal_source": True}),
-                lambda response, error: self.apply_source(target, response, error))
-
-        def apply_source(self, target: str, response: dict[str, Any] | None,
-                         error: str | None) -> None:
-            if target != self.displayed_item_id or not self.revealed:
-                return
-            data = response.get("data", {}) if response else {}
-            item = data.get("item") if isinstance(data, dict) else None
-            if error or not isinstance(item, dict):
-                self.source = None
-                self.source_label = "Source unavailable"
-            else:
-                self.source = item.get("source")
-                self.source_label = literal_text(item.get("source_label", "Source unavailable"))
-            self.update_details()
-
-        def action_hide_source(self) -> None:
-            self.revealed = False
-            self.source = None
-            self.source_label = "Source hidden"
-            self.update_details()
+                banner = ("Last-known values retained", error) if error else ()
+                if error and not self.worker:
+                    model = [DetailNote("Worker details", "bold"), *map(DetailNote, banner)]
+                else:
+                    model = worker_details_model(
+                        self.worker or {"worker_id": self.worker_id}, self.read_at,
+                        self.revision, self.dashboard_revision, freshness(self.app.current),
+                        banner)
+            self.query_one("#worker-details-text", Static).update(
+                render_detail(model, self.detail_width()))
 
         def action_item_details(self) -> None:
             if not self.displayed_item_id:
@@ -1507,8 +1756,6 @@ def build_monitor_app(snapshot: dict[str, Any], snapshot_path: Path | None = Non
             self.app.notify("No item logs" if not self.displayed_item_id else "Item logs are unavailable", severity="warning")
 
         def action_dismiss(self) -> None:
-            self.revealed = False
-            self.source = None
             self.app.pop_screen()
 
         def action_disabled_control(self) -> None:

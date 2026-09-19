@@ -30,6 +30,36 @@ MAX_REASON_BYTES = 512
 MAX_SOURCE_URL_BYTES = 1024
 MAX_PAGE_SIZE = 200
 QUEUE_SCAN_BATCH = 500
+# Fixed reasons a detail view may show beside an unavailable value. The service
+# picks one for each unavailable field; the view never infers a reason.
+REASON_NOT_IN_SAMPLE = "not in sample"
+REASON_SAMPLE_STALE = "sample stale"
+REASON_NOT_APPLICABLE = "not applicable"
+REASON_NOT_REPORTED = "controller did not report"
+STALE_SAMPLE_AGE_S = 5
+# Worker fields that exist only in a live runtime sample.
+WORKER_SAMPLE_FIELDS = ("generation", "attempt_id", "attempt_number", "engine_instance_id",
+                        "engine_job_id", "pid", "phase", "reason", "phase_elapsed_s",
+                        "attempt_elapsed_s", "received_bytes", "total_bytes", "total_source",
+                        "resume_baseline_bytes", "sample_sequence", "sample_age_s")
+# Worker fields that have no meaning outside the downloading phase.
+WORKER_DOWNLOAD_FIELDS = ("last_progress_age_s", "speed_bps", "smoothed_speed_bps",
+                          "eta_seconds", "connections")
+# Worker fields the stale-sample rule suppresses: a live rate or estimate.
+WORKER_LIVE_FIELDS = ("speed_bps", "smoothed_speed_bps", "eta_seconds")
+# Item fields that come from a runtime sample, keyed as `section.field`.
+ITEM_SAMPLE_FIELDS = {"identity.generation", "identity.attempt_id", "state.phase",
+                      "state.phase_reason", "state.worker_id", "engine.name",
+                      "engine.version", "engine.instance_id", "engine.job_id", "engine.pid",
+                      "engine.sample_at", "engine.sample_age_s", "bytes.resume_baseline",
+                      "bytes.transfer_total", "bytes.transfer_total_source",
+                      "validation.processed_bytes"}
+# Item fields whose absence is a normal state of the item, not a missing report.
+ITEM_NOT_APPLICABLE_FIELDS = {"identity.mapping_reason", "state.retry_at",
+                              "bytes.committed_completion_bytes", "staging_path",
+                              "candidate_path", "validation.mismatch_reason"}
+ITEM_VALIDATION_FIELDS = {"validation.method", "validation.result", "validation.recorded_at",
+                          "validation.observed_sha256"}
 ITEM_ID = re.compile(r"[0-9a-f]{64}\Z")
 ASCII_CURSOR = re.compile(r"[\x21-\x7e]{1,1024}\Z")
 BUCKETS = {"queued", "busy", "retry", "exhausted", "complete",
@@ -381,6 +411,63 @@ class InspectionServer:
     def _unavailable(reason: str) -> dict[str, Any]:
         return {"value": None, "reason": reason}
 
+    @staticmethod
+    def _item_reasons(data: dict[str, Any], status: str, bucket: str,
+                      runtime: dict[str, Any]) -> dict[str, str]:
+        """Return one fixed reason for each unavailable item field, keyed `section.field`."""
+        sampled = bool(runtime) or bucket == "busy"
+        validated = status in {"complete", "review_required"}
+        reasons: dict[str, str] = {}
+        def choose(key: str) -> str:
+            if key in ITEM_SAMPLE_FIELDS:
+                return REASON_NOT_IN_SAMPLE if sampled else REASON_NOT_APPLICABLE
+            if key in ITEM_VALIDATION_FIELDS:
+                return REASON_NOT_REPORTED if validated else REASON_NOT_APPLICABLE
+            if key == "validation.mismatch_reason" and status == "review_required":
+                return REASON_NOT_REPORTED
+            if key in ITEM_NOT_APPLICABLE_FIELDS:
+                return REASON_NOT_APPLICABLE
+            return REASON_NOT_REPORTED
+        for name in ("staging_path", "candidate_path"):
+            if data.get(name) is None:
+                reasons[name] = choose(name)
+        for section in ("identity", "state", "engine", "bytes", "validation"):
+            for field, value in data[section].items():
+                if value is None:
+                    reasons[f"{section}.{field}"] = choose(f"{section}.{field}")
+        return reasons
+
+    @staticmethod
+    def _worker_reasons(live: dict[str, Any], assignment: dict[str, Any]) -> dict[str, str]:
+        """Return one fixed reason for each unavailable worker field.
+
+        A stale sample suppresses live speed and ETA in `live`; the value
+        becomes unavailable with the `sample stale` reason.
+        """
+        reasons: dict[str, str] = {}
+        age = live.get("sample_age_s")
+        if isinstance(age, (int, float)) and age > STALE_SAMPLE_AGE_S:
+            for name in WORKER_LIVE_FIELDS:
+                if live.get(name) is not None:
+                    live[name] = None
+                    reasons[name] = REASON_SAMPLE_STALE
+        merged = {**live, **assignment}
+        for name in WORKER_SAMPLE_FIELDS:
+            if merged.get(name) is None:
+                reasons.setdefault(name, REASON_NOT_IN_SAMPLE)
+        for name in WORKER_DOWNLOAD_FIELDS:
+            if live.get(name) is None:
+                reasons.setdefault(name, REASON_NOT_IN_SAMPLE
+                                   if live.get("phase") == "downloading"
+                                   else REASON_NOT_APPLICABLE)
+        if live.get("validation") is None:
+            reasons["validation"] = REASON_NOT_APPLICABLE
+        if live.get("admission") is None:
+            reasons["admission"] = REASON_NOT_REPORTED
+        if assignment.get("basename") is None:
+            reasons["basename"] = REASON_NOT_REPORTED
+        return reasons
+
     def _bucket(self, status: str, attempts: int) -> str:
         if status == "complete": return "complete"
         if status in {"active", "admitted", "promoting"}: return "busy"
@@ -450,7 +537,11 @@ class InspectionServer:
                            "instance_id": runtime.get("engine_instance_id"),
                            "job_id": runtime.get("engine_job_id"), "pid": runtime.get("pid"),
                            "sample_at": runtime.get("sample_at"),
-                           "sample_age_s": runtime.get("sample_age_s")},
+                           "sample_sequence": runtime.get("sample_sequence"),
+                           "sample_age_s": runtime.get("sample_age_s"),
+                           "quality": (None if runtime.get("sample_age_s") is None else
+                                       "exact" if runtime["sample_age_s"] <= STALE_SAMPLE_AGE_S
+                                       else "unavailable")},
                 "bytes": {"received": byte_count, "resume_baseline": runtime.get("resume_baseline_bytes"),
                           "transfer_total": runtime.get("total_bytes") if runtime.get("total_bytes") is not None
                                              else (byte_count if status == "complete" else None),
@@ -468,6 +559,8 @@ class InspectionServer:
                                "promotion_status": status,
                                "staging_cleanup_at": None},
                 "unavailable": self._unavailable("not recorded by this controller version")}
+        data["unavailable_reason"] = self._item_reasons(
+            data, status, data["bucket"], runtime)
         return {"item": data}
 
     def _get_worker(self, db: sqlite3.Connection, parameters: dict[str, Any]) -> dict[str, Any]:
@@ -503,7 +596,8 @@ class InspectionServer:
                 and total >= received):
             eta = (total - received) / smoothed
         sample_age = worker.get("sample_age_s")
-        quality = "exact" if sample_age is not None and sample_age <= 5 else "unavailable"
+        quality = ("exact" if sample_age is not None and sample_age <= STALE_SAMPLE_AGE_S
+                   else "unavailable")
         assignment = {"run_id": self.run_id, "session_id": self.session_id,
                       "worker_id": worker_id, "item_id": item_id, "basename": basename,
                       "generation": worker.get("generation"),
@@ -511,7 +605,18 @@ class InspectionServer:
                       "attempt_number": worker.get("attempt_number"),
                       "engine_instance_id": worker.get("engine_instance_id"),
                       "engine_job_id": worker.get("engine_job_id"), "pid": worker.get("pid")}
+        live = {name: worker.get(name) for name in WORKER_SAMPLE_FIELDS
+                if name not in assignment}
+        live.update({"speed_bps": worker.get("speed_bps"), "smoothed_speed_bps": smoothed,
+                     "eta_seconds": eta,
+                     "last_progress_age_s": worker.get("last_progress_age_s"),
+                     "connections": worker.get("connections"),
+                     "validation": worker.get("validation"),
+                     "admission": worker.get("admission")})
+        reasons = self._worker_reasons(live, assignment)
+        speed, smoothed, eta = live["speed_bps"], live["smoothed_speed_bps"], live["eta_seconds"]
         return {"worker": {"worker_id": worker_id, "assignment": assignment,
+                            "unavailable_reason": reasons,
                             "phase": worker.get("phase"), "reason": worker.get("reason"),
                             "phase_elapsed_s": worker.get("phase_age_s"),
                             "attempt_elapsed_s": (max(0.0, now - worker["attempt_started"])
@@ -521,7 +626,7 @@ class InspectionServer:
                             "total_bytes": worker.get("total_bytes"),
                             "total_source": worker.get("total_source"),
                             "resume_baseline_bytes": worker.get("resume_baseline_bytes"),
-                            "speed_bps": worker.get("speed_bps"),
+                            "speed_bps": speed,
                             "smoothed_speed_bps": smoothed,
                             "eta_seconds": eta,
                             "connections": worker.get("connections"),

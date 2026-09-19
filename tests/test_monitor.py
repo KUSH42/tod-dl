@@ -31,7 +31,9 @@ from monitor import (QUEUE_EXPORT_FIELDS, SnapshotError, activity_segments, coll
                      lifecycle_style, select_snapshot, worker_phase_label,
                      truncate_filename, SpeedTrend, disk_status, progress_status,
                      screen_summary, validate_snapshot, detail_bytes, item_details_text,
-                     worker_details_text, format_retry_deadline, queue_retry_status,
+                     worker_details_text, format_retry_deadline, item_details_model,
+                     worker_details_model, render_detail, detail_grid_lines, detail_reason,
+                     DetailField, DetailSection, UNAVAILABLE_REASONS, short_item_id, queue_retry_status,
                      queue_row_cells, queue_header_text, queue_export_row,
                      middle_truncate, short_item_id, worker_item_cell,
                      worker_progress_text, worker_rate_cells,
@@ -1074,6 +1076,7 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(detail_bytes(None), "? (not recorded)")
 
     def test_item_details_render_covers_header_and_all_section_fields(self):
+        """Each recorded field must reach the operator, and a confirmed zero must differ from an unknown."""
         item = {
             "identity": {"basename": "report.pdf", "item_id": "b" * 64, "run_id": "run-one",
                         "logical_path": "/root/report.pdf", "storage_path": "/store/report.pdf",
@@ -1096,22 +1099,179 @@ class MonitorTests(unittest.TestCase):
                           "promotion_status": "blocked", "staging_cleanup_at": None},
             "candidate_path": "/staging/candidate/report.pdf",
         }
-        rendered = item_details_text(item, "2026-09-18T00:00:03Z", 7, "live")
-        header_line = rendered.splitlines()[1]
-        self.assertIn("report.pdf", header_line)
-        self.assertIn("State: review_required", header_line)
-        self.assertIn("Phase: validating", header_line)
-        self.assertIn("Freshness: live", header_line)
-        self.assertIn("Mapping reason: sanitized  Mapping version: v1", rendered)
-        self.assertIn("Blocking condition: awaiting operator review", rendered)
-        self.assertIn("Received: ? (not recorded)", rendered)  # unknown, not a confirmed zero
-        self.assertIn("Retained item bytes: 0 B (0 bytes)", rendered)  # confirmed zero, distinct
-        self.assertIn("Trusted expected size: 1000 B (1,000 bytes)", rendered)
-        self.assertIn("Processed bytes: 1000 B (1,000 bytes)", rendered)
-        self.assertIn("Recorded at: 2026-09-18T00:00:02Z", rendered)
-        self.assertIn("Mismatch reason: hash mismatch", rendered)
-        self.assertIn("Promotion: blocked", rendered)
-        self.assertIn("Candidate path: /staging/candidate/report.pdf", rendered)
+        model = item_details_model(item, "2026-09-18T00:00:03Z", 7, "live")
+        fields = {row.label: row.value for row in model if isinstance(row, DetailField)}
+        self.assertEqual(fields["Mapping reason"], "sanitized")
+        self.assertEqual(fields["Mapping version"], "v1")
+        self.assertEqual(fields["Blocking condition"], "awaiting operator review")
+        self.assertTrue(fields["Received"].startswith("?"))  # unknown, not a confirmed zero
+        self.assertEqual(fields["Retained item bytes"], "0 B (0 bytes)")  # confirmed zero, distinct
+        self.assertEqual(fields["Trusted expected size"], "1000 B (1,000 bytes)")
+        self.assertEqual(fields["Processed bytes"], "1000 B (1,000 bytes)")
+        self.assertEqual(fields["Recorded at"], "2026-09-18T00:00:02Z")
+        self.assertEqual(fields["Mismatch reason"], "hash mismatch")
+        self.assertEqual(fields["Promotion"], "blocked")
+        self.assertEqual(fields["Candidate path"], "/staging/candidate/report.pdf")
+
+    def test_detail_header_orders_subject_phase_freshness_read_and_revision(self):
+        """The first line must name the subject, so the operator knows what the view shows."""
+        item = {"identity": {"basename": "photo%203.PNG", "item_id": "a" * 64},
+                "state": {"bucket": "retry", "phase": "downloading"}}
+        worker = {"worker_id": 1, "phase": "downloading", "assignment": None}
+        with unittest.mock.patch.dict(os.environ, {"TZ": "TST-5"}):
+            time.tzset()
+            try:
+                item_line = item_details_text(item, "2026-09-19T12:21:12Z", 10350, "live"
+                                              ).splitlines()[0]
+                worker_line = worker_details_text(worker, "2026-09-19T12:21:12Z", 10350, None,
+                                                  "live").splitlines()[0]
+            finally:
+                time.tzset()
+        expected_item = ["photo 3.PNG", f"[{short_item_id('a' * 64)}]", "retry", "downloading",
+                         "live", "Read 17:21:12", "Rev 10350"]
+        position = 0
+        for part in expected_item:
+            position = item_line.index(part, position) + len(part)
+        position = 0
+        for part in ["Worker 1", "downloading", "live", "Read 17:21:12", "Rev 10350"]:
+            position = worker_line.index(part, position) + len(part)
+        self.assertTrue(item_line.rstrip().endswith("Rev 10350"))  # read metadata sits last
+
+    def test_detail_header_adds_a_line_when_the_dashboard_revision_differs(self):
+        """A stale dashboard must not pass for the detail read, so the difference is stated."""
+        lines = worker_details_text({"worker_id": 1, "assignment": None}, "read", 10350,
+                                    10344, "live").splitlines()
+        self.assertEqual(lines[1], "Dashboard revision 10344; details differ")
+
+    def test_every_grid_row_holds_one_label_cell_and_one_value_cell(self):
+        """A value such as `connect failed: timeout` must not split into two fields."""
+        worker = {"worker_id": 1, "phase": "connecting", "reason": "connect failed: timeout",
+                  "assignment": {"item_id": "i", "basename": "b"}}
+        model = worker_details_model(worker)
+        rows = [row for row in model if isinstance(row, DetailField)]
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertEqual(len(row), 3)
+            self.assertIsInstance(row.label, str)
+            self.assertIsInstance(row.value, str)
+        self.assertIn("connect failed: timeout", [row.value for row in rows])
+
+    def test_a_long_label_wraps_at_80_columns_and_loses_no_character(self):
+        """`Last payload progress` is 21 characters; the 18-column label cell must wrap it."""
+        row = DetailField("Last payload progress", "12s ago")
+        wide = [line[0][0].rstrip() for line in detail_grid_lines(row, 100)]
+        narrow = [line[0][0].rstrip() for line in detail_grid_lines(row, 80)]
+        self.assertEqual(wide, ["Last payload progress"])
+        self.assertGreater(len(narrow), 1)
+        self.assertEqual(" ".join(narrow), "Last payload progress")
+
+    def test_grid_stacks_the_label_above_the_value_below_80_columns(self):
+        """A 79-column terminal has no room for two columns, so every value stays readable."""
+        lines = detail_grid_lines(DetailField("Speed", "1.0 MiB/s"), 79)
+        self.assertEqual([line[-1][0] for line in lines], ["Speed", "1.0 MiB/s"])
+
+    def test_no_empty_line_appears_except_before_a_section_header(self):
+        """Blank lines mark structure; a conditional line must be omitted, not left empty."""
+        worker = {"worker_id": 1, "phase": "downloading", "last_progress_age_s": 5,
+                  "assignment": {"item_id": "i", "basename": "b"}}
+        for width in (100, 80, 60):
+            lines = render_detail(worker_details_model(worker, "read", 1), width).plain.split("\n")
+            headers = {"Assignment", "Activity", "Transfer", "Telemetry sample", "Admission",
+                       "Validation"}
+            for index, line in enumerate(lines):
+                if line == "":
+                    self.assertIn(lines[index + 1], headers)
+        self.assertNotIn("No progress", "\n".join(lines))
+
+    def test_unknown_values_render_a_reason_from_the_fixed_set_and_never_ago(self):
+        """`? ago` reads as a value; the reason must tell the operator why the value is missing."""
+        worker = {"worker_id": 1, "phase": "downloading", "assignment": {"item_id": "i"},
+                  "unavailable_reason": {"last_progress_age_s": "not in sample",
+                                         "pid": "unsupported by engine"}}
+        rendered = worker_details_text(worker)
+        self.assertIn("? (not in sample)", rendered)
+        self.assertIn("? (unsupported by engine)", rendered)
+        self.assertNotIn("? ago", rendered)
+        for row in worker_details_model(worker):
+            if isinstance(row, DetailField) and row.value.startswith("?"):
+                self.assertRegex(row.value, r"^\? \((%s)\)$" % "|".join(UNAVAILABLE_REASONS))
+        known = worker_details_model({**worker, "last_progress_age_s": 12})
+        self.assertIn("12s ago", [row.value for row in known if isinstance(row, DetailField)])
+
+    def test_a_reason_outside_the_fixed_set_is_replaced_by_the_default(self):
+        """The view must not show a reason the service was not allowed to send."""
+        self.assertEqual(detail_reason({"x": "because"}, "x"), "controller did not report")
+        self.assertEqual(detail_reason({"x": "not applicable"}, "x"), "not applicable")
+
+    def test_admission_shows_one_row_per_condition_or_next_eligible_start(self):
+        """Operators need each reported wait reason, and an honest gap when none is reported."""
+        base = {"worker_id": 1, "phase": "cooldown", "assignment": {"item_id": "i"}}
+        with_conditions = worker_details_model(
+            {**base, "admission": {"Worker cooldown": "12s", "Origin cooldown": "4s"}})
+        labels = [row.label for row in with_conditions if isinstance(row, DetailField)]
+        self.assertIn("Worker cooldown", labels)
+        self.assertIn("Origin cooldown", labels)
+        none = {row.label: row.value for row in worker_details_model(base)
+                if isinstance(row, DetailField)}
+        self.assertEqual(none["Next eligible start"], "? (controller did not report)")
+
+    def test_eta_renders_as_an_approximate_duration_not_a_raw_number(self):
+        """A raw 1144.03 cannot be read as time; the approximate marker keeps it honest."""
+        worker = {"worker_id": 1, "phase": "downloading", "eta_seconds": 1144.03,
+                  "assignment": {"item_id": "i"}}
+        fields = {row.label: row.value for row in worker_details_model(worker)
+                  if isinstance(row, DetailField)}
+        self.assertEqual(fields["ETA (approximate)"], "~19m 4s")
+
+    def test_stale_sample_reason_replaces_a_suppressed_live_value(self):
+        """A stale speed must not read as live, and the estimator must not claim warmup."""
+        worker = {"worker_id": 1, "phase": "downloading", "speed_bps": None,
+                  "estimator": "Estimating", "assignment": {"item_id": "i"},
+                  "unavailable_reason": {"speed_bps": "sample stale",
+                                         "eta_seconds": "sample stale"}}
+        fields = {row.label: row.value for row in worker_details_model(worker)
+                  if isinstance(row, DetailField)}
+        self.assertEqual(fields["Speed"], "? (sample stale)")
+        self.assertEqual(fields["ETA (approximate)"], "? (sample stale)")
+
+    def test_ages_carry_a_unit_and_telemetry_sample_is_dim_and_last_in_transfer(self):
+        """Diagnostic fields must recede and a bare `0` must not stand for seconds."""
+        worker = {"worker_id": 1, "phase": "downloading", "sample_age_s": 0,
+                  "sample_sequence": 4, "quality": "exact", "assignment": {"item_id": "i"}}
+        model = worker_details_model(worker)
+        titles = [row.title for row in model if isinstance(row, DetailSection)]
+        self.assertEqual(titles, ["Assignment", "Activity", "Transfer", "Telemetry sample",
+                                  "Admission", "Validation"])
+        sample = [row for row in model if isinstance(row, DetailField)
+                  and row.label in {"Sample sequence", "Sample age", "Quality"}]
+        self.assertTrue(all(row.dim for row in sample))
+        self.assertEqual({row.label: row.value for row in sample}["Sample age"], "0s")
+
+    def test_item_details_puts_the_telemetry_sample_at_the_end_of_bytes(self):
+        """Item details has no Transfer section, so the diagnostic rows follow Bytes."""
+        titles = [row.title for row in item_details_model({}) if isinstance(row, DetailSection)]
+        self.assertEqual(titles.index("Telemetry sample"), titles.index("Bytes") + 1)
+
+    def test_a_percent_encoded_basename_is_decoded_outside_identity_and_paths(self):
+        """The raw form is evidence and belongs only where the path is shown."""
+        item = {"identity": {"basename": "photo%203.PNG", "item_id": "a" * 64,
+                             "logical_path": "dir/photo%203.PNG"}}
+        model = item_details_model(item, "read", 1, "live")
+        text = render_detail(model, 100).plain
+        self.assertEqual(text.splitlines()[0].split("  ")[0], "photo 3.PNG")
+        identity_end = next(index for index, row in enumerate(model)
+                            if isinstance(row, DetailSection) and row.title == "State")
+        rest = render_detail(model[identity_end:], 100).plain
+        self.assertNotIn("%20", rest)
+        self.assertNotIn("%20", text.splitlines()[0])
+        self.assertIn("dir/photo%203.PNG", text)
+        worker = {"worker_id": 1, "assignment": {"item_id": "i", "basename": "a%0Ab"}}
+        self.assertIn("a\\x0ab", worker_details_text(worker))  # neutralized after decoding
+
+    def test_worker_details_have_no_source_section(self):
+        """Source stays in item details, so a worker screen can never show a source URL."""
+        worker = {"worker_id": 1, "phase": "downloading", "assignment": {"item_id": "i"}}
+        self.assertNotIn("Source", worker_details_text(worker))
 
     def test_worker_details_keep_assignment_identity_and_clear_idle_values(self):
         worker = {"worker_id": 2, "phase": "downloading", "last_progress_age_s": 60,
@@ -1125,17 +1285,16 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("No progress for 60s", rendered)
         self.assertIn("a<id>\\x1b[31m", rendered)
         self.assertNotIn("http://", rendered)
-        self.assertIn("\n\nSource\n", rendered)
-        self.assertIn("Source hidden", rendered)
         idle = worker_details_text({"worker_id": 2, "assignment": None,
                                     "reason": "Reason unavailable"})
         self.assertIn("No item assigned", idle)
-        self.assertNotIn("Received:", idle)
+        self.assertNotIn("Received", idle)
 
     def test_retry_deadline_hides_the_durable_epoch_value(self):
         self.assertEqual(format_retry_deadline(0), "Eligible; awaiting controller")
-        rendered = item_details_text({"retry_at": 0})
-        self.assertIn("Retry deadline: Eligible; awaiting controller", rendered)
+        fields = {row.label: row.value for row in item_details_model({"retry_at": 0})
+                  if isinstance(row, DetailField)}
+        self.assertEqual(fields["Retry deadline"], "Eligible; awaiting controller")
 
     def test_queue_retry_status_never_shows_a_countdown_for_exhausted_or_review(self):
         self.assertEqual(queue_retry_status("exhausted", 123456789), "Not eligible")

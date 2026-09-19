@@ -12,8 +12,8 @@ has stopped, and which items need attention. The dashboard follows the
 [reliable acquisition contract](SPEC-reliable-acquisition.md) and consumes the
 [telemetry contract](SPEC-download-telemetry.md).
 
-Use Textual as an optional monitor dependency, initially pinned to `8.2.8` in
-`requirements-monitor.txt`, the stable release verified on September 15, 2026.
+Use Textual as an optional monitor dependency, pinned to `8.2.8` in
+`requirements-monitor.txt`, the release the test suite runs against.
 Keep transfer and state modules usable with the standard library and existing
 external binaries.
 Use Textual's DataTable, ProgressBar, Sparkline, and bounded log widgets.

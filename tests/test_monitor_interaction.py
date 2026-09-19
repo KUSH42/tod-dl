@@ -290,34 +290,6 @@ class MonitorInteractionTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(app.screen.__class__.__name__, "WorkerDetails")
             self.assertEqual(commands, [])
 
-    async def test_stale_source_response_cannot_replace_a_newer_selection(self):
-        # A source-reveal reply that arrives after the worker moved on to a
-        # different item must be discarded, not applied to the screen -- a
-        # late race here would show one item's revealed source under
-        # another item's row, a real information-leak vector.
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            app, _server = self.make_app(
-                root, lambda: available_actions(), lambda request: {},
-                snapshot_value=snapshot_with_worker(),
-            )
-            async with app.run_test() as pilot:
-                await pilot.pause(0.3)
-                app.open_worker_details("1")
-                await pilot.pause(0.1)
-                screen = app.screen
-                self.assertEqual(screen.__class__.__name__, "WorkerDetails")
-                screen.displayed_item_id = "item-2"
-                screen.revealed = True
-                screen.source = None
-                screen.source_label = "Source hidden"
-                stale_response = {"data": {"item": {
-                    "source": "http://a.onion/should-not-appear",
-                    "source_label": "Source redacted"}}}
-                screen.apply_source("item-1", stale_response, None)
-                self.assertIsNone(screen.source)
-                self.assertEqual(screen.source_label, "Source hidden")
-
     async def test_control_state_polling_is_throttled_to_twice_per_second(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -523,7 +495,7 @@ class ItemDetailsInteractionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(app.screen.__class__.__name__, "ItemDetails")
                 text_one = app.screen.query_one("#item-details-text").content.plain
                 self.assertIn("dup.bin", text_one)
-                self.assertRegex(text_one.splitlines()[1], r"ID [0-9a-f]{10}")
+                self.assertRegex(text_one.splitlines()[0], r"\[[0-9a-f]{10}\]")
                 pane = app.query_one("#queue-pane")
                 previous_selection = pane.selected_item_id
                 await pilot.press("escape")
@@ -533,7 +505,7 @@ class ItemDetailsInteractionTests(unittest.IsolatedAsyncioTestCase):
                 await self.open_queue_row(pilot, 1)
                 text_two = app.screen.query_one("#item-details-text").content.plain
                 self.assertIn("dup.bin", text_two)
-                self.assertNotEqual(text_one.splitlines()[1], text_two.splitlines()[1])
+                self.assertNotEqual(text_one.splitlines()[0], text_two.splitlines()[0])
 
     async def test_section_headers_are_bold_without_a_fixed_foreground_color(self):
         # A fixed white foreground is invisible on a light terminal theme; the
@@ -1342,7 +1314,9 @@ class KeymapTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.press("s")
                     await pilot.pause(0.1)
                 self.assertNotIn("get_item", [call.args[2] for call in requests.call_args_list])
-                self.assertFalse(app.screen.revealed)
+                self.assertNotIn("s", {binding[0] if isinstance(binding, tuple) else binding.key
+                                       for binding in app.screen.BINDINGS})
+                self.assertNotIn("Source", app.screen.query_one("#worker-details-text").content.plain)
                 await pilot.press("escape")
                 await pilot.pause(0.1)
                 await self.open_item(pilot)
@@ -1586,6 +1560,113 @@ class KeymapTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause(0.1)
                 self.assertEqual(len(app.screen_stack), depth)
                 exits.assert_not_called()
+
+
+class DetailLayoutTests(unittest.IsolatedAsyncioTestCase):
+    """SPEC-console-detail-layout.md: the same fields must stay reachable at every width.
+
+    An operator on a narrow terminal must still scroll to every value, and the
+    service, not the view, must say why a value is missing.
+    """
+
+    make_item_app = ItemDetailsInteractionTests.make_item_app
+
+    def worker_app(self, root: Path, runtime: list):
+        database = build_item_database(root)
+        insert_item(database, "http://a.onion/deep/path/a-long-file-name.bin", 1,
+                    "deep/path/a-long-file-name.bin", status="active")
+        return self.make_item_app(root, database, runtime_provider=lambda: runtime,
+                                  snapshot_value=snapshot_with_worker())
+
+    async def test_narrow_and_stacked_layouts_keep_every_value_reachable(self):
+        """Wrapping must never drop a value; the pane scrolls to whatever does not fit."""
+        url = "http://a.onion/deep/path/a-long-file-name.bin"
+        runtime = [{"worker_id": 1, "url": url, "phase": "downloading",
+                    "received_bytes": 100, "total_bytes": 1000, "last_progress_age_s": 12,
+                    "sample_age_s": 0, "sample_sequence": 3}]
+        for columns in (100, 80, 60):
+            with tempfile.TemporaryDirectory() as temporary:
+                app = self.worker_app(Path(temporary), runtime)
+                async with app.run_test(size=(columns, 24)) as pilot:
+                    await pilot.pause(0.3)
+                    app.open_worker_details("1")
+                    await pilot.pause(0.4)
+                    screen = app.screen
+                    plain = screen.query_one("#worker-details-text").content.plain
+                    self.assertIn("a-long-file-name.bin", plain.replace("\n", "").replace(" ", ""))
+                    self.assertIn("12s ago", plain.replace("\n", " "))
+                    for line in plain.split("\n"):
+                        self.assertLessEqual(len(line), columns, (columns, line))
+                    pane = screen.query_one("#worker-details")
+                    self.assertGreaterEqual(pane.virtual_size.height,
+                                            len(plain.split("\n")))
+                    self.assertEqual(pane.styles.overflow_y, "auto")
+
+    async def test_resize_rerenders_the_grid_without_losing_the_screen(self):
+        """A resize from wide to stacked must change the layout, not reset the view."""
+        url = "http://a.onion/deep/path/a-long-file-name.bin"
+        runtime = [{"worker_id": 1, "url": url, "phase": "downloading",
+                    "last_progress_age_s": 12}]
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self.worker_app(Path(temporary), runtime)
+            async with app.run_test(size=(100, 24)) as pilot:
+                await pilot.pause(0.3)
+                app.open_worker_details("1")
+                await pilot.pause(0.4)
+                wide = app.screen.query_one("#worker-details-text").content.plain
+                await pilot.resize_terminal(60, 24)
+                await pilot.pause(0.3)
+                self.assertEqual(app.screen.__class__.__name__, "WorkerDetails")
+                stacked = app.screen.query_one("#worker-details-text").content.plain
+                self.assertNotEqual(wide, stacked)
+                self.assertIn("\nSpeed\n", stacked)
+
+    async def test_service_names_a_fixed_reason_for_each_unavailable_field(self):
+        """The view must not guess why a value is missing, so the service must say it."""
+        url = "http://a.onion/deep/path/a-long-file-name.bin"
+        runtime = [{"worker_id": 1, "url": url, "phase": "connecting"}]
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self.worker_app(Path(temporary), runtime)
+            async with app.run_test() as pilot:
+                await pilot.pause(0.3)
+                app.open_worker_details("1")
+                await pilot.pause(0.4)
+                worker = app.screen.worker
+                reasons = worker["unavailable_reason"]
+                self.assertEqual(reasons["received_bytes"], "not in sample")
+                self.assertEqual(reasons["speed_bps"], "not applicable")  # not downloading
+                self.assertEqual(reasons["admission"], "controller did not report")
+                self.assertTrue(set(reasons.values()) <= set(monitor.UNAVAILABLE_REASONS))
+
+    async def test_stale_sample_suppresses_live_speed_and_names_the_reason(self):
+        """A five-second-old speed must not show as live; the service marks it stale."""
+        url = "http://a.onion/deep/path/a-long-file-name.bin"
+        runtime = [{"worker_id": 1, "url": url, "phase": "downloading", "speed_bps": 5000,
+                    "sample_age_s": 9, "received_bytes": 10, "total_bytes": 100}]
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self.worker_app(Path(temporary), runtime)
+            async with app.run_test() as pilot:
+                await pilot.pause(0.3)
+                app.open_worker_details("1")
+                await pilot.pause(0.4)
+                worker = app.screen.worker
+                self.assertIsNone(worker["speed_bps"])
+                self.assertEqual(worker["unavailable_reason"]["speed_bps"], "sample stale")
+                self.assertIn("? (sample stale)",
+                              app.screen.query_one("#worker-details-text").content.plain)
+
+    async def test_worker_details_bind_r_only_to_the_no_op_notice(self):
+        """A retry key on a detail screen would send a command for the wrong context."""
+        url = "http://a.onion/deep/path/a-long-file-name.bin"
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self.worker_app(Path(temporary), [{"worker_id": 1, "url": url}])
+            async with app.run_test() as pilot:
+                await pilot.pause(0.3)
+                app.open_worker_details("1")
+                await pilot.pause(0.3)
+                bound = [b for b in app.screen._bindings.key_to_bindings.get("r", [])]
+                self.assertEqual([b.action for b in bound], ["disabled_control"])
+                self.assertNotIn("s", app.screen._bindings.key_to_bindings)
 
 
 if __name__ == "__main__":

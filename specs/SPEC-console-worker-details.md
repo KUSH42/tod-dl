@@ -10,9 +10,9 @@ labels, values, headers, and highlights under
 
 Planned changes to key bindings and field layout are in
 [SPEC-console-keymap.md](SPEC-console-keymap.md) and
-[SPEC-console-detail-layout.md](SPEC-console-detail-layout.md). Once
-implemented, they override the placement of sample age below, and each
-unavailable field carries an `unavailable_reason`.
+[SPEC-console-detail-layout.md](SPEC-console-detail-layout.md). They
+override the placement of sample age below, and each unavailable field
+carries an `unavailable_reason`.
 
 ## Entry and slot identity
 

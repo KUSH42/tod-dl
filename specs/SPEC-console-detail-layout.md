@@ -1,6 +1,6 @@
 # Specification: console detail layout
 
-Status: planned, September 19, 2026. This document defines the shared layout
+Status: implemented, September 19, 2026. This document defines the shared layout
 for the worker details and item details screens. It responds to findings H3,
 M3, M4, M5, M6, L1, L2, L3, and L4 in
 [docs/console-ui-audit-2026-09-19.md](../docs/console-ui-audit-2026-09-19.md).
@@ -19,16 +19,17 @@ The first line must identify the subject, not the read metadata. Worker
 details:
 
 ```text
-Worker 1  downloading  live       Read 17:21:12Z  Rev 10350
+Worker 1  downloading  live       Read 17:21:12  Rev 10350
 ```
 
 Item details:
 
 ```text
-photo 3.PNG  [f53957ba3f]  retry  downloading  live       Read 17:21:12Z  Rev 10350
+photo 3.PNG  [f53957ba3f]  retry  downloading  live       Read 17:21:12  Rev 10350
 ```
 
-In the item header, `retry` is the item's display bucket, as defined in
+The read time renders in local time with no zone marker, as
+[SPEC-console-visual-style.md](SPEC-console-visual-style.md) requires. In the item header, `retry` is the item's display bucket, as defined in
 [SPEC-console-queue.md](SPEC-console-queue.md). Render the subject bold, the
 phase and freshness as text labels, and the
 read metadata right-aligned and dim. When the detail revision differs from
@@ -39,14 +40,17 @@ body section.
 ## Two-column field grid
 
 Each section must render as a grid of one field per row: a dim label column
-of fixed width 24, then a default-style value column. Do not place two
+of fixed width 24 that includes a two-column gap, then a default-style
+value column. Do not place two
 fields on one line. Section headers stay bold with one blank line before
 each; no other blank lines appear in the body. A conditional line such as
 **No progress for 60s** must be omitted, not rendered empty, when its
 condition is false.
 
-At 80 columns, the label column shrinks to 18 and values wrap. Below 80
-columns, the grid stacks label above value. A label longer than its column
+At 80 columns or fewer, the label column shrinks to 18 and values wrap. Below
+80 columns, the grid stacks label above value. The layout tier follows the
+terminal width. Wrapping reserves a two-column scrollbar gutter. A label
+longer than its column
 must wrap inside the label column at a word boundary. It must not be
 truncated. **Last payload progress** (21 characters) wraps at 80 columns.
 
